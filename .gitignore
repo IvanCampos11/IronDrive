@@ -12,3 +12,16 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# ── IronDrive ──────────────────────────────────────────────
+
+# File storage (personal libraries + shared spaces)
+data/
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
+# Environment variables (may contain secrets)
+.env
