@@ -18,7 +18,7 @@
 
 | Phase | Milestone | What | Status |
 |---|---|---|---|
-| **M1** | Project Scaffold | `Cargo.toml`, `Rocket.toml`, DB pool, migrations, `/health` | ⬜ Not started |
+| **M1** | Project Scaffold | `Cargo.toml`, `Rocket.toml`, DB pool, migrations, `/health` | ✅ Complete |
 | **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | ⬜ Not started |
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ⬜ Not started |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ⬜ Not started |
@@ -49,19 +49,19 @@
 
 ### M1 — Project Scaffold
 
-- [ ] Init Cargo project
-- [ ] `Cargo.toml` with all deps
-- [ ] `Rocket.toml` with sensible defaults
-- [ ] `.env.example` with `IRONDRIVE_SECRET_KEY` placeholder
-- [ ] `src/main.rs` — Rocket launch
-- [ ] `src/config.rs` — load config from env + Rocket.toml
-- [ ] `src/db.rs` — SQLx pool init
-- [ ] Create all migration SQL files
-- [ ] Run migrations on startup
-- [ ] `GET /health` endpoint
-- [ ] Create `data/libraries/`, `data/spaces/`, `data/.chunks/` dirs on startup
-- [ ] `src/errors.rs` — `AppError` + `Responder` impl
-- [ ] Verify server starts and `/health` returns 200
+- [x] Init Cargo project
+- [x] `Cargo.toml` with all deps
+- [x] `Rocket.toml` with sensible defaults
+- [x] `.env.example` with `IRONDRIVE_SECRET_KEY` placeholder
+- [x] `src/main.rs` — Rocket launch
+- [x] `src/config.rs` — load config from env + Rocket.toml
+- [x] `src/db.rs` — SQLx pool init
+- [x] Create all migration SQL files
+- [x] Run migrations on startup
+- [x] `GET /health` endpoint
+- [x] Create `data/libraries/`, `data/spaces/`, `data/.chunks/` dirs on startup
+- [x] `src/errors.rs` — `AppError` + `Responder` impl
+- [x] Verify server starts and `/health` returns 200
 
 ### M2 — Authentication
 

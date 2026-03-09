@@ -25,3 +25,6 @@ data/
 
 # Environment variables (may contain secrets)
 .env
+
+# Auto-generated secret key (contains master encryption passphrase)
+.secret_key
