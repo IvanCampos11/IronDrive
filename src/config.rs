@@ -15,19 +15,25 @@ pub struct AppConfig {
     ///   2. `{data_dir}/.secret_key` file (auto-generated on first boot)
     pub secret_key: String,
 
-    /// Root directory for file storage and the SQLite database.
+    /// Root directory for file storage (libraries, spaces, chunks).
     pub data_dir: String,
 
-    /// Default disk quota for new users (bytes). Default: 5 GB.
+    /// Directory for the SQLite database (separate from file storage).
+    pub db_dir: String,
+
+    /// Default disk quota for new users (bytes internally). Default: 5 GB.
+    /// Set via `IRONDRIVE_DEFAULT_QUOTA` — accepts human sizes like `"5 GB"`.
     pub default_quota_bytes: u64,
 
-    /// Maximum single-request upload size (bytes). Default: 5 GB.
+    /// Maximum single-request upload size (bytes internally). Default: 5 GB.
+    /// Set via `IRONDRIVE_MAX_UPLOAD` — accepts human sizes like `"5 GB"`.
     pub max_upload_bytes: u64,
 
     /// Session token lifetime (hours). Default: 168 (7 days).
     pub session_expiry_hours: u64,
 
-    /// Chunk size for chunked transfers (bytes). Default: 8 MiB.
+    /// Chunk size for chunked transfers (bytes internally). Default: 8 MiB.
+    /// Set via `IRONDRIVE_CHUNK_SIZE` — accepts human sizes like `"8 MiB"`.
     pub chunk_size_bytes: u64,
 
     /// Hours before incomplete chunked uploads are cleaned up. Default: 24.
@@ -55,15 +61,17 @@ impl AppConfig {
     ///   3. Auto-generate a new key → write to `{data_dir}/.secret_key`
     pub fn from_env() -> Self {
         let data_dir = env_or("IRONDRIVE_DATA_DIR", "./data");
+        let db_dir = env_or("IRONDRIVE_DB_DIR", "./db");
         let secret_key = resolve_secret_key(&data_dir);
 
         Self {
             secret_key,
             data_dir,
-            default_quota_bytes: env_parse("IRONDRIVE_DEFAULT_QUOTA_BYTES", 5_368_709_120),
-            max_upload_bytes: env_parse("IRONDRIVE_MAX_UPLOAD_BYTES", 5_368_709_120),
+            db_dir,
+            default_quota_bytes: env_size("IRONDRIVE_DEFAULT_QUOTA", 5_368_709_120),
+            max_upload_bytes: env_size("IRONDRIVE_MAX_UPLOAD", 5_368_709_120),
             session_expiry_hours: env_parse("IRONDRIVE_SESSION_EXPIRY_HOURS", 168),
-            chunk_size_bytes: env_parse("IRONDRIVE_CHUNK_SIZE_BYTES", 8_388_608),
+            chunk_size_bytes: env_size("IRONDRIVE_CHUNK_SIZE", 8_388_608),
             chunk_upload_expiry_hours: env_parse("IRONDRIVE_CHUNK_UPLOAD_EXPIRY_HOURS", 24),
             max_parallel_chunks: env_parse("IRONDRIVE_MAX_PARALLEL_CHUNKS", 4),
             integrity_scan_enabled: env_parse("IRONDRIVE_INTEGRITY_SCAN_ENABLED", true),
@@ -87,6 +95,11 @@ impl AppConfig {
     /// Returns the path to the chunks staging directory.
     pub fn chunks_dir(&self) -> String {
         format!("{}/.chunks", self.data_dir)
+    }
+
+    /// Returns the SQLite connection URL for the database.
+    pub fn db_url(&self) -> String {
+        format!("sqlite:{}/irondrive.db?mode=rwc", self.db_dir)
     }
 }
 
@@ -212,5 +225,113 @@ where
             .parse()
             .unwrap_or_else(|e| panic!("{key} is set but could not be parsed: {e}")),
         Err(_) => default,
+    }
+}
+
+/// Read an env var as a human-friendly size string and return bytes, or use
+/// a default (already in bytes).
+///
+/// Accepted formats (case-insensitive, optional space between number and unit):
+///   - Plain number: `"8388608"` → parsed as bytes
+///   - Bytes:   `"500 B"`
+///   - KB / KiB: `"500 KB"`, `"512 KiB"`
+///   - MB / MiB: `"100 MB"`, `"8 MiB"`
+///   - GB / GiB: `"5 GB"`, `"2 GiB"`
+///   - TB / TiB: `"1 TB"`, `"1 TiB"`
+///
+/// `KB`, `MB`, `GB`, `TB` use **binary** (1024-based) multipliers — matching
+/// how virtually every OS, tool, and config file uses them in practice.
+/// The explicit `KiB`/`MiB`/`GiB`/`TiB` forms also work and are identical.
+///
+/// # Panics
+/// Panics if the env var is set but the value cannot be parsed.
+fn env_size(key: &str, default: u64) -> u64 {
+    match env::var(key) {
+        Ok(val) => {
+            parse_size(&val).unwrap_or_else(|| panic!("{key}={val} — could not parse as a size"))
+        }
+        Err(_) => default,
+    }
+}
+
+/// Parse a human-readable size string into bytes.
+///
+/// Returns `None` if the string is not a valid size.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+
+    // Fast path: plain integer (raw bytes).
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+
+    // Split into numeric part and unit suffix.
+    let pos = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+
+    let num_str = s[..pos].trim();
+    let unit_str = s[pos..].trim();
+
+    let num: f64 = num_str.parse().ok()?;
+    if num < 0.0 {
+        return None;
+    }
+
+    let multiplier: u64 = match unit_str.to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kb" | "kib" | "k" => 1024,
+        "mb" | "mib" | "m" => 1024 * 1024,
+        "gb" | "gib" | "g" => 1024 * 1024 * 1024,
+        "tb" | "tib" | "t" => 1024 * 1024 * 1024 * 1024,
+        _ => return None,
+    };
+
+    Some((num * multiplier as f64) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_size_plain_bytes() {
+        assert_eq!(parse_size("8388608"), Some(8_388_608));
+        assert_eq!(parse_size("0"), Some(0));
+    }
+
+    #[test]
+    fn parse_size_with_units() {
+        assert_eq!(parse_size("5 GB"), Some(5 * 1024 * 1024 * 1024));
+        assert_eq!(parse_size("5GB"), Some(5 * 1024 * 1024 * 1024));
+        assert_eq!(parse_size("5 GiB"), Some(5 * 1024 * 1024 * 1024));
+        assert_eq!(parse_size("8 MiB"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("8MiB"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("8 MB"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("512 KB"), Some(512 * 1024));
+        assert_eq!(parse_size("1 TB"), Some(1024 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_size_case_insensitive() {
+        assert_eq!(parse_size("5 gb"), Some(5 * 1024 * 1024 * 1024));
+        assert_eq!(parse_size("5 Gb"), Some(5 * 1024 * 1024 * 1024));
+        assert_eq!(parse_size("8 mib"), Some(8 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_size_fractional() {
+        assert_eq!(
+            parse_size("1.5 GB"),
+            Some((1.5 * 1024.0 * 1024.0 * 1024.0) as u64)
+        );
+        assert_eq!(parse_size("0.5 MB"), Some((0.5 * 1024.0 * 1024.0) as u64));
+    }
+
+    #[test]
+    fn parse_size_invalid() {
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("abc"), None);
+        assert_eq!(parse_size("5 XB"), None);
     }
 }

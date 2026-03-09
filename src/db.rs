@@ -8,7 +8,7 @@ pub type DbPool = SqlitePool;
 
 /// Create a SQLite connection pool from a database URL string.
 ///
-/// The URL should look like `sqlite:data/irondrive.db?mode=rwc`.
+/// The URL should look like `sqlite:db/irondrive.db?mode=rwc`.
 /// This function is framework-free and testable — it takes a plain string,
 /// not a Rocket config object.
 pub async fn init_pool(db_url: &str) -> Result<DbPool, sqlx::Error> {

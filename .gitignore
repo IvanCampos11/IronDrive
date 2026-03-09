@@ -18,6 +18,9 @@ Cargo.lock
 # File storage (personal libraries + shared spaces)
 data/
 
+# SQLite database directory
+db/
+
 # SQLite database files
 *.db
 *.db-shm

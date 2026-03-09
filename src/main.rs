@@ -23,7 +23,7 @@ async fn rocket() -> _ {
 
     // Load app config from environment
     let app_config = config::AppConfig::from_env();
-    tracing::info!(data_dir = %app_config.data_dir, "IronDrive starting up");
+    tracing::info!(data_dir = %app_config.data_dir, db_dir = %app_config.db_dir, "IronDrive starting up");
 
     // Build Rocket instance
     rocket::build()
@@ -43,8 +43,15 @@ async fn rocket() -> _ {
                 tracing::info!(dir = %dir, "Ensured data directory exists");
             }
 
+            // Ensure database directory exists (separate from file storage)
+            let db_dir = &cfg.db_dir;
+            tokio::fs::create_dir_all(db_dir)
+                .await
+                .unwrap_or_else(|e| panic!("Failed to create database directory {db_dir}: {e}"));
+            tracing::info!(dir = %db_dir, "Ensured database directory exists");
+
             // Initialize database pool and run migrations
-            let db_url = format!("sqlite:{data_dir}/irondrive.db?mode=rwc");
+            let db_url = cfg.db_url();
             let pool = db::init_pool(&db_url)
                 .await
                 .expect("Failed to initialize database pool");
