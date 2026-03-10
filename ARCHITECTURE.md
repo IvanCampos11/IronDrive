@@ -125,7 +125,7 @@ The short version: the DB knows about users, permissions, and keys. The filesyst
 
 ```
 ┌─────────────────────────┬────────────────────────────────────────┐
-│ DATABASE (SQLite)       │ FILESYSTEM (data/)                     │
+│ DATABASE (SQLite, db/)  │ FILESYSTEM (data/)                     │
 ├─────────────────────────┼────────────────────────────────────────┤
 │ Users                   │ Actual files and folders               │
 │ Personal library records│ File contents (always encrypted)       │
@@ -155,7 +155,7 @@ The short version: the DB knows about users, permissions, and keys. The filesyst
 - **No sync headaches** — Can't have DB and disk disagree if only one of them tracks files.
 - **Admin can browse** — The directory tree is visible (contents are encrypted, but structure is there).
 - **No orphans** — No phantom DB records pointing to missing files or vice versa.
-- **Dead-simple backups** — Copy `data/` and the SQLite file. That's the whole backup.
+- **Dead-simple backups** — Copy `data/` and `db/`. That's the whole backup.
 
 ---
 
@@ -439,6 +439,9 @@ irondrive/
 ├── Rocket.toml                        # Rocket config (port, limits, TLS)
 ├── .env.example                       # Environment variable template
 ├── ARCHITECTURE.md                    # This document
+│
+├── db/                                # SQLite database (gitignored)
+│   └── irondrive.db                   # Main database file
 │
 ├── migrations/                        # SQLx database migrations
 │   ├── 001_create_users.sql
@@ -1068,7 +1071,7 @@ Client                                  Server
 
 | Setting | Default | Description |
 |---|---|---|
-| `IRONDRIVE_CHUNK_SIZE_BYTES` | `8388608` (8 MiB) | Default chunk size for uploads/downloads |
+| `IRONDRIVE_CHUNK_SIZE` | `8 MiB` | Default chunk size for uploads/downloads |
 | `IRONDRIVE_CHUNK_UPLOAD_EXPIRY_HOURS` | `24` | Incomplete uploads are auto-cleaned after this |
 | `IRONDRIVE_MAX_PARALLEL_CHUNKS` | `4` | Suggested max parallel chunk uploads per session |
 
@@ -1606,7 +1609,7 @@ file = "5 GiB"
 data-form = "5 GiB"
 
 [default.databases.irondrive]
-url = "sqlite:data/irondrive.db?mode=rwc"
+url = "sqlite:db/irondrive.db?mode=rwc"
 ```
 
 ### `.env.example`
@@ -1621,20 +1624,24 @@ url = "sqlite:data/irondrive.db?mode=rwc"
 # Generate with: openssl rand -base64 44
 IRONDRIVE_SECRET_KEY=CHANGE-ME-generate-a-random-256-bit-key-here
 
-# Data directory (where files and SQLite DB are stored)
+# Data directory (where files are stored)
 IRONDRIVE_DATA_DIR=./data
 
-# Default quota for new users (in bytes, default 5 GB)
-IRONDRIVE_DEFAULT_QUOTA_BYTES=5368709120
+# Database directory (where the SQLite DB is stored, separate from file storage)
+IRONDRIVE_DB_DIR=./db
 
-# Maximum single file upload size (in bytes, default 5 GB)
-IRONDRIVE_MAX_UPLOAD_BYTES=5368709120
+# Default quota for new users (default 5 GB)
+# Accepts human-friendly sizes: "5 GB", "500 MB", "1.5 TB", etc.
+IRONDRIVE_DEFAULT_QUOTA=5 GB
+
+# Maximum single file upload size (default 5 GB)
+IRONDRIVE_MAX_UPLOAD=5 GB
 
 # Session expiry (in hours, default 7 days)
 IRONDRIVE_SESSION_EXPIRY_HOURS=168
 
 # Chunked transfer settings
-IRONDRIVE_CHUNK_SIZE_BYTES=8388608           # 8 MiB default chunk size
+IRONDRIVE_CHUNK_SIZE=8 MiB                  # Default chunk size for uploads/downloads
 IRONDRIVE_CHUNK_UPLOAD_EXPIRY_HOURS=24       # Incomplete uploads cleaned after 24h
 IRONDRIVE_MAX_PARALLEL_CHUNKS=4              # Suggested max parallel chunks per session
 

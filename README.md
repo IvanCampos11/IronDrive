@@ -1,8 +1,8 @@
 # IronDrive
 
-Self-hosted file storage and sharing — think Google Drive / ownCloud / Seafile, but built in **Rust** on top of **Rocket**.
+Self-hosted file storage and sharing, think Google Drive / ownCloud / Seafile, but built in **Rust** on top of **Rocket**.
 
-> ⚠️ **Heads up — this project is in very early development.** Things will break, APIs will change, and nothing is production-ready. If you're here, you're watching it get built in real time. Don't run this with data you care about yet.
+> ⚠️ **This project is in very early development.** Things will break, APIs will change, and nothing is production-ready. Don't run this with data you care about yet.
 
 ## What It Does (Planned)
 

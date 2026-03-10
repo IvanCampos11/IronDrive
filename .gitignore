@@ -18,6 +18,9 @@ Cargo.lock
 # File storage (personal libraries + shared spaces)
 data/
 
+# SQLite database directory
+db/
+
 # SQLite database files
 *.db
 *.db-shm
@@ -25,3 +28,6 @@ data/
 
 # Environment variables (may contain secrets)
 .env
+
+# Auto-generated secret key (contains master encryption passphrase)
+.secret_key
