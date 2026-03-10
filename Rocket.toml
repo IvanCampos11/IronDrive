@@ -6,6 +6,3 @@ cli_colors = false
 [default.limits]
 file = "5 GiB"
 data-form = "5 GiB"
-
-[default.databases.irondrive]
-url = "sqlite:db/irondrive.db?mode=rwc"
