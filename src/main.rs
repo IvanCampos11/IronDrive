@@ -8,6 +8,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 mod config;
 mod db;
 mod errors;
+mod models;
 mod routes;
 
 // ── Startup Helpers ──────────────────────────────────────────────────────────
