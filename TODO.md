@@ -1,6 +1,6 @@
 # IronDrive — TODO
 
-> **Last Updated:** 2025-01-09
+> **Last Updated:** 2026-03-10
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ---
@@ -19,7 +19,7 @@
 | Phase | Milestone | What | Status |
 |---|---|---|---|
 | **M1** | Project Scaffold | `Cargo.toml`, `Rocket.toml`, DB pool, migrations, `/health` | ✅ Complete |
-| **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | ⬜ Not started |
+| **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | 🔨 In progress |
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ⬜ Not started |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ⬜ Not started |
 | **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ⬜ Not started |
@@ -65,12 +65,12 @@
 
 ### M2 — Authentication
 
-- [ ] `src/models/user.rs` — User struct, create, find by username/email
-- [ ] `src/models/session.rs` — Session struct, create, validate, delete
+- [x] `src/models/user.rs` — User struct, create, find by username/email
+- [x] `src/models/session.rs` — Session struct, create, validate, delete
 - [ ] `src/utils/crypto.rs` — Argon2 password hash + verify
 - [ ] `src/services/auth_service.rs` — register, login, logout
-- [ ] `src/guards/auth_guard.rs` — `AuthenticatedUser` request guard
-- [ ] `src/guards/admin_guard.rs` — `AdminUser` request guard
+- [x] `src/guards/auth_guard.rs` — `AuthenticatedUser` request guard
+- [x] `src/guards/admin_guard.rs` — `AdminUser` request guard
 - [ ] `src/routes/auth.rs` — register, login, logout endpoints
 - [ ] Integration tests for auth flow
 
