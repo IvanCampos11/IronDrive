@@ -77,6 +77,7 @@ pub async fn login(
     username: &str,
     password: &str,
 ) -> Result<LoginResult, AppError> {
+    let username = username.trim();
     let lookup = User::get_password_hash(pool, username).await?;
 
     let (user_id, stored_hash) = match lookup {
@@ -524,6 +525,22 @@ mod tests {
 
         assert!(!result.token.is_empty());
         assert!(!result.setup_complete);
+        assert_eq!(result.user.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn login_trims_username_whitespace() {
+        let pool = test_pool().await;
+        let config = test_config();
+
+        register(&pool, &config, "alice", "alice@example.com", "password123")
+            .await
+            .unwrap();
+
+        let result = login(&pool, &config, "  alice  ", "password123")
+            .await
+            .unwrap();
+
         assert_eq!(result.user.username, "alice");
     }
 
