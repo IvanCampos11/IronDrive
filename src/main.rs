@@ -175,7 +175,7 @@ fn catch_500() -> CatcherJsonBody {
     )
 }
 
-/// Dirs, DB pool, migrations, master key bootstrap.
+/// Dirs, DB pool, migrations, master key bootstrap, unlock state.
 async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::Build> {
     let cfg = rocket
         .state::<config::AppConfig>()
@@ -191,5 +191,8 @@ async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket
         .expect("Failed to bootstrap master encryption key");
     tracing::info!("Master encryption key ready");
 
-    rocket.manage(pool).manage(master_key)
+    let unlock_state = services::unlock_state::UnlockState::new();
+    tracing::info!("UnlockState initialized (no keys loaded yet)");
+
+    rocket.manage(pool).manage(master_key).manage(unlock_state)
 }

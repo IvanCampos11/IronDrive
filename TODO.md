@@ -1,6 +1,6 @@
 # IronDrive — TODO
 
-> **Last Updated:** 2026-03-11
+> **Last Updated:** 2026-03-12
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ---
@@ -20,7 +20,7 @@
 |---|---|---|---|
 | **M1** | Project Scaffold | `Cargo.toml`, `Rocket.toml`, DB pool, migrations, `/health` | ✅ Complete |
 | **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | ✅ Complete |
-| **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | 🔨 In progress |
+| **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ✅ Complete |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ⬜ Not started |
 | **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ⬜ Not started |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ⬜ Not started |
@@ -80,17 +80,29 @@
   - [x] Subsequent boots: load + decrypt master key into memory
   - [x] `MasterKey` managed as Rocket state, zeroized on drop via `zeroize` crate
   - [x] Race-safe first boot (`INSERT OR IGNORE` + verify)
-- [ ] Per-library/space data key generation
-- [ ] Data key wrapping: encrypt data key with master key → `encrypted_data_key`
-- [ ] Data key unwrapping: decrypt `encrypted_data_key` with master key
-- [ ] AES-256-GCM file encryption (nonce + ciphertext + tag + checksum format)
-- [ ] AES-256-GCM file decryption with checksum verification
-- [ ] SHA-256 checksum computation (streaming, async)
-- [ ] `src/services/unlock_state.rs` — in-memory key store (dashmap)
-- [ ] Unit tests: encrypt → decrypt roundtrip
-- [ ] Unit tests: key wrapping/unwrapping
-- [ ] Unit tests: checksum generation + verification
-- [ ] Unit tests: corruption detection (tampered file → checksum mismatch)
+- [x] Per-library/space data key generation
+- [x] Data key wrapping: encrypt data key with master key → `encrypted_data_key`
+- [x] Data key unwrapping: decrypt `encrypted_data_key` with master key
+- [x] AES-256-GCM file encryption (nonce + ciphertext + tag + checksum format)
+  - [x] `encrypt_file_bytes()` — in-memory encrypt to on-disk format
+  - [x] `encrypt_and_write_file()` — encrypt + write to disk with optional write-verify pass
+- [x] AES-256-GCM file decryption with checksum verification
+  - [x] `decrypt_file_bytes()` — in-memory decrypt with SHA-256 checksum verification
+  - [x] `read_and_decrypt_file()` — read from disk + decrypt
+  - [x] `verify_file_integrity()` — returns `IntegrityStatus` enum (Ok / ChecksumMismatch / DecryptionFailed)
+- [x] SHA-256 checksum computation (streaming, async)
+  - [x] `sha256_bytes()` — in-memory hash
+  - [x] `sha256_file()` — streaming async file hash (64 KiB buffer)
+- [x] `src/services/unlock_state.rs` — in-memory key store (dashmap)
+  - [x] Separate `DashMap` for libraries and spaces
+  - [x] Insert / get / remove / is_unlocked / count for both
+  - [x] `clear_all()` for shutdown
+  - [x] `ZeroVec` wrapper zeroizes key bytes on drop
+  - [x] Integrated into Rocket managed state at startup
+- [x] Unit tests: encrypt → decrypt roundtrip
+- [x] Unit tests: key wrapping/unwrapping
+- [x] Unit tests: checksum generation + verification
+- [x] Unit tests: corruption detection (tampered file → checksum mismatch)
 
 ### M4 — Setup Wizard + Library
 
