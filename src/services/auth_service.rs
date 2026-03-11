@@ -77,8 +77,8 @@ pub async fn login(
     username: &str,
     password: &str,
 ) -> Result<LoginResult, AppError> {
-    let username = username.trim();
-    let lookup = User::get_password_hash(pool, username).await?;
+    let username = normalize_username(username)?;
+    let lookup = User::get_password_hash(pool, &username).await?;
 
     let (user_id, stored_hash) = match lookup {
         Some(pair) => pair,
