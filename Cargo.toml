@@ -33,6 +33,7 @@ mime_guess = "2"                 # MIME type from file extension
 dotenvy = "0.15"                 # Load .env files
 async-trait = "0.1"              # Async trait support
 dashmap = "6"                    # Concurrent map for UnlockState
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 tempfile = "3"
