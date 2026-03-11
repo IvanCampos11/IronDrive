@@ -3,14 +3,9 @@ use sqlx::SqlitePool;
 use std::str::FromStr;
 use tracing::info;
 
-/// Type alias used throughout the app.
 pub type DbPool = SqlitePool;
 
 /// Create a SQLite connection pool from a database URL string.
-///
-/// The URL should look like `sqlite:db/irondrive.db?mode=rwc`.
-/// This function is framework-free and testable — it takes a plain string,
-/// not a Rocket config object.
 pub async fn init_pool(db_url: &str) -> Result<DbPool, sqlx::Error> {
     info!(url = %db_url, "Connecting to database");
 
@@ -24,7 +19,6 @@ pub async fn init_pool(db_url: &str) -> Result<DbPool, sqlx::Error> {
         .connect_with(options)
         .await?;
 
-    // Enable foreign keys (SQLite has them off by default)
     sqlx::query("PRAGMA foreign_keys = ON;")
         .execute(&pool)
         .await?;
@@ -32,16 +26,12 @@ pub async fn init_pool(db_url: &str) -> Result<DbPool, sqlx::Error> {
     Ok(pool)
 }
 
-/// A migration file read from disk: its filename and full SQL content.
 struct MigrationFile {
     filename: String,
     sql: String,
 }
 
-/// Read and sort all `.sql` files from the `migrations/` directory.
-///
-/// This performs blocking filesystem I/O, so it must be called from a
-/// blocking-safe context (e.g. inside `spawn_blocking`).
+/// Read and sort all `.sql` files from `migrations/`. Blocking I/O.
 fn read_migration_files() -> Result<Vec<MigrationFile>, std::io::Error> {
     let migrations_dir = std::path::Path::new("migrations");
 
@@ -79,18 +69,9 @@ fn read_migration_files() -> Result<Vec<MigrationFile>, std::io::Error> {
     Ok(migrations)
 }
 
-/// Run all SQL migration files from the `migrations/` directory in order.
-///
-/// We use a simple hand-rolled runner instead of `sqlx::migrate!()` so we can
-/// keep plain `.sql` files (no special naming convention required beyond numeric
-/// prefix ordering). Each file is executed and tracked in a `_migrations`
-/// bookkeeping table so it is never re-applied.
-///
-/// Returns an error if the `migrations/` directory does not exist (fail-fast),
-/// since starting without a schema would lead to hard-to-diagnose runtime
-/// failures.
+/// Run all `.sql` files from `migrations/` in order, tracking applied files
+/// in a `_migrations` table so they're never re-applied.
 pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
-    // Ensure the bookkeeping table exists
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS _migrations (
             filename TEXT PRIMARY KEY,
@@ -100,8 +81,6 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    // Read migration files on a blocking thread so we don't stall the
-    // Tokio runtime with std::fs calls.
     let migrations = tokio::task::spawn_blocking(read_migration_files)
         .await
         .map_err(|e| sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
@@ -110,7 +89,6 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
     let mut applied_count: usize = 0;
 
     for migration in &migrations {
-        // Check if already applied
         let already_applied: Option<(String,)> =
             sqlx::query_as("SELECT filename FROM _migrations WHERE filename = ?")
                 .bind(&migration.filename)
@@ -123,10 +101,6 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
 
         info!(file = %migration.filename, "Applying migration");
 
-        // Execute the full migration script using raw_sql, which handles
-        // multi-statement files natively without naive semicolon splitting.
-        // This is safe for triggers, functions, and string literals that
-        // contain semicolons.
         sqlx::raw_sql(&migration.sql)
             .execute(pool)
             .await
@@ -139,7 +113,6 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
                 e
             })?;
 
-        // Record as applied
         sqlx::query("INSERT INTO _migrations (filename) VALUES (?)")
             .bind(&migration.filename)
             .execute(pool)

@@ -1,8 +1,11 @@
+pub mod auth;
 pub mod health;
 
 use rocket::Route;
 
-/// Returns all routes to be mounted on the Rocket instance.
 pub fn all_routes() -> Vec<Route> {
-    health::routes()
+    let mut routes = Vec::new();
+    routes.extend(health::routes());
+    routes.extend(auth::routes());
+    routes
 }
