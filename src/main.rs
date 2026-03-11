@@ -103,8 +103,13 @@ fn catcher_response(status: Status, description: &str) -> CatcherJsonBody {
             description: description.to_string(),
         },
     };
-    let json = serde_json::to_string(&body)
-        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string());
+    let json = serde_json::to_string(&body).unwrap_or_else(|_| {
+        format!(
+            r#"{{"error":{{"status":{},"reason":"{}","description":"serialization failed"}}}}"#,
+            status.code,
+            status.reason_lossy()
+        )
+    });
     CatcherJsonBody { status, json }
 }
 

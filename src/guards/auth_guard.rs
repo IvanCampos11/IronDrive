@@ -96,16 +96,15 @@ pub(crate) fn extract_bearer_token(request: &Request<'_>) -> Option<String> {
     let header_value = request.headers().get_one("Authorization")?;
     let trimmed = header_value.trim();
 
-    let token_part = if let Some(rest) = trimmed.strip_prefix("Bearer ") {
-        rest
-    } else if let Some(rest) = trimmed.strip_prefix("bearer ") {
-        rest
-    } else if trimmed.len() > 7 && trimmed[..7].eq_ignore_ascii_case("bearer ") {
-        &trimmed[7..]
-    } else {
-        return None;
-    };
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let scheme = parts.next()?;
+    let rest = parts.next().unwrap_or("");
 
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+
+    let token_part = rest;
     let token = token_part.trim();
     if token.is_empty() {
         return None;
@@ -237,10 +236,9 @@ mod tests {
 
     #[test]
     fn rejects_token_with_null_byte() {
-        let mut token = "a".repeat(TOKEN_MIN_LEN);
-        unsafe {
-            token.as_bytes_mut()[5] = 0;
-        }
+        let mut bytes = vec![b'a'; TOKEN_MIN_LEN];
+        bytes[5] = 0;
+        let token = String::from_utf8(bytes).unwrap();
         assert!(!is_valid_token_format(&token));
     }
 
