@@ -12,7 +12,7 @@ const MASTER_KEY_DB_KEY: &str = "master_key_encrypted";
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const TAG_LEN: usize = 16;
-const WRAPPED_BLOB_LEN: usize = NONCE_LEN + KEY_LEN + TAG_LEN;
+const WRAPPED_KEY_LEN: usize = NONCE_LEN + KEY_LEN + TAG_LEN;
 
 /// Decrypted master key, held in Rocket managed state for the server's lifetime.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -26,6 +26,22 @@ impl MasterKey {
     }
 }
 
+/// Decrypted per-library/space data key used for file encryption.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct DataKey {
+    key: [u8; KEY_LEN],
+}
+
+impl DataKey {
+    pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
+        &self.key
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Master key bootstrap
+// ---------------------------------------------------------------------------
+
 /// First boot: generate master key, encrypt with IRONDRIVE_SECRET_KEY, store in DB.
 /// Subsequent boots: load from DB and decrypt.
 pub async fn bootstrap_master_key(
@@ -37,12 +53,13 @@ pub async fn bootstrap_master_key(
     let result = match load_encrypted_master_key(pool).await? {
         Some(blob) => {
             tracing::info!("Master key found in database — decrypting");
-            unwrap_master_key(&wrapping_key, &blob)
+            let raw = aes_gcm_unwrap(&wrapping_key, &blob)?;
+            Ok(MasterKey { key: raw })
         }
         None => {
             tracing::info!("No master key in database — generating a new one");
             let key = generate_master_key();
-            let blob = wrap_master_key(&wrapping_key, &key)?;
+            let blob = aes_gcm_wrap(&wrapping_key, &key.key)?;
             store_encrypted_master_key(pool, &blob).await?;
             tracing::info!("Master key generated and stored");
             Ok(key)
@@ -53,7 +70,85 @@ pub async fn bootstrap_master_key(
     result
 }
 
-/// Decode base64 IRONDRIVE_SECRET_KEY into a 32-byte AES key.
+// ---------------------------------------------------------------------------
+// Data key operations
+// ---------------------------------------------------------------------------
+
+/// Generate a random 256-bit data key for a new library or space.
+pub fn generate_data_key() -> DataKey {
+    let mut key = [0u8; KEY_LEN];
+    OsRng.fill_bytes(&mut key);
+    DataKey { key }
+}
+
+/// Encrypt a data key with the master key. Returns the wrapped blob (nonce ‖ ciphertext ‖ tag).
+pub fn wrap_data_key(master_key: &MasterKey, data_key: &DataKey) -> Result<Vec<u8>, AppError> {
+    aes_gcm_wrap(&master_key.key, &data_key.key)
+}
+
+/// Decrypt a data key from its wrapped blob using the master key.
+pub fn unwrap_data_key(master_key: &MasterKey, blob: &[u8]) -> Result<DataKey, AppError> {
+    let raw = aes_gcm_unwrap(&master_key.key, blob)?;
+    Ok(DataKey { key: raw })
+}
+
+// ---------------------------------------------------------------------------
+// Generic AES-256-GCM key wrap/unwrap
+// ---------------------------------------------------------------------------
+
+/// AES-256-GCM encrypt a 32-byte key. Returns nonce ‖ ciphertext ‖ tag.
+fn aes_gcm_wrap(
+    wrapping_key: &[u8; KEY_LEN],
+    plaintext: &[u8; KEY_LEN],
+) -> Result<Vec<u8>, AppError> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
+
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_slice())
+        .map_err(|e| AppError::Internal(format!("AES-256-GCM encrypt failed: {e}")))?;
+
+    let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ciphertext);
+
+    Ok(blob)
+}
+
+/// AES-256-GCM decrypt a wrapped 32-byte key from nonce ‖ ciphertext ‖ tag.
+fn aes_gcm_unwrap(wrapping_key: &[u8; KEY_LEN], blob: &[u8]) -> Result<[u8; KEY_LEN], AppError> {
+    if blob.len() != WRAPPED_KEY_LEN {
+        return Err(AppError::Internal(format!(
+            "Wrapped key blob has wrong size ({} bytes, expected exactly {WRAPPED_KEY_LEN})",
+            blob.len(),
+        )));
+    }
+
+    let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
+
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        AppError::Internal("AES-256-GCM decrypt failed — wrong key or corrupt data".to_string())
+    })?;
+
+    let key: [u8; KEY_LEN] = plaintext.try_into().map_err(|v: Vec<u8>| {
+        AppError::Internal(format!(
+            "Unwrapped key has wrong length: expected {KEY_LEN}, got {}",
+            v.len()
+        ))
+    })?;
+
+    Ok(key)
+}
+
+// ---------------------------------------------------------------------------
+// DB helpers
+// ---------------------------------------------------------------------------
+
 fn decode_secret_key(secret_key_b64: &str) -> Result<[u8; KEY_LEN], AppError> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(secret_key_b64.trim())
@@ -77,61 +172,6 @@ fn generate_master_key() -> MasterKey {
     MasterKey { key }
 }
 
-/// Encrypt master key with wrapping key. Returns nonce ‖ ciphertext ‖ tag.
-fn wrap_master_key(
-    wrapping_key: &[u8; KEY_LEN],
-    master_key: &MasterKey,
-) -> Result<Vec<u8>, AppError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
-
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, master_key.key.as_slice())
-        .map_err(|e| AppError::Internal(format!("Failed to encrypt master key: {e}")))?;
-
-    let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    blob.extend_from_slice(&nonce_bytes);
-    blob.extend_from_slice(&ciphertext);
-
-    Ok(blob)
-}
-
-/// Decrypt master key from stored nonce ‖ ciphertext ‖ tag blob.
-fn unwrap_master_key(wrapping_key: &[u8; KEY_LEN], blob: &[u8]) -> Result<MasterKey, AppError> {
-    if blob.len() != WRAPPED_BLOB_LEN {
-        return Err(AppError::Internal(format!(
-            "Encrypted master key blob has wrong size ({} bytes, expected exactly {WRAPPED_BLOB_LEN})",
-            blob.len(),
-        )));
-    }
-
-    let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
-
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        AppError::Internal(
-            "Failed to decrypt master key — IRONDRIVE_SECRET_KEY may have changed or the \
-             stored key is corrupt. If you changed your secret key, data encrypted with \
-             the old key is unrecoverable."
-                .to_string(),
-        )
-    })?;
-
-    let key: [u8; KEY_LEN] = plaintext.try_into().map_err(|v: Vec<u8>| {
-        AppError::Internal(format!(
-            "Decrypted master key has wrong length: expected {KEY_LEN}, got {}",
-            v.len()
-        ))
-    })?;
-
-    Ok(MasterKey { key })
-}
-
-/// Load encrypted master key from DB. Returns None on first boot.
 async fn load_encrypted_master_key(pool: &DbPool) -> Result<Option<Vec<u8>>, AppError> {
     let row = sqlx::query("SELECT value FROM server_config WHERE key = ?")
         .bind(MASTER_KEY_DB_KEY)
@@ -141,8 +181,7 @@ async fn load_encrypted_master_key(pool: &DbPool) -> Result<Option<Vec<u8>>, App
     Ok(row.map(|r| r.get("value")))
 }
 
-/// Store encrypted master key. Uses INSERT OR IGNORE to handle concurrent first boots,
-/// then verifies the stored blob matches what we wrote.
+/// Uses INSERT OR IGNORE + verify to handle concurrent first boots.
 async fn store_encrypted_master_key(pool: &DbPool, blob: &[u8]) -> Result<(), AppError> {
     sqlx::query("INSERT OR IGNORE INTO server_config (key, value) VALUES (?, ?)")
         .bind(MASTER_KEY_DB_KEY)
@@ -162,6 +201,10 @@ async fn store_encrypted_master_key(pool: &DbPool, blob: &[u8]) -> Result<(), Ap
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -191,6 +234,8 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
+    // -- decode_secret_key --
+
     #[test]
     fn decode_secret_key_valid() {
         let key_b64 = test_secret_key();
@@ -206,8 +251,7 @@ mod tests {
 
     #[test]
     fn decode_secret_key_rejects_bad_base64() {
-        let result = decode_secret_key("not-valid-base64!!!");
-        assert!(result.is_err());
+        assert!(decode_secret_key("not-valid-base64!!!").is_err());
     }
 
     #[test]
@@ -219,19 +263,21 @@ mod tests {
         assert!(decode_secret_key(&long).is_err());
     }
 
+    // -- aes_gcm_wrap / aes_gcm_unwrap --
+
     #[test]
     fn wrap_unwrap_roundtrip() {
         let mut wrapping_key = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut wrapping_key);
 
-        let master = generate_master_key();
-        let original_bytes = *master.as_bytes();
+        let mut plaintext = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut plaintext);
 
-        let blob = wrap_master_key(&wrapping_key, &master).unwrap();
-        assert_eq!(blob.len(), WRAPPED_BLOB_LEN);
+        let blob = aes_gcm_wrap(&wrapping_key, &plaintext).unwrap();
+        assert_eq!(blob.len(), WRAPPED_KEY_LEN);
 
-        let recovered = unwrap_master_key(&wrapping_key, &blob).unwrap();
-        assert_eq!(*recovered.as_bytes(), original_bytes);
+        let recovered = aes_gcm_unwrap(&wrapping_key, &blob).unwrap();
+        assert_eq!(recovered, plaintext);
     }
 
     #[test]
@@ -239,13 +285,15 @@ mod tests {
         let mut wrapping_key = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut wrapping_key);
 
-        let master = generate_master_key();
-        let blob = wrap_master_key(&wrapping_key, &master).unwrap();
+        let mut plaintext = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut plaintext);
+
+        let blob = aes_gcm_wrap(&wrapping_key, &plaintext).unwrap();
 
         let mut wrong_key = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut wrong_key);
 
-        assert!(unwrap_master_key(&wrong_key, &blob).is_err());
+        assert!(aes_gcm_unwrap(&wrong_key, &blob).is_err());
     }
 
     #[test]
@@ -253,29 +301,23 @@ mod tests {
         let mut wrapping_key = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut wrapping_key);
 
-        let master = generate_master_key();
-        let mut blob = wrap_master_key(&wrapping_key, &master).unwrap();
+        let mut plaintext = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut plaintext);
 
+        let mut blob = aes_gcm_wrap(&wrapping_key, &plaintext).unwrap();
         blob[NONCE_LEN + 5] ^= 0xFF;
 
-        assert!(unwrap_master_key(&wrapping_key, &blob).is_err());
+        assert!(aes_gcm_unwrap(&wrapping_key, &blob).is_err());
     }
 
     #[test]
     fn unwrap_rejects_truncated_blob() {
-        assert!(unwrap_master_key(&[0u8; KEY_LEN], &[0u8; 10]).is_err());
+        assert!(aes_gcm_unwrap(&[0u8; KEY_LEN], &[0u8; 10]).is_err());
     }
 
     #[test]
     fn unwrap_rejects_oversized_blob() {
-        assert!(unwrap_master_key(&[0u8; KEY_LEN], &[0u8; WRAPPED_BLOB_LEN + 1]).is_err());
-    }
-
-    #[test]
-    fn generated_master_keys_are_unique() {
-        let k1 = generate_master_key();
-        let k2 = generate_master_key();
-        assert_ne!(k1.as_bytes(), k2.as_bytes());
+        assert!(aes_gcm_unwrap(&[0u8; KEY_LEN], &[0u8; WRAPPED_KEY_LEN + 1]).is_err());
     }
 
     #[test]
@@ -283,18 +325,61 @@ mod tests {
         let mut wrapping_key = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut wrapping_key);
 
-        let master = generate_master_key();
-        let blob1 = wrap_master_key(&wrapping_key, &master).unwrap();
-        let blob2 = wrap_master_key(&wrapping_key, &master).unwrap();
+        let mut plaintext = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut plaintext);
 
-        // Different nonces → different ciphertext
+        let blob1 = aes_gcm_wrap(&wrapping_key, &plaintext).unwrap();
+        let blob2 = aes_gcm_wrap(&wrapping_key, &plaintext).unwrap();
         assert_ne!(blob1, blob2);
 
-        // Both decrypt to the same key
-        let k1 = unwrap_master_key(&wrapping_key, &blob1).unwrap();
-        let k2 = unwrap_master_key(&wrapping_key, &blob2).unwrap();
-        assert_eq!(k1.as_bytes(), k2.as_bytes());
+        assert_eq!(aes_gcm_unwrap(&wrapping_key, &blob1).unwrap(), plaintext);
+        assert_eq!(aes_gcm_unwrap(&wrapping_key, &blob2).unwrap(), plaintext);
     }
+
+    // -- data key generate / wrap / unwrap --
+
+    #[test]
+    fn generated_data_keys_are_unique() {
+        let k1 = generate_data_key();
+        let k2 = generate_data_key();
+        assert_ne!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn data_key_wrap_unwrap_roundtrip() {
+        let master = generate_master_key();
+        let data = generate_data_key();
+        let original = *data.as_bytes();
+
+        let blob = wrap_data_key(&master, &data).unwrap();
+        assert_eq!(blob.len(), WRAPPED_KEY_LEN);
+
+        let recovered = unwrap_data_key(&master, &blob).unwrap();
+        assert_eq!(*recovered.as_bytes(), original);
+    }
+
+    #[test]
+    fn data_key_unwrap_with_wrong_master_fails() {
+        let master1 = generate_master_key();
+        let master2 = generate_master_key();
+        let data = generate_data_key();
+
+        let blob = wrap_data_key(&master1, &data).unwrap();
+        assert!(unwrap_data_key(&master2, &blob).is_err());
+    }
+
+    #[test]
+    fn data_key_unwrap_with_tampered_blob_fails() {
+        let master = generate_master_key();
+        let data = generate_data_key();
+
+        let mut blob = wrap_data_key(&master, &data).unwrap();
+        blob[NONCE_LEN + 2] ^= 0xFF;
+
+        assert!(unwrap_data_key(&master, &blob).is_err());
+    }
+
+    // -- bootstrap --
 
     #[tokio::test]
     async fn bootstrap_generates_on_first_boot() {
