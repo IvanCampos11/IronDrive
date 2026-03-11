@@ -2,11 +2,7 @@ use chrono::{NaiveDateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-/// A row from the `sessions` table.
-///
-/// The raw token is **never** stored — only its SHA-256 hash (`token_hash`).
-/// Callers are responsible for hashing the bearer token before calling
-/// `find_by_token_hash` or `create`.
+/// A row from the `sessions` table. Only the SHA-256 hash of the token is stored.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Session {
     pub id: String,
@@ -17,13 +13,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Insert a new session row.
-    ///
-    /// * `user_id`    — the owning user's UUID.
-    /// * `token_hash` — SHA-256 hex digest of the raw bearer token.
-    /// * `expires_at` — when this session becomes invalid (UTC datetime string).
-    ///
-    /// Returns the newly created `Session`.
+    /// Insert a new session row and return it.
     pub async fn create(
         pool: &SqlitePool,
         user_id: &str,
@@ -48,10 +38,7 @@ impl Session {
         .await
     }
 
-    /// Look up a session by its token hash.
-    ///
-    /// Returns `None` if no row matches (does **not** check expiry — the
-    /// caller should call [`Session::is_expired`] afterwards).
+    /// Look up a session by its token hash. Does not check expiry.
     pub async fn find_by_token_hash(
         pool: &SqlitePool,
         token_hash: &str,
@@ -64,11 +51,8 @@ impl Session {
         .await
     }
 
-    /// Validate a session by token hash: find it **and** confirm it hasn't
-    /// expired. Returns `None` if the session doesn't exist or has expired.
-    ///
-    /// Expired sessions are automatically deleted as a side-effect so they
-    /// don't accumulate between background-cleanup runs.
+    /// Find by token hash and check expiry. Returns `None` if missing or expired.
+    /// Expired sessions are auto-deleted.
     pub async fn validate(
         pool: &SqlitePool,
         token_hash: &str,
@@ -87,7 +71,7 @@ impl Session {
         Ok(Some(session))
     }
 
-    /// Delete a single session by its primary key.
+    /// Delete a session by ID.
     pub async fn delete(pool: &SqlitePool, session_id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
             .bind(session_id)
@@ -97,7 +81,22 @@ impl Session {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Delete **all** sessions for a given user (e.g. "log out everywhere").
+    /// Delete a session matching both user ID and token hash (used for logout).
+    pub async fn delete_by_user_and_token(
+        pool: &SqlitePool,
+        user_id: &str,
+        token_hash: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash = ?")
+            .bind(user_id)
+            .bind(token_hash)
+            .execute(pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete all sessions for a user ("log out everywhere").
     pub async fn delete_all_for_user(pool: &SqlitePool, user_id: &str) -> Result<u64, sqlx::Error> {
         let result = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
             .bind(user_id)
@@ -107,10 +106,7 @@ impl Session {
         Ok(result.rows_affected())
     }
 
-    /// Delete all sessions whose `expires_at` is in the past.
-    ///
-    /// Returns the number of rows removed. Intended for use by the
-    /// background session-cleanup task.
+    /// Delete all expired sessions. Returns the number removed.
     pub async fn delete_expired(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
         let now = Utc::now()
             .naive_utc()
@@ -125,13 +121,12 @@ impl Session {
         Ok(result.rows_affected())
     }
 
-    /// Returns `true` if this session's `expires_at` is in the past.
+    /// Returns `true` if `expires_at` is in the past.
     pub fn is_expired(&self) -> bool {
         let now = Utc::now().naive_utc();
         match NaiveDateTime::parse_from_str(&self.expires_at, "%Y-%m-%d %H:%M:%S") {
             Ok(exp) => now >= exp,
-            // If we can't parse the stored timestamp, treat the session as
-            // expired — fail closed rather than open.
+            // Unparseable timestamp → treat as expired (fail closed).
             Err(_) => true,
         }
     }
@@ -142,8 +137,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    /// Spin up an in-memory SQLite database with the sessions (and users)
-    /// tables so we can test without touching disk.
+    /// In-memory SQLite with sessions and users tables for testing.
     async fn test_pool() -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
 
@@ -178,7 +172,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Seed a user for FK constraints.
         sqlx::query(
             "INSERT INTO users (id, username, email, password_hash) VALUES ('u1', 'alice', 'alice@example.com', 'hash')",
         )
@@ -220,7 +213,7 @@ mod tests {
     #[tokio::test]
     async fn validate_returns_none_for_expired_session() {
         let pool = test_pool().await;
-        // Create an already-expired session.
+
         let expired = Utc::now().naive_utc() - Duration::hours(1);
         Session::create(&pool, "u1", "expired_hash", expired)
             .await
@@ -229,7 +222,6 @@ mod tests {
         let result = Session::validate(&pool, "expired_hash").await.unwrap();
         assert!(result.is_none());
 
-        // The expired session should have been cleaned up.
         let gone = Session::find_by_token_hash(&pool, "expired_hash")
             .await
             .unwrap();
@@ -310,12 +302,10 @@ mod tests {
         let removed = Session::delete_expired(&pool).await.unwrap();
         assert_eq!(removed, 1);
 
-        // The alive session should still exist.
         assert!(Session::find_by_token_hash(&pool, "alive_hash")
             .await
             .unwrap()
             .is_some());
-        // The expired session should be gone.
         assert!(Session::find_by_token_hash(&pool, "dead_hash")
             .await
             .unwrap()

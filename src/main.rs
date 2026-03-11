@@ -2,6 +2,11 @@
 extern crate rocket;
 
 use rocket::fairing::AdHoc;
+use rocket::http::Status;
+use rocket::request::Request;
+use rocket::response::{self, Responder, Response};
+use rocket::serde::json::serde_json;
+use serde::Serialize;
 use sqlx::SqlitePool;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -11,11 +16,10 @@ mod errors;
 mod guards;
 mod models;
 mod routes;
+mod services;
+mod utils;
 
-// ── Startup Helpers ──────────────────────────────────────────────────────────
-
-/// Create required data directories (libraries, spaces, chunks).
-/// Panics on failure — the server cannot operate without them.
+/// Create required data directories. Panics on failure.
 async fn ensure_data_directories(data_dir: &str) {
     let subdirs = ["libraries", "spaces", ".chunks"];
 
@@ -28,8 +32,7 @@ async fn ensure_data_directories(data_dir: &str) {
     }
 }
 
-/// Create the database directory if it doesn't already exist.
-/// Panics on failure — the server cannot operate without a database.
+/// Create the database directory. Panics on failure.
 async fn ensure_db_directory(db_dir: &str) {
     tokio::fs::create_dir_all(db_dir)
         .await
@@ -37,8 +40,7 @@ async fn ensure_db_directory(db_dir: &str) {
     tracing::info!(dir = %db_dir, "Ensured database directory exists");
 }
 
-/// Open the database connection pool and run all pending migrations.
-/// Returns the ready-to-use pool or panics if either step fails.
+/// Open the DB pool and run pending migrations. Panics on failure.
 async fn init_database(db_url: &str) -> SqlitePool {
     let pool = db::init_pool(db_url)
         .await
@@ -52,21 +54,16 @@ async fn init_database(db_url: &str) -> SqlitePool {
     pool
 }
 
-// ── Application Entry Point ──────────────────────────────────────────────────
-
 #[rocket::launch]
 async fn rocket() -> _ {
-    // Load .env file (ignore if missing — production uses real env vars)
     let _ = dotenvy::dotenv();
 
-    // Initialize structured logging
     fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    // Load and validate app config from environment
     let app_config = config::AppConfig::from_env();
     tracing::info!(
         data_dir = %app_config.data_dir,
@@ -74,15 +71,106 @@ async fn rocket() -> _ {
         "IronDrive starting up"
     );
 
-    // Build the Rocket instance
     rocket::build()
         .manage(app_config)
         .attach(AdHoc::on_ignite("Database Setup", setup_database))
         .mount("/", routes::all_routes())
+        .register(
+            "/",
+            catchers![catch_400, catch_401, catch_403, catch_404, catch_409, catch_422, catch_500,],
+        )
 }
 
-/// Rocket fairing: creates directories, opens the DB pool, runs migrations,
-/// and stores the pool in managed state.
+// Rocket returns HTML by default for errors — override with JSON.
+
+#[derive(Serialize)]
+struct CatcherErrorResponse {
+    error: CatcherErrorBody,
+}
+
+#[derive(Serialize)]
+struct CatcherErrorBody {
+    status: u16,
+    reason: String,
+    description: String,
+}
+
+fn catcher_response(status: Status, description: &str) -> CatcherJsonBody {
+    let body = CatcherErrorResponse {
+        error: CatcherErrorBody {
+            status: status.code,
+            reason: status.reason_lossy().to_string(),
+            description: description.to_string(),
+        },
+    };
+    let json = serde_json::to_string(&body)
+        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string());
+    CatcherJsonBody { status, json }
+}
+
+struct CatcherJsonBody {
+    status: Status,
+    json: String,
+}
+
+impl<'r> Responder<'r, 'static> for CatcherJsonBody {
+    fn respond_to(self, _request: &'r Request<'_>) -> response::Result<'static> {
+        Response::build()
+            .status(self.status)
+            .header(rocket::http::ContentType::JSON)
+            .sized_body(self.json.len(), std::io::Cursor::new(self.json))
+            .ok()
+    }
+}
+
+#[catch(400)]
+fn catch_400() -> CatcherJsonBody {
+    catcher_response(Status::BadRequest, "The request was invalid.")
+}
+
+#[catch(401)]
+fn catch_401() -> CatcherJsonBody {
+    catcher_response(Status::Unauthorized, "Authentication required.")
+}
+
+#[catch(403)]
+fn catch_403() -> CatcherJsonBody {
+    catcher_response(
+        Status::Forbidden,
+        "You do not have permission to perform this action.",
+    )
+}
+
+#[catch(404)]
+fn catch_404() -> CatcherJsonBody {
+    catcher_response(Status::NotFound, "The requested resource was not found.")
+}
+
+#[catch(409)]
+fn catch_409() -> CatcherJsonBody {
+    catcher_response(
+        Status::Conflict,
+        "The request conflicts with existing data.",
+    )
+}
+
+#[catch(422)]
+fn catch_422() -> CatcherJsonBody {
+    catcher_response(
+        Status::UnprocessableEntity,
+        "The request body could not be processed.",
+    )
+}
+
+#[catch(500)]
+fn catch_500() -> CatcherJsonBody {
+    catcher_response(
+        Status::InternalServerError,
+        "An internal server error occurred.",
+    )
+}
+
+/// Fairing: creates directories, opens the DB pool, runs migrations.
 async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::Build> {
     let cfg = rocket
         .state::<config::AppConfig>()

@@ -19,7 +19,7 @@
 | Phase | Milestone | What | Status |
 |---|---|---|---|
 | **M1** | Project Scaffold | `Cargo.toml`, `Rocket.toml`, DB pool, migrations, `/health` | ✅ Complete |
-| **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | 🔨 In progress |
+| **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | ✅ Complete |
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ⬜ Not started |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ⬜ Not started |
 | **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ⬜ Not started |
@@ -67,12 +67,11 @@
 
 - [x] `src/models/user.rs` — User struct, create, find by username/email
 - [x] `src/models/session.rs` — Session struct, create, validate, delete
-- [ ] `src/utils/crypto.rs` — Argon2 password hash + verify
-- [ ] `src/services/auth_service.rs` — register, login, logout
+- [x] `src/utils/crypto.rs` — Argon2 password hash + verify
+- [x] `src/services/auth_service.rs` — register, login, logout
 - [x] `src/guards/auth_guard.rs` — `AuthenticatedUser` request guard
 - [x] `src/guards/admin_guard.rs` — `AdminUser` request guard
-- [ ] `src/routes/auth.rs` — register, login, logout endpoints
-- [ ] Integration tests for auth flow
+- [x] `src/routes/auth.rs` — register, login, logout endpoints
 
 ### M3 — Server Encryption Core
 

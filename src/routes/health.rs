@@ -8,8 +8,7 @@ pub struct HealthResponse {
     pub version: &'static str,
 }
 
-/// GET /health — basic health check.
-/// Returns 200 with a JSON body confirming the server is running.
+/// GET /health — returns 200 if the server is running.
 #[get("/health")]
 pub fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -18,7 +17,6 @@ pub fn health() -> Json<HealthResponse> {
     })
 }
 
-/// Returns all routes defined in this module.
 pub fn routes() -> Vec<Route> {
     routes![health]
 }

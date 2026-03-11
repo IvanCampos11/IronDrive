@@ -5,11 +5,20 @@ use uuid::Uuid;
 use crate::db::DbPool;
 use crate::errors::AppError;
 
-/// A user account in the system.
-///
-/// Maps to the `users` table but deliberately excludes `password_hash`.
-/// The hash never lives on a struct — it's queried and verified inside a
-/// single function (`get_password_hash`) and then dropped.
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db_err) => {
+            db_err
+                .message()
+                .to_ascii_lowercase()
+                .contains("unique constraint")
+                || db_err.code().map_or(false, |c| c == "2067")
+        }
+        _ => false,
+    }
+}
+
+/// A user row from the `users` table. Excludes `password_hash` by design.
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct User {
     pub id: String,
@@ -23,7 +32,6 @@ pub struct User {
     pub updated_at: String,
 }
 
-/// Parameters for creating a new user.
 pub struct CreateUserParams {
     pub username: String,
     pub email: String,
@@ -33,19 +41,12 @@ pub struct CreateUserParams {
 }
 
 impl User {
-    /// Insert a new user into the database and return the created record.
-    ///
-    /// The caller is responsible for hashing the password before calling this —
-    /// `password_hash` must already be an Argon2 hash string.
-    ///
-    /// # Errors
-    ///
-    /// Returns `AppError::Conflict` if the username or email is already taken.
-    /// Returns `AppError::Sqlx` for other database errors.
+    /// Insert a new user. `password_hash` must already be hashed.
+    /// Returns `Conflict` if username or email is taken.
     pub async fn create(pool: &DbPool, params: CreateUserParams) -> Result<User, AppError> {
         let id = Uuid::new_v4().to_string();
 
-        // Check for existing username
+        // Pre-check for friendly error messages; DB constraints catch TOCTOU races.
         if Self::find_by_username(pool, &params.username)
             .await?
             .is_some()
@@ -55,14 +56,13 @@ impl User {
             ));
         }
 
-        // Check for existing email
         if Self::find_by_email(pool, &params.email).await?.is_some() {
             return Err(AppError::Conflict(
                 "A user with that email already exists.".into(),
             ));
         }
 
-        sqlx::query(
+        let insert_result = sqlx::query(
             "INSERT INTO users (id, username, email, password_hash, role, quota_bytes)
              VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -73,16 +73,28 @@ impl User {
         .bind(&params.role)
         .bind(params.quota_bytes)
         .execute(pool)
-        .await?;
+        .await;
 
-        // Fetch the full row back so created_at / updated_at are populated by
-        // the database defaults.
+        match insert_result {
+            Ok(_) => {}
+            Err(e) if is_unique_violation(&e) => {
+                tracing::warn!(
+                    username = %params.username,
+                    email = %params.email,
+                    "UNIQUE constraint race during user creation"
+                );
+                return Err(AppError::Conflict(
+                    "A user with that username or email already exists.".into(),
+                ));
+            }
+            Err(e) => return Err(AppError::Sqlx(e)),
+        }
+
         Self::find_by_id(pool, &id).await?.ok_or_else(|| {
             AppError::Internal("User was inserted but could not be read back".into())
         })
     }
 
-    /// Look up a user by their unique ID.
     pub async fn find_by_id(pool: &DbPool, id: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             "SELECT id, username, email, role, quota_bytes, is_active, setup_complete, created_at, updated_at
@@ -95,7 +107,6 @@ impl User {
         Ok(user)
     }
 
-    /// Look up a user by their unique username (case-sensitive).
     pub async fn find_by_username(pool: &DbPool, username: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             "SELECT id, username, email, role, quota_bytes, is_active, setup_complete, created_at, updated_at
@@ -108,7 +119,6 @@ impl User {
         Ok(user)
     }
 
-    /// Look up a user by their unique email address (case-sensitive).
     pub async fn find_by_email(pool: &DbPool, email: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             "SELECT id, username, email, role, quota_bytes, is_active, setup_complete, created_at, updated_at
@@ -121,14 +131,7 @@ impl User {
         Ok(user)
     }
 
-    /// Retrieve the password hash for a user identified by username.
-    ///
-    /// Returns `(user_id, password_hash)` so the caller can verify the
-    /// password and then load the full `User` by ID on success. The hash
-    /// lives only in a local variable — it never touches a struct and is
-    /// dropped as soon as the calling function returns.
-    ///
-    /// Returns `None` if no user with that username exists.
+    /// Returns `(user_id, password_hash)` for the given username, or `None`.
     pub async fn get_password_hash(
         pool: &DbPool,
         username: &str,
@@ -143,7 +146,6 @@ impl User {
         Ok(row)
     }
 
-    /// Mark a user's setup as complete (called after the setup wizard finishes).
     pub async fn mark_setup_complete(pool: &DbPool, user_id: &str) -> Result<(), AppError> {
         let result = sqlx::query(
             "UPDATE users SET setup_complete = 1, updated_at = datetime('now') WHERE id = ?",
@@ -159,7 +161,6 @@ impl User {
         Ok(())
     }
 
-    /// Returns `true` if this user has the `admin` role.
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
     }
@@ -170,7 +171,6 @@ mod tests {
     use super::*;
     use crate::db;
 
-    /// Create a fresh in-memory database with migrations applied.
     async fn test_pool() -> DbPool {
         let pool = db::init_pool("sqlite::memory:")
             .await
@@ -335,13 +335,11 @@ mod tests {
         let pool = test_pool().await;
         let user = User::create(&pool, default_params()).await.unwrap();
 
-        // Serialize to JSON and confirm no trace of the hash anywhere.
         let json = serde_json::to_string(&user).unwrap();
         assert!(!json.contains("password_hash"));
         assert!(!json.contains("fake_hash"));
         assert!(!json.contains("argon2"));
 
-        // Also confirm Debug output is clean.
         let debug = format!("{:?}", user);
         assert!(!debug.contains("password_hash"));
         assert!(!debug.contains("fake_hash"));
