@@ -237,10 +237,9 @@ mod tests {
 
     #[test]
     fn rejects_token_with_null_byte() {
-        let mut token = "a".repeat(TOKEN_MIN_LEN);
-        unsafe {
-            token.as_bytes_mut()[5] = 0;
-        }
+        let mut bytes = vec![b'a'; TOKEN_MIN_LEN];
+        bytes[5] = 0;
+        let token = String::from_utf8(bytes).unwrap();
         assert!(!is_valid_token_format(&token));
     }
 
