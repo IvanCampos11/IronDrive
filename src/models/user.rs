@@ -2,21 +2,8 @@ use serde::Serialize;
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::db::DbPool;
+use crate::db::{is_unique_violation, DbPool};
 use crate::errors::AppError;
-
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db_err) => {
-            db_err
-                .message()
-                .to_ascii_lowercase()
-                .contains("unique constraint")
-                || db_err.code().map_or(false, |c| c == "2067")
-        }
-        _ => false,
-    }
-}
 
 /// A user row from the `users` table. Excludes `password_hash` by design.
 #[derive(Debug, Clone, FromRow, Serialize)]

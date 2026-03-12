@@ -5,8 +5,9 @@ use crate::models::user::User;
 
 use super::auth_guard::AuthenticatedUser;
 
-/// Request guard: delegates to `AuthenticatedUser`, then checks `role == "admin"`.
-/// Returns 401 if not authenticated, 403 if not admin.
+/// Like `AuthenticatedUser` but also requires `role == "admin"`.
+/// Returns 401 if unauthenticated, 403 if not admin.
+#[allow(dead_code)]
 pub struct AdminUser(pub User);
 
 #[rocket::async_trait]

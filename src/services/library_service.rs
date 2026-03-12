@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use serde::Serialize;
 use tokio::fs;
 
 use crate::config::AppConfig;
@@ -13,27 +12,20 @@ use crate::services::crypto_service::{
 };
 use crate::services::unlock_state::UnlockState;
 
-/// Metadata file written to the root of every library directory.
 const META_FILENAME: &str = ".irondrive.meta";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct SetupLibraryResult {
     pub library: PersonalLibrary,
 }
 
 /// Create a server-mode personal library for the given user.
 ///
-/// This is the "setup wizard" step that runs once after a user registers:
+/// Steps: generate data key → wrap with master key → insert DB row →
+/// create library dir on disk → load key into UnlockState → mark setup complete.
 ///
-/// 1. Generate a random 256-bit data key.
-/// 2. Wrap (encrypt) the data key with the server master key.
-/// 3. Insert a `personal_libraries` row with mode = `server`.
-/// 4. Create the library directory on disk with a `.irondrive.meta` marker.
-/// 5. Load the data key into `UnlockState` (server mode = always unlocked).
-/// 6. Mark `users.setup_complete = true`.
-///
-/// If the user already has a library, returns `Conflict`.
-/// On any failure after the DB insert, best-effort cleanup is attempted.
+/// If disk operations fail after the DB insert, the DB row is rolled back
+/// on a best-effort basis to avoid orphaned state.
 pub async fn setup_library(
     pool: &DbPool,
     config: &AppConfig,
@@ -41,7 +33,6 @@ pub async fn setup_library(
     unlock_state: &UnlockState,
     user_id: &str,
 ) -> Result<SetupLibraryResult, AppError> {
-    // Verify the user exists and hasn't already completed setup.
     let user = User::find_by_id(pool, user_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -52,8 +43,7 @@ pub async fn setup_library(
         ));
     }
 
-    // Bail early if a library row already exists (shouldn't happen if
-    // setup_complete is false, but be defensive).
+    // Defensive: check for orphaned library row even if setup_complete is false.
     if PersonalLibrary::find_by_user(pool, user_id)
         .await?
         .is_some()
@@ -63,13 +53,9 @@ pub async fn setup_library(
         ));
     }
 
-    // 1. Generate a random data key for this library.
     let data_key = generate_data_key();
-
-    // 2. Wrap (encrypt) the data key with the master key.
     let encrypted_data_key = wrap_data_key(master_key, &data_key)?;
 
-    // 3. Insert the library row.
     let library = PersonalLibrary::create(
         pool,
         CreateLibraryParams {
@@ -83,46 +69,38 @@ pub async fn setup_library(
     )
     .await?;
 
-    // 4. Create library directory + meta file on disk.
+    // Create library dir on disk. If this fails, roll back the DB row.
     let lib_dir = library_dir(config, &library.id);
     if let Err(e) = create_library_directory(&lib_dir, &library.id).await {
-        // Best-effort: the DB row was already committed, but the directory
-        // failed. Log the error so an admin can investigate.
         tracing::error!(
             library_id = %library.id,
             path = %lib_dir,
             error = %e,
-            "Failed to create library directory after DB insert"
+            "Failed to create library directory — rolling back DB row"
         );
+        if let Err(del_err) = PersonalLibrary::delete_by_id(pool, &library.id).await {
+            tracing::error!(
+                library_id = %library.id,
+                error = %del_err,
+                "Failed to roll back library DB row after disk failure"
+            );
+        }
         return Err(e);
     }
 
-    // 5. Load the data key into UnlockState (server mode = always unlocked).
     unlock_state.insert_library_key(&library.id, &data_key);
-
-    tracing::info!(
-        library_id = %library.id,
-        user_id = %user_id,
-        "Data key loaded into UnlockState (server mode)"
-    );
-
-    // 6. Mark the user's setup as complete.
     User::mark_setup_complete(pool, user_id).await?;
 
     tracing::info!(
         library_id = %library.id,
         user_id = %user_id,
-        encryption_mode = "server",
-        "Personal library created"
+        "Personal library created (server mode)"
     );
 
     Ok(SetupLibraryResult { library })
 }
 
-/// Re-load all server-mode library keys into `UnlockState` on startup.
-///
-/// Called once during server boot so that server-mode libraries are
-/// immediately usable without any manual unlock step.
+/// Re-load all server-mode library data keys into `UnlockState` on boot.
 pub async fn load_server_mode_keys(
     pool: &DbPool,
     master_key: &MasterKey,
@@ -155,25 +133,22 @@ pub async fn load_server_mode_keys(
         }
     }
 
-    tracing::info!(
-        total_server_libraries = rows.len(),
-        loaded = loaded,
-        "Server-mode library keys loaded into UnlockState"
-    );
+    if loaded < rows.len() {
+        tracing::warn!(
+            total = rows.len(),
+            loaded,
+            skipped = rows.len() - loaded,
+            "Some server-mode library keys could not be unwrapped"
+        );
+    }
 
     Ok(loaded)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Return the on-disk path for a library directory.
 fn library_dir(config: &AppConfig, library_id: &str) -> String {
     format!("{}/libraries/{}", config.data_dir, library_id)
 }
 
-/// Create the library directory and write the `.irondrive.meta` marker file.
 async fn create_library_directory(lib_dir: &str, library_id: &str) -> Result<(), AppError> {
     let path = Path::new(lib_dir);
 
@@ -200,18 +175,8 @@ async fn create_library_directory(lib_dir: &str, library_id: &str) -> Result<(),
             ))
         })?;
 
-    tracing::info!(
-        path = %lib_dir,
-        library_id = %library_id,
-        "Created library directory with meta file"
-    );
-
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

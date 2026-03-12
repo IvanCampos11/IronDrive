@@ -2,11 +2,10 @@ use serde::Serialize;
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::db::DbPool;
+use crate::db::{is_unique_violation, DbPool};
 use crate::errors::AppError;
 
-/// A row from the `personal_libraries` table.
-/// Each user has exactly one personal library.
+/// A row from `personal_libraries`. One per user.
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct PersonalLibrary {
     pub id: String,
@@ -32,22 +31,8 @@ pub struct CreateLibraryParams {
     pub recovery_blob: Option<Vec<u8>>,
 }
 
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db_err) => {
-            db_err
-                .message()
-                .to_ascii_lowercase()
-                .contains("unique constraint")
-                || db_err.code().map_or(false, |c| c == "2067")
-        }
-        _ => false,
-    }
-}
-
 impl PersonalLibrary {
-    /// Insert a new personal library row and return it.
-    /// Returns `Conflict` if the user already has a library.
+    /// Insert a new library row. Returns `Conflict` if one already exists for this user.
     pub async fn create(
         pool: &DbPool,
         params: CreateLibraryParams,
@@ -104,6 +89,15 @@ impl PersonalLibrary {
         .await?;
 
         Ok(library)
+    }
+
+    /// Delete a library row by ID. Used for rollback if disk operations fail after insert.
+    pub async fn delete_by_id(pool: &DbPool, id: &str) -> Result<(), AppError> {
+        sqlx::query("DELETE FROM personal_libraries WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn find_by_user(

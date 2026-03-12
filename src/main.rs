@@ -19,6 +19,9 @@ mod routes;
 mod services;
 mod utils;
 
+#[cfg(test)]
+mod tests;
+
 /// Create required data directories. Panics on failure.
 async fn ensure_data_directories(data_dir: &str) {
     let subdirs = ["libraries", "spaces", ".chunks"];

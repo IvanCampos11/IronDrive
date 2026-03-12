@@ -8,6 +8,7 @@ use serde::Serialize;
 /// converted to a JSON response. Sensitive details are logged but never
 /// exposed to the client.
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum AppError {
     #[error("not found")]
     NotFound,

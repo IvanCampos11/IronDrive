@@ -6,11 +6,9 @@ use crate::models::user::User;
 
 use super::auth_guard::AuthenticatedUser;
 
-/// Request guard: delegates to `AuthenticatedUser`, then checks `setup_complete == true`.
-/// Returns 401 if not authenticated, 403 if setup has not been completed.
-///
-/// Use this on any route that requires the user to have a fully initialized
-/// personal library (i.e. all M5+ filesystem routes).
+/// Like `AuthenticatedUser` but also requires `setup_complete == true`.
+/// Returns 401 if unauthenticated, 403 if setup incomplete.
+#[allow(dead_code)]
 pub struct SetupComplete(pub User);
 
 #[rocket::async_trait]
@@ -27,8 +25,7 @@ impl<'r> FromRequest<'r> for SetupComplete {
         if !authenticated.0.setup_complete {
             tracing::warn!(
                 user_id = %authenticated.0.id,
-                username = %authenticated.0.username,
-                "User attempted to access a resource before completing setup"
+                "Access denied: setup not complete"
             );
             return Outcome::Error((
                 Status::Forbidden,
