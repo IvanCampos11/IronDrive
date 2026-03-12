@@ -112,7 +112,7 @@
   - [x] Generate data key, wrap with master key, store `encrypted_data_key`
   - [x] Create dir on disk + `.irondrive.meta`
   - [x] Load data key into `UnlockState` right away (server mode = always unlocked)
-- [ ] `src/guards/setup_guard.rs` — reject requests if `setup_complete == false`
+- [x] `src/guards/setup_guard.rs` — reject requests if `setup_complete == false`
 - [ ] `POST /api/v1/auth/setup-library` endpoint (server mode only for now)
 - [ ] Integration tests for setup flow
 
