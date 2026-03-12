@@ -155,17 +155,22 @@ fn aes_gcm_unwrap(wrapping_key: &[u8; KEY_LEN], blob: &[u8]) -> Result<[u8; KEY_
     let nonce = Nonce::from_slice(nonce_bytes);
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
 
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+    let mut plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
         AppError::Internal("AES-256-GCM decrypt failed — wrong key or corrupt data".to_string())
     })?;
 
-    let key: [u8; KEY_LEN] = plaintext.try_into().map_err(|v: Vec<u8>| {
-        AppError::Internal(format!(
+    if plaintext.len() != KEY_LEN {
+        let len = plaintext.len();
+        plaintext.zeroize();
+        return Err(AppError::Internal(format!(
             "Unwrapped key has wrong length: expected {KEY_LEN}, got {}",
-            v.len()
-        ))
-    })?;
+            len
+        )));
+    }
 
+    let mut key = [0u8; KEY_LEN];
+    key.copy_from_slice(&plaintext);
+    plaintext.zeroize();
     Ok(key)
 }
 
