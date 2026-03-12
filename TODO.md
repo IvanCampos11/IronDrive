@@ -107,11 +107,11 @@
 ### M4 — Setup Wizard + Library
 
 - [x] `src/models/library.rs` — PersonalLibrary struct, create, find by user
-- [ ] `src/services/library_service.rs`:
-  - [ ] Setup: create library with `server` mode (default)
-  - [ ] Generate data key, wrap with master key, store `encrypted_data_key`
-  - [ ] Create dir on disk + `.irondrive.meta`
-  - [ ] Load data key into `UnlockState` right away (server mode = always unlocked)
+- [x] `src/services/library_service.rs`:
+  - [x] Setup: create library with `server` mode (default)
+  - [x] Generate data key, wrap with master key, store `encrypted_data_key`
+  - [x] Create dir on disk + `.irondrive.meta`
+  - [x] Load data key into `UnlockState` right away (server mode = always unlocked)
 - [ ] `src/guards/setup_guard.rs` — reject requests if `setup_complete == false`
 - [ ] `POST /api/v1/auth/setup-library` endpoint (server mode only for now)
 - [ ] Integration tests for setup flow
