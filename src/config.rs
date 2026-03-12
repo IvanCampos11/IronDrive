@@ -126,7 +126,7 @@ fn resolve_secret_key(data_dir: &str) -> String {
 fn generate_secret_key() -> String {
     use base64::Engine;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 

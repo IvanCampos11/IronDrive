@@ -175,7 +175,7 @@ fn catch_500() -> CatcherJsonBody {
     )
 }
 
-/// Fairing: creates directories, opens the DB pool, runs migrations.
+/// Dirs, DB pool, migrations, master key bootstrap, unlock state.
 async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::Build> {
     let cfg = rocket
         .state::<config::AppConfig>()
@@ -186,5 +186,13 @@ async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket
 
     let pool = init_database(&cfg.db_url()).await;
 
-    rocket.manage(pool)
+    let master_key = services::crypto_service::bootstrap_master_key(&pool, &cfg.secret_key)
+        .await
+        .expect("Failed to bootstrap master encryption key");
+    tracing::info!("Master encryption key ready");
+
+    let unlock_state = services::unlock_state::UnlockState::new();
+    tracing::info!("UnlockState initialized (no keys loaded yet)");
+
+    rocket.manage(pool).manage(master_key).manage(unlock_state)
 }
