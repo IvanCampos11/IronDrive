@@ -22,7 +22,7 @@
 | **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | ✅ Complete |
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ✅ Complete |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ✅ Complete |
-| **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ⬜ Not started |
+| **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | 🔨 In progress |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ⬜ Not started |
 | **M5.6** | Data Integrity | `integrity_service`, integrity events table, corruption detection + notifications | ⬜ Not started |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ⬜ Not started |
@@ -118,8 +118,8 @@
 
 ### M5 — Filesystem Service
 
-- [ ] `src/utils/path_safety.rs` — `safe_join()` with all the traversal checks
-- [ ] `src/utils/mime.rs` — MIME type detection from extension
+- [x] `src/utils/path_safety.rs` — `safe_join()` with all the traversal checks
+- [x] `src/utils/mime.rs` — MIME type detection from extension
 - [ ] `src/services/fs_service.rs`:
   - [ ] `list_directory()` — read real filesystem, return `Vec<FsEntry>` (includes integrity status)
   - [ ] `create_directory()` — mkdir with parent creation
