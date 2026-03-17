@@ -101,15 +101,15 @@ pub async fn setup_library(
         );
 
         // Best-effort: remove library key from unlock state.
-        if let Err(remove_err) = unlock_state.remove_library_key(&library.id) {
-            tracing::error!(
+        let removed = unlock_state.remove_library_key(&library.id);
+        if !removed {
+            tracing::warn!(
                 library_id = %library.id,
-                error = %remove_err,
-                "Failed to remove library key from UnlockState during rollback"
+                "Library key was not present in UnlockState during rollback"
             );
         }
 
-       // Best-effort: remove the library directory from disk.
+        // Best-effort: remove the library directory from disk.
         if let Err(fs_err) = fs::remove_dir_all(&lib_dir).await {
             tracing::error!(
                 library_id = %library.id,
