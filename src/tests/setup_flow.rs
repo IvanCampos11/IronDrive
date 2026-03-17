@@ -11,7 +11,6 @@
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::serde_json;
-use serde_json::Value;
 
 use crate::config::AppConfig;
 use crate::db;
@@ -94,7 +93,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
 }
 
 /// Helper: register a user and return the parsed JSON body.
-async fn register_user(client: &Client, username: &str, email: &str, password: &str) -> Value {
+async fn register_user(client: &Client, username: &str, email: &str, password: &str) -> serde_json::Value {
     let body = serde_json::json!({
         "username": username,
         "email": email,
@@ -114,7 +113,7 @@ async fn register_user(client: &Client, username: &str, email: &str, password: &
 }
 
 /// Helper: login and return the session token.
-async fn login_user(client: &Client, username: &str, password: &str) -> (String, Value) {
+async fn login_user(client: &Client, username: &str, password: &str) -> (String, serde_json::Value) {
     let body = serde_json::json!({
         "username": username,
         "password": password,
@@ -129,13 +128,13 @@ async fn login_user(client: &Client, username: &str, password: &str) -> (String,
 
     assert_eq!(response.status(), Status::Ok, "login failed");
     let text = response.into_string().await.unwrap();
-    let json: Value = serde_json::from_str(&text).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     let token = json["token"].as_str().unwrap().to_string();
     (token, json)
 }
 
 /// Helper: call setup-library with a bearer token.
-async fn setup_library(client: &Client, token: &str) -> (Status, Value) {
+async fn setup_library(client: &Client, token: &str) -> (Status, serde_json::Value) {
     let response = client
         .post("/api/v1/auth/setup-library")
         .header(Header::new("Authorization", format!("Bearer {}", token)))
@@ -144,7 +143,7 @@ async fn setup_library(client: &Client, token: &str) -> (Status, Value) {
 
     let status = response.status();
     let text = response.into_string().await.unwrap_or_default();
-    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
