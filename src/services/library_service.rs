@@ -89,7 +89,47 @@ pub async fn setup_library(
     }
 
     unlock_state.insert_library_key(&library.id, &data_key);
-    User::mark_setup_complete(pool, user_id).await?;
+
+    // Mark user setup as complete. If this fails, roll back prior state
+    // (DB row, on-disk directory, and unlock-state key) on a best-effort basis.
+    if let Err(e) = User::mark_setup_complete(pool, user_id).await {
+        tracing::error!(
+            library_id = %library.id,
+            user_id = %user_id,
+            error = %e,
+            "Failed to mark user setup as complete — rolling back library creation"
+        );
+
+        // Best-effort: remove library key from unlock state.
+        if let Err(remove_err) = unlock_state.remove_library_key(&library.id) {
+            tracing::error!(
+                library_id = %library.id,
+                error = %remove_err,
+                "Failed to remove library key from UnlockState during rollback"
+            );
+        }
+
+       // Best-effort: remove the library directory from disk.
+        if let Err(fs_err) = fs::remove_dir_all(&lib_dir).await {
+            tracing::error!(
+                library_id = %library.id,
+                path = %lib_dir,
+                error = %fs_err,
+                "Failed to remove library directory during rollback"
+            );
+        }
+
+        // Best-effort: delete the library DB row.
+        if let Err(del_err) = PersonalLibrary::delete_by_id(pool, &library.id).await {
+            tracing::error!(
+                library_id = %library.id,
+                error = %del_err,
+                "Failed to delete library DB row during rollback"
+            );
+        }
+
+        return Err(e);
+    }
 
     tracing::info!(
         library_id = %library.id,
