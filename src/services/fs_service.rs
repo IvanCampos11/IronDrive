@@ -141,7 +141,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
-    (y as u64, m, d)
+    (y.max(0) as u64, m, d)
 }
 
 /// Check whether a filename is an internal IronDrive metadata file that
@@ -157,6 +157,25 @@ const ENCRYPTION_OVERHEAD: u64 = 12 + 16 + 32; // 60 bytes
 
 fn plaintext_size_from_disk(disk_size: u64) -> u64 {
     disk_size.saturating_sub(ENCRYPTION_OVERHEAD)
+}
+
+/// Async wrapper for [`safe_join`] — moves the blocking path validation
+/// (which calls `std::fs::canonicalize` and `std::fs::symlink_metadata`)
+/// onto a blocking thread pool.
+async fn safe_join_async(root: PathBuf, user_path: String) -> Result<PathBuf, AppError> {
+    tokio::task::spawn_blocking(move || safe_join(&root, &user_path))
+        .await
+        .map_err(|e| AppError::Internal(format!("Path validation task failed: {e}")))?
+}
+
+/// Async wrapper for [`std::fs::canonicalize`].
+async fn canonicalize_async(path: PathBuf) -> Result<PathBuf, AppError> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::canonicalize(&path)
+            .map_err(|e| AppError::Internal(format!("Cannot resolve path: {e}")))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Canonicalize task failed: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -182,18 +201,12 @@ pub async fn list_directory(
 
     let root = library_root(config, library_id);
 
-    // For root listing, the target is the root itself.
+    let canonical_root = canonicalize_async(root.clone()).await?;
     let target = if user_path.is_empty() {
-        // Canonicalize the root so we can compute relative paths.
-        std::fs::canonicalize(&root)
-            .map_err(|e| AppError::Internal(format!("Cannot resolve library root: {e}")))?
+        canonical_root.clone()
     } else {
-        safe_join(&root, user_path)?
+        safe_join_async(root, user_path.to_string()).await?
     };
-
-    // Canonical root for relative path computation.
-    let canonical_root = std::fs::canonicalize(&root)
-        .map_err(|e| AppError::Internal(format!("Cannot resolve library root: {e}")))?;
 
     // Verify target is a directory.
     let meta = fs::metadata(&target).await.map_err(|e| {
@@ -286,11 +299,7 @@ pub async fn list_directory(
     }
 
     // Sort: directories first, then alphabetically by name (case-insensitive).
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 
     Ok(entries)
 }
@@ -310,21 +319,28 @@ pub async fn create_directory(
     }
 
     let root = library_root(config, library_id);
-    let target = safe_join(&root, user_path)?;
+    let target = safe_join_async(root, user_path.to_string()).await?;
 
-    // If it already exists and is a directory, that's fine (idempotent).
-    if let Ok(meta) = fs::metadata(&target).await {
-        if meta.is_dir() {
-            return Ok(user_path.to_string());
+    // Attempt to create. If it already exists as a dir, that's fine.
+    // If a file exists at this path, create_dir_all will fail.
+    match fs::create_dir_all(&target).await {
+        Ok(()) => {}
+        Err(e) => {
+            // Check if a file (not a directory) exists at the target path.
+            if let Ok(meta) = fs::metadata(&target).await {
+                if !meta.is_dir() {
+                    return Err(AppError::Conflict(
+                        "A file already exists at this path.".into(),
+                    ));
+                }
+                // It's a directory — idempotent success (race: someone else created it).
+            } else {
+                return Err(AppError::Internal(format!(
+                    "Failed to create directory: {e}"
+                )));
+            }
         }
-        return Err(AppError::Conflict(
-            "A file already exists at this path.".into(),
-        ));
     }
-
-    fs::create_dir_all(&target)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to create directory: {e}")))?;
 
     Ok(user_path.to_string())
 }
@@ -351,7 +367,7 @@ pub async fn upload_file(
 
     let data_key = require_data_key(unlock_state, library_id)?;
     let root = library_root(config, library_id);
-    let target = safe_join(&root, user_path)?;
+    let target = safe_join_async(root, user_path.to_string()).await?;
 
     // Ensure parent directory exists.
     if let Some(parent) = target.parent() {
@@ -360,21 +376,26 @@ pub async fn upload_file(
             .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
     }
 
-    // Reject if a directory exists at this path.
-    if let Ok(meta) = fs::metadata(&target).await {
-        if meta.is_dir() {
-            return Err(AppError::Conflict(
-                "A directory already exists at this path.".into(),
-            ));
-        }
-    }
-
     // Compute checksum before encryption.
     let checksum = crypto_service::sha256_bytes(data);
     let checksum_hex = hex::encode(checksum);
 
-    // Encrypt and write.
-    encrypt_and_write_file(&data_key, data, &target, write_verify).await?;
+    // Encrypt and write. If target is a directory, tokio::fs::write will fail
+    // with an appropriate error.
+    match encrypt_and_write_file(&data_key, data, &target, write_verify).await {
+        Ok(()) => {}
+        Err(e) => {
+            // Check if the target is a directory — that's a user-facing conflict.
+            if let Ok(meta) = fs::metadata(&target).await {
+                if meta.is_dir() {
+                    return Err(AppError::Conflict(
+                        "A directory already exists at this path.".into(),
+                    ));
+                }
+            }
+            return Err(e);
+        }
+    }
 
     // Read back the disk size.
     let disk_meta = fs::metadata(&target)
@@ -410,7 +431,7 @@ pub async fn download_file(
 
     let data_key = require_data_key(unlock_state, library_id)?;
     let root = library_root(config, library_id);
-    let target = safe_join(&root, user_path)?;
+    let target = safe_join_async(root, user_path.to_string()).await?;
 
     // Ensure it exists and is a file.
     let meta = fs::metadata(&target).await.map_err(|e| {
@@ -460,8 +481,10 @@ pub async fn delete_entry(
     }
 
     let root = library_root(config, library_id);
-    let target = safe_join(&root, user_path)?;
+    let target = safe_join_async(root.clone(), user_path.to_string()).await?;
 
+    // Check existence first — this gives a clean NotFound before we try
+    // to canonicalize (which would fail on a nonexistent path).
     let meta = fs::metadata(&target).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AppError::NotFound
@@ -469,6 +492,24 @@ pub async fn delete_entry(
             AppError::Internal(format!("Cannot read entry metadata: {e}"))
         }
     })?;
+
+    // Belt-and-suspenders: verify the resolved path is strictly inside the
+    // library root. safe_join already checks this, but a bug there would be
+    // catastrophic for delete_entry.
+    let canonical_root = canonicalize_async(root).await?;
+    let canonical_target = canonicalize_async(target.clone()).await?;
+    if !canonical_target.starts_with(&canonical_root) || canonical_target == canonical_root {
+        return Err(AppError::Validation(
+            "Path escapes the library root.".into(),
+        ));
+    }
+
+    tracing::info!(
+        library_id = library_id,
+        path = user_path,
+        is_dir = meta.is_dir(),
+        "Deleting entry"
+    );
 
     if meta.is_dir() {
         fs::remove_dir_all(&target)
@@ -502,8 +543,13 @@ pub async fn rename_entry(
     }
 
     let root = library_root(config, library_id);
-    let source = safe_join(&root, old_path)?;
-    let dest = safe_join(&root, new_path)?;
+    let source = safe_join_async(root.clone(), old_path.to_string()).await?;
+    let dest = safe_join_async(root, new_path.to_string()).await?;
+
+    // Pre-flight checks. Note: there is a small TOCTOU window between these
+    // checks and the rename below. On Linux, rename(2) atomically replaces
+    // the destination, so the worst case is an unexpected overwrite — not a
+    // security issue since both paths are validated by safe_join.
 
     // Source must exist.
     if !fs::try_exists(&source).await.unwrap_or(false) {
@@ -546,16 +592,11 @@ pub async fn get_entry_info(
 ) -> Result<FsEntry, AppError> {
     let root = library_root(config, library_id);
 
-    let (target, canonical_root) = if user_path.is_empty() {
-        // Info about the library root itself.
-        let canonical = std::fs::canonicalize(&root)
-            .map_err(|e| AppError::Internal(format!("Cannot resolve library root: {e}")))?;
-        (canonical.clone(), canonical)
+    let canonical_root = canonicalize_async(root.clone()).await?;
+    let target = if user_path.is_empty() {
+        canonical_root.clone()
     } else {
-        let t = safe_join(&root, user_path)?;
-        let cr = std::fs::canonicalize(&root)
-            .map_err(|e| AppError::Internal(format!("Cannot resolve library root: {e}")))?;
-        (t, cr)
+        safe_join_async(root, user_path.to_string()).await?
     };
 
     let meta = fs::metadata(&target).await.map_err(|e| {
@@ -617,6 +658,10 @@ pub async fn get_entry_info(
 /// Walk a directory tree and sum up disk usage.
 ///
 /// If `user_path` is empty, walks the entire library root.
+///
+/// **Note:** Internal metadata files (`.irondrive.meta`) and dot-prefixed
+/// entries are excluded from the count. Reported `disk_bytes` reflects the
+/// encrypted on-disk size of user-visible files only.
 pub async fn calculate_usage(
     config: &AppConfig,
     library_id: &str,
@@ -625,10 +670,9 @@ pub async fn calculate_usage(
     let root = library_root(config, library_id);
 
     let target = if user_path.is_empty() {
-        std::fs::canonicalize(&root)
-            .map_err(|e| AppError::Internal(format!("Cannot resolve library root: {e}")))?
+        canonicalize_async(root.clone()).await?
     } else {
-        safe_join(&root, user_path)?
+        safe_join_async(root, user_path.to_string()).await?
     };
 
     let meta = fs::metadata(&target).await.map_err(|e| {
@@ -689,11 +733,11 @@ pub async fn calculate_usage(
             };
 
             if entry_meta.is_dir() {
-                dir_count += 1;
+                dir_count = dir_count.saturating_add(1);
                 stack.push(entry.path());
             } else if entry_meta.is_file() {
-                file_count += 1;
-                disk_bytes += entry_meta.len();
+                file_count = file_count.saturating_add(1);
+                disk_bytes = disk_bytes.saturating_add(entry_meta.len());
             }
             // Symlinks and other types are silently skipped.
         }

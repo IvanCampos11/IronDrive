@@ -1,6 +1,6 @@
 # IronDrive — TODO
 
-> **Last Updated:** 2026-03-12
+> **Last Updated:** 2026-03-17
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ---
@@ -22,7 +22,8 @@
 | **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | ✅ Complete |
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ✅ Complete |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ✅ Complete |
-| **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | 🔨 In progress |
+| **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ✅ Complete |
+| **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings | ⬜ Not started |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ⬜ Not started |
 | **M5.6** | Data Integrity | `integrity_service`, integrity events table, corruption detection + notifications | ⬜ Not started |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ⬜ Not started |
@@ -129,12 +130,94 @@
   - [x] `rename_entry()` — rename or move within same root
   - [x] `get_entry_info()` — stat a single file/folder (with integrity status)
   - [x] `calculate_usage()` — walk dir tree, sum sizes
-- [ ] `src/routes/library.rs` — personal library filesystem endpoints
-- [ ] File upload via Rocket's `Data` type (multipart)
-- [ ] File download with streaming response + `X-IronDrive-Integrity` header
-- [ ] Integration tests for all fs operations
-- [ ] Integration tests for checksum verification on download
+- [x] `src/routes/library.rs` — personal library filesystem endpoints (list, mkdir, upload, download, delete, rename, info, usage)
+- [x] File upload via Rocket's `Data` type (with configurable size limit from `max_upload_bytes`)
+- [x] File download with streaming response + `X-IronDrive-Integrity` header (SHA-256 hex digest)
+- [x] Integration tests for all fs operations (48 HTTP-level integration tests)
+- [x] Integration tests for checksum verification on download (known-vector SHA-256 + upload/download roundtrip)
 - [ ] **Security**: fuzz `safe_join()` with adversarial paths — this is the most critical function in the codebase
+
+### M5F — Frontend (Tera + HTMX + Tailwind)
+
+Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Tera) + HTMX + Alpine.js + Tailwind CSS.
+
+- [ ] **Setup & Infrastructure**
+  - [ ] Add `rocket_dyn_templates` with Tera to `Cargo.toml`
+  - [ ] Configure template dir in `Rocket.toml` (`templates/`)
+  - [ ] `src/routes/pages.rs` — page-serving routes (HTML responses, separate from `/api/v1/` JSON routes)
+  - [ ] Wire `Template::fairing()` into Rocket launch
+  - [ ] Serve static assets via `FileServer` from `static/`
+  - [ ] Download HTMX (~14KB) + Alpine.js (~17KB) into `static/vendor/`
+  - [ ] Tailwind CSS build (standalone CLI or npm script) → `static/css/style.css`
+  - [ ] `Makefile` / script: `build-css` target for Tailwind rebuild
+- [ ] **Base Layout & Shared Components**
+  - [ ] `templates/base.html.tera` — HTML shell (head, nav, footer, HTMX + Alpine + Tailwind includes)
+  - [ ] `templates/partials/nav.html.tera` — top nav bar (logo, user menu, logout)
+  - [ ] `templates/partials/flash.html.tera` — flash message / toast component
+  - [ ] `templates/partials/breadcrumb.html.tera` — path breadcrumbs for file browser
+  - [ ] `templates/partials/confirm_modal.html.tera` — reusable Alpine.js confirmation dialog
+  - [ ] `templates/partials/empty_state.html.tera` — empty folder / no results placeholder
+- [ ] **Auth Pages**
+  - [ ] `GET /login` → `templates/auth/login.html.tera` — login form
+  - [ ] `GET /register` → `templates/auth/register.html.tera` — registration form
+  - [ ] `POST /login` — form submit → call `auth_service::login()` → set session cookie → redirect
+  - [ ] `POST /register` — form submit → call `auth_service::register()` → redirect to login
+  - [ ] `POST /logout` — destroy session → redirect to login
+  - [ ] Flash messages for errors (bad password, username taken, etc.)
+  - [ ] Redirect authenticated users away from login/register
+  - [ ] Redirect unauthenticated users to login from protected pages
+- [ ] **Setup Wizard Page**
+  - [ ] `GET /setup` → `templates/setup/wizard.html.tera` — library setup form
+  - [ ] `POST /setup` — create personal library (server mode) → redirect to file browser
+  - [ ] Guard: redirect to `/setup` if `setup_complete == false`
+  - [ ] Guard: redirect to `/files` if setup already complete
+- [ ] **File Browser (core feature)**
+  - [ ] `GET /files` → `templates/files/browser.html.tera` — main file browser view
+  - [ ] `GET /files?path=subdir/` — directory navigation via query param
+  - [ ] `templates/partials/file_list.html.tera` — table/grid of `FsEntry` items (HTMX partial for swapping)
+  - [ ] HTMX-powered directory navigation (`hx-get="/files?path=..."` → swap file list without full reload)
+  - [ ] File icons by type/extension (folder icon, document icon, image icon, etc.)
+  - [ ] File size formatting (human-readable: KB, MB, GB)
+  - [ ] Last modified timestamp display
+  - [ ] Sort by name / size / date (HTMX swap or Alpine.js client-side)
+  - [ ] Breadcrumb navigation (clickable path segments)
+- [ ] **File Operations UI**
+  - [ ] **Upload**: drag-and-drop zone + file input button
+    - [ ] `POST /files/upload?path=...` — multipart or raw body upload
+    - [ ] Progress indicator (HTMX `hx-indicator` or `htmx:xhr:progress` event + small JS)
+    - [ ] Success → HTMX refresh of file list
+    - [ ] Error flash on failure (size limit, conflict, etc.)
+  - [ ] **Download**: click file name or download button → `GET /files/download?path=...` (direct browser download)
+  - [ ] **Create Folder**: button → inline input or modal → `POST /files/mkdir?path=...` → HTMX refresh
+  - [ ] **Rename**: click rename action → inline edit or modal → `POST /files/rename` → HTMX refresh
+  - [ ] **Delete**: click delete action → confirmation modal (Alpine.js) → `DELETE /files/delete?path=...` → HTMX refresh
+  - [ ] Multi-select with checkboxes → bulk delete (stretch goal)
+- [ ] **Usage / Storage Page**
+  - [ ] `GET /usage` → `templates/files/usage.html.tera`
+  - [ ] Display total usage (from `calculate_usage()`)
+  - [ ] Visual bar / progress indicator for used space
+- [ ] **Settings Page**
+  - [ ] `GET /settings` → `templates/settings/index.html.tera`
+  - [ ] Display current user info (username, email)
+  - [ ] Library info (encryption mode, created date)
+  - [ ] Placeholder sections for future features (encryption tier, quotas)
+- [ ] **Error Pages**
+  - [ ] `templates/errors/404.html.tera` — not found
+  - [ ] `templates/errors/500.html.tera` — internal error
+  - [ ] `templates/errors/403.html.tera` — forbidden / locked
+  - [ ] Rocket catcher routes → render error templates
+- [ ] **Responsive Design**
+  - [ ] Mobile-friendly nav (hamburger menu via Alpine.js)
+  - [ ] File browser works on mobile (card layout or compact table)
+  - [ ] Upload works on mobile (file picker, no drag-and-drop)
+- [ ] **Tests**
+  - [ ] Page-level integration tests: unauthenticated → redirects to login
+  - [ ] Page-level integration tests: authenticated → renders file browser
+  - [ ] Page-level integration tests: setup guard redirects correctly
+  - [ ] Upload via HTML form → file appears in listing
+  - [ ] Create folder → appears in listing
+  - [ ] Delete → removed from listing
+  - [ ] Rename → updated in listing
 
 ### M5.5 — Chunked Transfers
 
