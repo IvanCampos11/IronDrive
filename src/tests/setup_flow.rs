@@ -17,7 +17,7 @@ use crate::db;
 use crate::routes;
 use crate::services;
 
-/// Build a Rocket instance backed by a temp directory and in-memory-ish SQLite DB.
+/// Build a Rocket instance backed by a temp directory and a file-backed SQLite DB.
 /// Each test gets its own isolated environment.
 async fn test_client(tmp: &tempfile::TempDir) -> Client {
     let data_dir = tmp.path().join("data");
