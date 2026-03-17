@@ -8,6 +8,9 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::auth_guard::{extract_bearer_token, hash_token, AuthenticatedUser};
 use crate::services::auth_service;
+use crate::services::crypto_service::MasterKey;
+use crate::services::library_service;
+use crate::services::unlock_state::UnlockState;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -50,8 +53,14 @@ pub struct LogoutResponse {
     pub message: String,
 }
 
-/// Extracts the raw bearer token string without validating the session.
-/// Used alongside `AuthenticatedUser` in logout to identify which session to destroy.
+#[derive(Serialize)]
+pub struct SetupLibraryResponse {
+    pub library_id: String,
+    pub encryption_mode: String,
+    pub message: String,
+}
+
+/// Extracts the raw bearer token without validating the session.
 pub struct RawBearerToken(pub String);
 
 #[rocket::async_trait]
@@ -71,8 +80,7 @@ impl<'r> rocket::request::FromRequest<'r> for RawBearerToken {
     }
 }
 
-/// POST /api/v1/auth/register — Create a new user account.
-/// First user is auto-promoted to admin. No auth required.
+/// POST /api/v1/auth/register — Create a new user account. No auth required.
 #[post("/api/v1/auth/register", format = "json", data = "<body>")]
 pub async fn register(
     pool: &State<DbPool>,
@@ -96,7 +104,7 @@ pub async fn register(
     }))
 }
 
-/// POST /api/v1/auth/login — Authenticate and return a session token.
+/// POST /api/v1/auth/login
 #[post("/api/v1/auth/login", format = "json", data = "<body>")]
 pub async fn login(
     pool: &State<DbPool>,
@@ -118,7 +126,7 @@ pub async fn login(
     }))
 }
 
-/// POST /api/v1/auth/logout — Destroy the current session only.
+/// POST /api/v1/auth/logout
 #[post("/api/v1/auth/logout")]
 pub async fn logout(
     pool: &State<DbPool>,
@@ -134,6 +142,31 @@ pub async fn logout(
     }))
 }
 
+/// POST /api/v1/auth/setup-library — One-time personal library init. Returns 409 if already done.
+#[post("/api/v1/auth/setup-library")]
+pub async fn setup_library(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    master_key: &State<MasterKey>,
+    unlock_state: &State<UnlockState>,
+    user: AuthenticatedUser,
+) -> Result<Json<SetupLibraryResponse>, AppError> {
+    let result = library_service::setup_library(
+        pool.inner(),
+        config.inner(),
+        master_key.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+    )
+    .await?;
+
+    Ok(Json(SetupLibraryResponse {
+        library_id: result.library.id,
+        encryption_mode: result.library.encryption_mode,
+        message: "Personal library created successfully.".into(),
+    }))
+}
+
 pub fn routes() -> Vec<Route> {
-    routes![register, login, logout]
+    routes![register, login, logout, setup_library]
 }

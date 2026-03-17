@@ -19,6 +19,9 @@ mod routes;
 mod services;
 mod utils;
 
+#[cfg(test)]
+mod tests;
+
 /// Create required data directories. Panics on failure.
 async fn ensure_data_directories(data_dir: &str) {
     let subdirs = ["libraries", "spaces", ".chunks"];
@@ -193,6 +196,15 @@ async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket
 
     let unlock_state = services::unlock_state::UnlockState::new();
     tracing::info!("UnlockState initialized (no keys loaded yet)");
+
+    let loaded =
+        services::library_service::load_server_mode_keys(&pool, &master_key, &unlock_state)
+            .await
+            .expect("Failed to load server-mode library keys");
+    tracing::info!(
+        count = loaded,
+        "Server-mode library keys loaded into UnlockState"
+    );
 
     rocket.manage(pool).manage(master_key).manage(unlock_state)
 }

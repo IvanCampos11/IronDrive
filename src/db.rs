@@ -5,6 +5,20 @@ use tracing::info;
 
 pub type DbPool = SqlitePool;
 
+/// Check if a sqlx error is a SQLite UNIQUE constraint violation.
+pub fn is_unique_violation(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db_err) => {
+            db_err
+                .message()
+                .to_ascii_lowercase()
+                .contains("unique constraint")
+                || db_err.code().map_or(false, |c| c == "2067")
+        }
+        _ => false,
+    }
+}
+
 /// Create a SQLite connection pool from a database URL string.
 pub async fn init_pool(db_url: &str) -> Result<DbPool, sqlx::Error> {
     info!(url = %db_url, "Connecting to database");

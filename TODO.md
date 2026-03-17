@@ -21,7 +21,7 @@
 | **M1** | Project Scaffold | `Cargo.toml`, `Rocket.toml`, DB pool, migrations, `/health` | ✅ Complete |
 | **M2** | Authentication | Register, login, logout, session tokens, `AuthenticatedUser` guard | ✅ Complete |
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ✅ Complete |
-| **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ⬜ Not started |
+| **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ✅ Complete |
 | **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ⬜ Not started |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ⬜ Not started |
 | **M5.6** | Data Integrity | `integrity_service`, integrity events table, corruption detection + notifications | ⬜ Not started |
@@ -106,15 +106,15 @@
 
 ### M4 — Setup Wizard + Library
 
-- [ ] `src/models/library.rs` — PersonalLibrary struct, create, find by user
-- [ ] `src/services/library_service.rs`:
-  - [ ] Setup: create library with `server` mode (default)
-  - [ ] Generate data key, wrap with master key, store `encrypted_data_key`
-  - [ ] Create dir on disk + `.irondrive.meta`
-  - [ ] Load data key into `UnlockState` right away (server mode = always unlocked)
-- [ ] `src/guards/setup_guard.rs` — reject requests if `setup_complete == false`
-- [ ] `POST /api/v1/auth/setup-library` endpoint (server mode only for now)
-- [ ] Integration tests for setup flow
+- [x] `src/models/library.rs` — PersonalLibrary struct, create, find by user
+- [x] `src/services/library_service.rs`:
+  - [x] Setup: create library with `server` mode (default)
+  - [x] Generate data key, wrap with master key, store `encrypted_data_key`
+  - [x] Create dir on disk + `.irondrive.meta`
+  - [x] Load data key into `UnlockState` right away (server mode = always unlocked)
+- [x] `src/guards/setup_guard.rs` — reject requests if `setup_complete == false`
+- [x] `POST /api/v1/auth/setup-library` endpoint (server mode only for now)
+- [x] Integration tests for setup flow
 
 ### M5 — Filesystem Service
 

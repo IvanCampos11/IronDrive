@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 /// A row from the `sessions` table. Only the SHA-256 hash of the token is stored.
 #[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
 pub struct Session {
     pub id: String,
     pub user_id: String,

@@ -6,6 +6,7 @@ use rand::RngCore;
 
 /// Application configuration loaded from environment variables.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AppConfig {
     pub secret_key: String,
     pub data_dir: String,
@@ -23,6 +24,7 @@ pub struct AppConfig {
 const PLACEHOLDER_KEY: &str = "CHANGE-ME-generate-a-random-256-bit-key-here";
 const SECRET_KEY_FILENAME: &str = ".secret_key";
 
+#[allow(dead_code)]
 impl AppConfig {
     /// Load configuration from environment variables.
     pub fn from_env() -> Self {
