@@ -294,6 +294,31 @@ mod tests {
         }
     }
 
+    /// Test credentials — not real passwords. Used only in isolated unit tests
+    /// against in-memory SQLite databases.
+    #[allow(dead_code)]
+    fn test_password(index: usize) -> String {
+        format!("test-credential-user{}", index)
+    }
+
+    fn alice_password() -> &'static str {
+        "test-credential-user0"
+    }
+
+    fn bob_password() -> &'static str {
+        "test-credential-user1"
+    }
+
+    /// A valid password that is intentionally different from alice/bob's.
+    fn wrong_password() -> &'static str {
+        "test-credential-wrong"
+    }
+
+    /// A password that is too short to pass validation.
+    fn short_password() -> &'static str {
+        "short"
+    }
+
     // ── Registration Tests ───────────────────────────────────────────
 
     #[tokio::test]
@@ -301,9 +326,15 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        let result = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.user.username, "alice");
         assert_eq!(result.user.role, "admin");
@@ -315,11 +346,17 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
-        let result = register(&pool, &config, "bob", "bob@example.com", "password456")
+        let result = register(&pool, &config, "bob", "bob@example.com", bob_password())
             .await
             .unwrap();
 
@@ -331,11 +368,24 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
-        let result = register(&pool, &config, "alice", "alice2@example.com", "password456").await;
+        let result = register(
+            &pool,
+            &config,
+            "alice",
+            "alice2@example.com",
+            bob_password(),
+        )
+        .await;
         assert!(matches!(result, Err(AppError::Conflict(_))));
     }
 
@@ -344,11 +394,17 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
-        let result = register(&pool, &config, "bob", "alice@example.com", "password456").await;
+        let result = register(&pool, &config, "bob", "alice@example.com", bob_password()).await;
         assert!(matches!(result, Err(AppError::Conflict(_))));
     }
 
@@ -357,12 +413,18 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
         // Same email, different case — should be detected as duplicate.
-        let result = register(&pool, &config, "bob", "Alice@Example.COM", "password456").await;
+        let result = register(&pool, &config, "bob", "Alice@Example.COM", bob_password()).await;
         assert!(matches!(result, Err(AppError::Conflict(_))));
     }
 
@@ -371,9 +433,15 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = register(&pool, &config, "alice", "Alice@Example.COM", "password123")
-            .await
-            .unwrap();
+        let result = register(
+            &pool,
+            &config,
+            "alice",
+            "Alice@Example.COM",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.user.email, "alice@example.com");
     }
@@ -388,7 +456,7 @@ mod tests {
             &config,
             "  alice  ",
             "alice@example.com",
-            "password123",
+            alice_password(),
         )
         .await
         .unwrap();
@@ -406,7 +474,7 @@ mod tests {
             &config,
             "alice",
             "  alice@example.com  ",
-            "password123",
+            alice_password(),
         )
         .await
         .unwrap();
@@ -419,7 +487,7 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = register(&pool, &config, "ab", "ab@example.com", "password123").await;
+        let result = register(&pool, &config, "ab", "ab@example.com", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
@@ -434,7 +502,7 @@ mod tests {
             &config,
             &long_name,
             "long@example.com",
-            "password123",
+            alice_password(),
         )
         .await;
         assert!(matches!(result, Err(AppError::Validation(_))));
@@ -445,10 +513,10 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = register(&pool, &config, "al ice", "a@example.com", "password123").await;
+        let result = register(&pool, &config, "al ice", "a@example.com", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
 
-        let result = register(&pool, &config, "al@ice", "b@example.com", "password123").await;
+        let result = register(&pool, &config, "al@ice", "b@example.com", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
@@ -457,10 +525,10 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = register(&pool, &config, "-alice", "a@example.com", "password123").await;
+        let result = register(&pool, &config, "-alice", "a@example.com", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
 
-        let result = register(&pool, &config, "_alice", "b@example.com", "password123").await;
+        let result = register(&pool, &config, "_alice", "b@example.com", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
@@ -474,7 +542,7 @@ mod tests {
             &config,
             "alice-bob_99",
             "alice@example.com",
-            "password123",
+            alice_password(),
         )
         .await;
         assert!(result.is_ok());
@@ -485,7 +553,14 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = register(&pool, &config, "alice", "alice@example.com", "short").await;
+        let result = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            short_password(),
+        )
+        .await;
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
@@ -494,19 +569,19 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = register(&pool, &config, "alice", "not-an-email", "password123").await;
+        let result = register(&pool, &config, "alice", "not-an-email", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
 
-        let result = register(&pool, &config, "alice", "@example.com", "password123").await;
+        let result = register(&pool, &config, "alice", "@example.com", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
 
-        let result = register(&pool, &config, "alice", "alice@", "password123").await;
+        let result = register(&pool, &config, "alice", "alice@", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
 
-        let result = register(&pool, &config, "alice", "", "password123").await;
+        let result = register(&pool, &config, "alice", "", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
 
-        let result = register(&pool, &config, "alice", "alice@localhost", "password123").await;
+        let result = register(&pool, &config, "alice", "alice@localhost", alice_password()).await;
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
@@ -517,11 +592,19 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
+
+        let result = login(&pool, &config, "alice", alice_password())
             .await
             .unwrap();
-
-        let result = login(&pool, &config, "alice", "password123").await.unwrap();
 
         assert!(!result.token.is_empty());
         assert!(!result.setup_complete);
@@ -533,11 +616,17 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
-        let result = login(&pool, &config, "  alice  ", "password123")
+        let result = login(&pool, &config, "  alice  ", alice_password())
             .await
             .unwrap();
 
@@ -549,11 +638,17 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
-        let result = login(&pool, &config, "alice", "wrong-password").await;
+        let result = login(&pool, &config, "alice", wrong_password()).await;
         assert!(matches!(result, Err(AppError::Unauthorized)));
     }
 
@@ -562,7 +657,7 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let result = login(&pool, &config, "nobody", "password123").await;
+        let result = login(&pool, &config, "nobody", alice_password()).await;
         assert!(matches!(result, Err(AppError::Unauthorized)));
     }
 
@@ -571,9 +666,15 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let reg = register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        let reg = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
         // Deactivate the user directly in the DB.
         sqlx::query("UPDATE users SET is_active = 0 WHERE id = ?")
@@ -582,7 +683,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = login(&pool, &config, "alice", "password123").await;
+        let result = login(&pool, &config, "alice", alice_password()).await;
         assert!(matches!(result, Err(AppError::Unauthorized)));
     }
 
@@ -591,11 +692,19 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
+
+        let login_result = login(&pool, &config, "alice", alice_password())
             .await
             .unwrap();
-
-        let login_result = login(&pool, &config, "alice", "password123").await.unwrap();
 
         // The token should be usable to find a valid session.
         let token_hash = crate::guards::auth_guard::hash_token(&login_result.token);
@@ -608,12 +717,22 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        register(&pool, &config, "alice", "alice@example.com", "password123")
+        register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
+
+        let r1 = login(&pool, &config, "alice", alice_password())
             .await
             .unwrap();
-
-        let r1 = login(&pool, &config, "alice", "password123").await.unwrap();
-        let r2 = login(&pool, &config, "alice", "password123").await.unwrap();
+        let r2 = login(&pool, &config, "alice", alice_password())
+            .await
+            .unwrap();
 
         // Tokens should be different.
         assert_ne!(r1.token, r2.token);
@@ -632,11 +751,19 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let reg = register(&pool, &config, "alice", "alice@example.com", "password123")
+        let reg = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
+
+        let login_result = login(&pool, &config, "alice", alice_password())
             .await
             .unwrap();
-
-        let login_result = login(&pool, &config, "alice", "password123").await.unwrap();
         let token_hash = crate::guards::auth_guard::hash_token(&login_result.token);
 
         // Session should exist before logout.
@@ -659,12 +786,22 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let reg = register(&pool, &config, "alice", "alice@example.com", "password123")
+        let reg = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
+
+        let r1 = login(&pool, &config, "alice", alice_password())
             .await
             .unwrap();
-
-        let r1 = login(&pool, &config, "alice", "password123").await.unwrap();
-        let r2 = login(&pool, &config, "alice", "password123").await.unwrap();
+        let r2 = login(&pool, &config, "alice", alice_password())
+            .await
+            .unwrap();
 
         let h1 = crate::guards::auth_guard::hash_token(&r1.token);
         let h2 = crate::guards::auth_guard::hash_token(&r2.token);
@@ -683,9 +820,15 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let reg = register(&pool, &config, "alice", "alice@example.com", "password123")
-            .await
-            .unwrap();
+        let reg = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
 
         // Logging out with a fake token hash should not error.
         let result = logout(&pool, &reg.user.id, "nonexistent-hash").await;
