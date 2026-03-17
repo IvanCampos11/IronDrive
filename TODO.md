@@ -120,15 +120,15 @@
 
 - [x] `src/utils/path_safety.rs` — `safe_join()` with all the traversal checks
 - [x] `src/utils/mime.rs` — MIME type detection from extension
-- [ ] `src/services/fs_service.rs`:
-  - [ ] `list_directory()` — read real filesystem, return `Vec<FsEntry>` (includes integrity status)
-  - [ ] `create_directory()` — mkdir with parent creation
-  - [ ] `upload_file()` — encrypt, compute checksum, write to disk, verify write
-  - [ ] `download_file()` — read, decrypt, verify checksum, set integrity header
-  - [ ] `delete_entry()` — remove file or dir (recursive)
-  - [ ] `rename_entry()` — rename or move within same root
-  - [ ] `get_entry_info()` — stat a single file/folder (with integrity status)
-  - [ ] `calculate_usage()` — walk dir tree, sum sizes
+- [x] `src/services/fs_service.rs`:
+  - [x] `list_directory()` — read real filesystem, return `Vec<FsEntry>` (includes integrity status)
+  - [x] `create_directory()` — mkdir with parent creation
+  - [x] `upload_file()` — encrypt, compute checksum, write to disk, verify write
+  - [x] `download_file()` — read, decrypt, verify checksum, set integrity header
+  - [x] `delete_entry()` — remove file or dir (recursive)
+  - [x] `rename_entry()` — rename or move within same root
+  - [x] `get_entry_info()` — stat a single file/folder (with integrity status)
+  - [x] `calculate_usage()` — walk dir tree, sum sizes
 - [ ] `src/routes/library.rs` — personal library filesystem endpoints
 - [ ] File upload via Rocket's `Data` type (multipart)
 - [ ] File download with streaming response + `X-IronDrive-Integrity` header
