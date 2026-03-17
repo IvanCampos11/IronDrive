@@ -205,10 +205,13 @@ pub async fn upload(
     let lib = require_library(pool.inner(), &user.0.id).await?;
     let write_verify = verify.unwrap_or(false);
 
-    // Read the body up to the configured max upload size.
+    // Read the body up to the configured max upload size, but enforce a smaller
+    // hard cap for this non-chunked endpoint to avoid excessive RAM usage.
     let max_bytes = config.max_upload_bytes;
+    let hard_cap_bytes: u64 = 50 * 1024 * 1024; // 50 MiB hard in-memory limit.
+    let allowed_bytes = std::cmp::min(max_bytes.bytes(), hard_cap_bytes);
     let stream = data
-        .open(max_bytes.bytes())
+        .open(allowed_bytes)
         .into_bytes()
         .await
         .map_err(|e| AppError::Internal(format!("Failed to read upload data: {e}")))?;
@@ -216,7 +219,7 @@ pub async fn upload(
     if !stream.is_complete() {
         return Err(AppError::Validation(format!(
             "Upload exceeds the maximum allowed size of {} bytes.",
-            max_bytes
+            allowed_bytes
         )));
     }
 
