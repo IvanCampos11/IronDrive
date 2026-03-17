@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_malformed_hash() {
-        let result = verify_password("password", "not-a-valid-hash");
+        let result = verify_password("test-credential", "not-a-valid-hash");
         assert!(result.is_err());
     }
 
