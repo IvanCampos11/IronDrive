@@ -1,0 +1,54 @@
+{% extends "base" %}
+{% block title %}IronDrive — Sign in{% endblock %}
+
+{% block nav %}{% endblock %}
+
+{% block content %}
+<div class="min-h-[85vh] flex items-center justify-center px-4">
+  <div class="w-full max-w-[420px] animate-fade-in">
+    <!-- Brand header -->
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-14 h-14 bg-blue-600 rounded-2xl shadow-lg shadow-blue-600/20 mb-5">
+        <svg class="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+        </svg>
+      </div>
+      <h1 class="text-2xl font-bold text-gray-900 dark:text-white tracking-tight">Welcome back</h1>
+      <p class="mt-1.5 text-sm text-gray-500 dark:text-gray-400">Sign in to your IronDrive account</p>
+    </div>
+
+    <!-- Card -->
+    <div class="card p-6 sm:p-8">
+      {% include "partials/flash" %}
+
+      <form method="post" action="/login" class="space-y-5">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div>
+          <label for="username" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Username</label>
+          <input
+            type="text" id="username" name="username" required autocomplete="username" autofocus
+            class="input-field"
+            placeholder="Enter your username"
+          >
+        </div>
+        <div>
+          <label for="password" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Password</label>
+          <input
+            type="password" id="password" name="password" required autocomplete="current-password"
+            class="input-field"
+            placeholder="Enter your password"
+          >
+        </div>
+        <button type="submit" class="btn-primary w-full">
+          Sign in
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+        </button>
+      </form>
+    </div>
+
+    <p class="mt-6 text-center text-sm text-gray-500 dark:text-gray-400">
+      Don't have an account? <a href="/register" class="font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors">Create one</a>
+    </p>
+  </div>
+</div>
+{% endblock %}

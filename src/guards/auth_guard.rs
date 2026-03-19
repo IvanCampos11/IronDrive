@@ -115,7 +115,7 @@ pub(crate) fn extract_bearer_token(request: &Request<'_>) -> Option<String> {
 
 /// Check that a token has a sane length and contains only safe characters
 /// (alphanumeric, `-`, `_`, `.`, `+`, `/`, `=`).
-fn is_valid_token_format(token: &str) -> bool {
+pub(crate) fn is_valid_token_format(token: &str) -> bool {
     let len = token.len();
     if len < TOKEN_MIN_LEN || len > TOKEN_MAX_LEN {
         return false;

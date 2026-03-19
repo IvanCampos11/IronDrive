@@ -209,7 +209,7 @@ pub async fn upload(
     // hard cap for this non-chunked endpoint to avoid excessive RAM usage.
     let max_bytes = config.max_upload_bytes;
     let hard_cap_bytes: u64 = 50 * 1024 * 1024; // 50 MiB hard in-memory limit.
-    let allowed_bytes = std::cmp::min(max_bytes.bytes(), hard_cap_bytes);
+    let allowed_bytes = std::cmp::min(max_bytes.bytes(), hard_cap_bytes.bytes());
     let stream = data
         .open(allowed_bytes)
         .into_bytes()

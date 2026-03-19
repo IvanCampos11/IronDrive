@@ -6,6 +6,7 @@ use rocket::http::Status;
 use rocket::request::Request;
 use rocket::response::{self, Responder, Response};
 use rocket::serde::json::serde_json;
+use rocket_dyn_templates::{context, Template};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -74,14 +75,67 @@ async fn rocket() -> _ {
         "IronDrive starting up"
     );
 
-    rocket::build()
+    rocket::custom(rocket_figment(&app_config))
         .manage(app_config)
+        .manage(services::rate_limit::RateLimiter::new())
         .attach(AdHoc::on_ignite("Database Setup", setup_database))
+        .attach(Template::fairing())
+        .attach(security_headers_fairing())
+        .attach(cache_control_fairing())
         .mount("/", routes::all_routes())
+        .mount("/static", routes::static_file_server())
         .register(
             "/",
             catchers![catch_400, catch_401, catch_403, catch_404, catch_409, catch_422, catch_500,],
         )
+}
+
+/// Build the Rocket Figment, merging `Rocket.toml` defaults with our
+/// `IRONDRIVE_SECRET_KEY` so Rocket has a `secret_key` in release mode.
+fn rocket_figment(app_config: &config::AppConfig) -> rocket::figment::Figment {
+    use rocket::figment::providers::{Serialized, Format, Toml, Env};
+    rocket::figment::Figment::from(rocket::Config::default())
+        .merge(Toml::file("Rocket.toml").nested())
+        .merge(Env::prefixed("ROCKET_").global())
+        .merge(Serialized::default("secret_key", &app_config.secret_key))
+}
+
+/// Attach security headers to every response.
+pub fn security_headers_fairing() -> AdHoc {
+    AdHoc::on_response("Security Headers", |_req, res| {
+        Box::pin(async move {
+            use rocket::http::Header;
+            res.set_header(Header::new("X-Content-Type-Options", "nosniff"));
+            res.set_header(Header::new("X-Frame-Options", "DENY"));
+            res.set_header(Header::new("Referrer-Policy", "strict-origin-when-cross-origin"));
+            res.set_header(Header::new("Permissions-Policy", "camera=(), microphone=(), geolocation=()"));
+            res.set_header(Header::new(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            ));
+        })
+    })
+}
+
+/// Cache-Control: long cache for static assets, no-cache for HTML pages.
+pub fn cache_control_fairing() -> AdHoc {
+    AdHoc::on_response("Cache-Control", |req, res| {
+        Box::pin(async move {
+            use rocket::http::Header;
+            let path = req.uri().path().as_str();
+            if path.starts_with("/static/") {
+                res.set_header(Header::new(
+                    "Cache-Control",
+                    "public, max-age=31536000, immutable",
+                ));
+            } else {
+                res.set_header(Header::new(
+                    "Cache-Control",
+                    "no-cache, no-store, must-revalidate",
+                ));
+            }
+        })
+    })
 }
 
 // Rocket returns HTML by default for errors — override with JSON.
@@ -122,7 +176,30 @@ struct CatcherJsonBody {
 }
 
 impl<'r> Responder<'r, 'static> for CatcherJsonBody {
-    fn respond_to(self, _request: &'r Request<'_>) -> response::Result<'static> {
+    fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
+        // If the request accepts HTML (browser), render an error template
+        let accept = request.accept();
+        let wants_html = accept.map_or(false, |a| {
+            a.iter().any(|q| {
+                let mt = q.media_type();
+                mt.top() == "text" && mt.sub() == "html"
+            })
+        });
+
+        if wants_html {
+            let template_name = match self.status.code {
+                403 => "errors/403",
+                404 => "errors/404",
+                _ => "errors/500",
+            };
+            if let Ok(template) = Template::render(template_name, context! {}).respond_to(request) {
+                return Response::build_from(template)
+                    .status(self.status)
+                    .ok();
+            }
+        }
+
+        // Fallback: JSON response for API clients
         Response::build()
             .status(self.status)
             .header(rocket::http::ContentType::JSON)

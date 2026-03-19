@@ -13,6 +13,7 @@
 
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
+use rocket_dyn_templates::Template;
 use rocket::serde::json::serde_json;
 use serde_json::Value;
 
@@ -96,6 +97,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         .manage(pool)
         .manage(master_key)
         .manage(unlock_state)
+        .manage(services::rate_limit::RateLimiter::new())
         .mount("/", routes::all_routes())
         .register(
             "/",
@@ -108,7 +110,8 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
                 crate::catch_422,
                 crate::catch_500,
             ],
-        );
+        )
+        .attach(Template::fairing());
 
     Client::tracked(rocket)
         .await
