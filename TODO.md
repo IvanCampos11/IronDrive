@@ -1,6 +1,6 @@
 # IronDrive — TODO
 
-> **Last Updated:** 2026-03-17
+> **Last Updated:** 2026-03-19
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ---
@@ -23,7 +23,7 @@
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ✅ Complete |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ✅ Complete |
 | **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ✅ Complete |
-| **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings | ⬜ Not started |
+| **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings, sidebar nav | ✅ Complete (CSRF & polish remaining) |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ⬜ Not started |
 | **M5.6** | Data Integrity | `integrity_service`, integrity events table, corruption detection + notifications | ⬜ Not started |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ⬜ Not started |
@@ -141,133 +141,128 @@
 
 Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Tera) + HTMX + vanilla JS + Tailwind CSS.
 
-- [ ] **Setup & Infrastructure**
-  - [ ] Add `rocket_dyn_templates` with Tera to `Cargo.toml`
-  - [ ] Configure template dir in `Rocket.toml` (`templates/`)
-  - [ ] `src/routes/pages.rs` — page-serving routes (HTML responses, separate from `/api/v1/` JSON routes)
-  - [ ] Wire `Template::fairing()` into Rocket launch
-  - [ ] Serve static assets via `FileServer` from `static/`
-  - [ ] Download HTMX (~14KB) into `static/vendor/`
-  - [ ] Tailwind CSS build (standalone CLI or npm script) → `static/css/style.css`
-  - [ ] `Makefile` / script: `build-css` target for Tailwind rebuild
-- [ ] **Base Layout & Shared Components**
-  - [ ] `templates/base.html.tera` — HTML shell (head, nav, footer, HTMX + Tailwind includes, `static/js/app.js`)
-  - [ ] `templates/partials/nav.html.tera` — top nav bar (logo, user menu, logout)
-  - [ ] `templates/partials/flash.html.tera` — flash message / toast component
-  - [ ] `templates/partials/breadcrumb.html.tera` — path breadcrumbs for file browser
-  - [ ] `templates/partials/confirm_modal.html.tera` — reusable confirmation dialog (vanilla JS)
-  - [ ] `templates/partials/empty_state.html.tera` — empty folder / no results placeholder
-- [ ] **Auth Pages**
-  - [ ] `GET /login` → `templates/auth/login.html.tera` — login form
-  - [ ] `GET /register` → `templates/auth/register.html.tera` — registration form
-  - [ ] `POST /login` — form submit → call `auth_service::login()` → set session cookie → redirect
-  - [ ] `POST /register` — form submit → call `auth_service::register()` → redirect to login
-  - [ ] `POST /logout` — destroy session → redirect to login
-  - [ ] Flash messages for errors (bad password, username taken, etc.)
-  - [ ] Redirect authenticated users away from login/register
-  - [ ] Redirect unauthenticated users to login from protected pages
-- [ ] **Setup Wizard Page**
-  - [ ] `GET /setup` → `templates/setup/wizard.html.tera` — library setup form
-  - [ ] `POST /setup` — create personal library (server mode) → redirect to file browser
-  - [ ] Guard: redirect to `/setup` if `setup_complete == false`
-  - [ ] Guard: redirect to `/files` if setup already complete
-- [ ] **File Browser (core feature)**
-  - [ ] `GET /files` → `templates/files/browser.html.tera` — main file browser view
-  - [ ] `GET /files?path=subdir/` — directory navigation via query param
-  - [ ] `templates/partials/file_list.html.tera` — table/grid of `FsEntry` items (HTMX partial for swapping)
-  - [ ] HTMX-powered directory navigation (`hx-get="/files?path=..."` → swap file list without full reload)
-  - [ ] File icons by type/extension (folder icon, document icon, image icon, etc.)
-  - [ ] File size formatting (human-readable: KB, MB, GB)
-  - [ ] Last modified timestamp display
-  - [ ] Sort by name / size / date (HTMX swap or vanilla JS client-side)
-  - [ ] Breadcrumb navigation (clickable path segments)
-- [ ] **File Operations UI**
-  - [ ] **Upload**: drag-and-drop zone + file input button
-    - [ ] `POST /files/upload?path=...` — multipart or raw body upload
-    - [ ] **Upload progress panel** (fixed bottom-right, vanilla JS component):
-      - [ ] `templates/partials/upload_panel.html.tera` — collapsible panel listing active uploads
-      - [ ] Per-file progress bar driven by `XMLHttpRequest` `upload.onprogress` (percentage + bytes sent)
-      - [ ] States per file: uploading → processing (server encrypting) → complete / failed
-      - [ ] Panel auto-opens when upload starts, stays visible until dismissed or all complete
-      - [ ] Multiple concurrent uploads shown as stacked rows in the panel
-      - [ ] Minimize / expand toggle so panel doesn't block the file browser
-      - [ ] "Clear completed" button to dismiss finished items
-    - [ ] **Placeholder row in file list** while server is processing:
-      - [ ] After browser upload finishes (100%), inject a ghost/placeholder row into the file list via vanilla JS DOM manipulation
-      - [ ] Placeholder shows filename + spinning/pulsing indicator + "Encrypting…" status text
-      - [ ] Row styled distinctly (muted/translucent) so it's clearly not a real entry yet
-      - [ ] On upload success → HTMX refresh replaces placeholder with real `FsEntry` row
-      - [ ] On upload failure → placeholder turns into error state with retry/dismiss action
-      - [ ] Handles edge case: user navigates away from target folder → placeholder only shown when viewing that folder
-    - [ ] Error flash on failure (size limit, conflict, etc.)
-  - [ ] **Download**: click file name or download button → `GET /files/download?path=...` (direct browser download)
-  - [ ] **Create Folder**: button → inline input or modal → `POST /files/mkdir?path=...` → HTMX refresh
-  - [ ] **Rename**: click rename action → inline edit or modal → `POST /files/rename` → HTMX refresh
-  - [ ] **Delete**: click delete action → confirmation modal (vanilla JS) → `DELETE /files/delete?path=...` → HTMX refresh
+- [x] **Setup & Infrastructure**
+  - [x] Add `rocket_dyn_templates` with Tera to `Cargo.toml`
+  - [x] Configure template dir in `Rocket.toml` (`templates/`)
+  - [x] `src/routes/pages.rs` — page-serving routes (HTML responses, separate from `/api/v1/` JSON routes)
+  - [x] Wire `Template::fairing()` into Rocket launch
+  - [x] Serve static assets via `FileServer` from `static/`
+  - [x] Download HTMX (~14KB) into `static/vendor/`
+  - [x] Tailwind CSS build (standalone CLI) → `static/css/style.css`
+  - [x] `Makefile`: `build-css`, `watch-css`, `dev` targets
+- [x] **Base Layout & Shared Components**
+  - [x] `templates/base.html.tera` — HTML shell (head, sidebar, footer, HTMX + Tailwind includes, `static/js/app.js`)
+  - [x] `templates/partials/nav.html.tera` — left sidebar nav (logo, Files/Shares/Spaces/Trash links, storage usage, user menu with settings/dark mode/logout)
+  - [x] `templates/partials/flash.html.tera` — toast notification component (fixed top-right overlay, auto-dismiss)
+  - [x] `templates/partials/breadcrumb.html.tera` — path breadcrumbs for file browser
+  - [x] `templates/partials/confirm_modal.html.tera` — reusable confirmation dialog (vanilla JS)
+  - [x] `templates/partials/empty_state.html.tera` — empty folder / no results placeholder
+  - [x] `templates/partials/sidebar_usage.html.tera` — HTMX-loaded storage bar in sidebar
+- [x] **Auth Pages**
+  - [x] `GET /login` → `templates/auth/login.html.tera` — login form
+  - [x] `GET /register` → `templates/auth/register.html.tera` — registration form
+  - [x] `POST /login` — form submit → call `auth_service::login()` → set session cookie → redirect
+  - [x] `POST /register` — form submit → call `auth_service::register()` → redirect to login
+  - [x] `POST /logout` — destroy session → redirect to login
+  - [x] Flash messages for errors (bad password, username taken, etc.)
+  - [x] Redirect authenticated users away from login/register
+  - [x] Redirect unauthenticated users to login from protected pages
+- [x] **Setup Wizard Page**
+  - [x] `GET /setup` → `templates/setup/wizard.html.tera` — library setup form
+  - [x] `POST /setup` — create personal library (server mode) → redirect to file browser
+  - [x] Guard: redirect to `/setup` if `setup_complete == false`
+  - [x] Guard: redirect to `/files` if setup already complete
+- [x] **File Browser (core feature)**
+  - [x] `GET /files` → `templates/files/browser.html.tera` — main file browser view
+  - [x] `GET /files?path=subdir/` — directory navigation via query param
+  - [x] `templates/partials/file_list.html.tera` — table of `FsEntry` items (HTMX partial for swapping)
+  - [x] HTMX-powered directory navigation (`hx-get="/files/partial?path=..."` → swap file list without full reload)
+  - [x] File icons by type/extension (folder icon, document icon, image icon, etc.) via `partials/file_icon.html.tera`
+  - [x] File size formatting (human-readable: KB, MB, GB)
+  - [x] Last modified timestamp display
+  - [x] Sort by name / size / date (vanilla JS client-side sorting)
+  - [x] Breadcrumb navigation (clickable path segments)
+- [x] **File Operations UI**
+  - [x] **Upload**: drag-and-drop zone + file input button
+    - [x] `POST /files/upload?path=...` — raw body upload via XHR
+    - [x] **Upload progress panel** (`static/js/upload.js` + `templates/partials/upload_panel.html.tera`):
+      - [x] Collapsible panel listing active uploads (fixed bottom-right)
+      - [x] Per-file progress bar driven by `XMLHttpRequest` `upload.onprogress`
+      - [x] States per file: uploading → processing ("Encrypting…") → complete / failed
+      - [x] Panel auto-opens when upload starts
+      - [x] Multiple concurrent uploads shown as stacked rows
+      - [x] Minimize / expand toggle
+      - [x] "Clear completed" button
+    - [x] **Placeholder row in file list** while server is processing (ghost row with pulsing indicator)
+    - [x] Error flash on failure (size limit, conflict, etc.)
+  - [x] **Download**: click file name or download button → `GET /files/download?path=...` (direct browser download)
+  - [x] **Create Folder**: button → modal → `POST /files/mkdir` → redirect with flash
+  - [x] **Rename**: click rename action → modal → `POST /files/rename` → redirect with flash
+  - [x] **Delete**: click delete action → confirmation modal → `POST /files/delete` → redirect with flash
   - [ ] Multi-select with checkboxes → bulk delete (stretch goal)
-- [ ] **Usage / Storage Page**
-  - [ ] `GET /usage` → `templates/files/usage.html.tera`
-  - [ ] Display total usage (from `calculate_usage()`)
-  - [ ] Visual bar / progress indicator for used space
-- [ ] **Settings Page**
-  - [ ] `GET /settings` → `templates/settings/index.html.tera`
-  - [ ] Display current user info (username, email)
-  - [ ] Library info (encryption mode, created date)
-  - [ ] Placeholder sections for future features (encryption tier, quotas)
-- [ ] **Error Pages**
-  - [ ] `templates/errors/404.html.tera` — not found
-  - [ ] `templates/errors/500.html.tera` — internal error
-  - [ ] `templates/errors/403.html.tera` — forbidden / locked
-  - [ ] Rocket catcher routes → render error templates
-- [ ] **Responsive Design**
-  - [ ] Mobile-friendly nav (hamburger menu via vanilla JS)
-  - [ ] File browser works on mobile (card layout or compact table)
-  - [ ] Upload works on mobile (file picker, no drag-and-drop)
-- [ ] **Accessibility & UX Polish**
-  - [ ] Semantic HTML throughout (nav, main, section, article, etc.)
-  - [ ] ARIA labels on icon-only buttons (upload, delete, rename, etc.)
+- [x] **Usage / Storage Page**
+  - [x] `GET /usage` → `templates/files/usage.html.tera`
+  - [x] Display total usage (from `calculate_usage()`)
+  - [x] Visual bar / progress indicator for used space
+  - [x] `GET /usage/sidebar` — HTMX partial for permanent sidebar storage indicator
+- [x] **Settings Page**
+  - [x] `GET /settings` → `templates/settings/index.html.tera`
+  - [x] Display current user info (username, email)
+  - [x] Library info (encryption mode, created date)
+  - [x] Placeholder sections for future features (encryption tier, quotas)
+- [x] **Error Pages**
+  - [x] `templates/errors/404.html.tera` — not found
+  - [x] `templates/errors/500.html.tera` — internal error
+  - [x] `templates/errors/403.html.tera` — forbidden / locked
+  - [x] Rocket catcher routes → render error templates (400, 401, 403, 404, 409, 422, 500)
+- [x] **Responsive Design**
+  - [x] Mobile sidebar (slide-out drawer with overlay, hamburger button in mobile top bar)
+  - [x] File browser works on mobile (columns hidden on small screens: `hidden sm:table-cell`)
+  - [x] Upload works on mobile (file picker + drag-and-drop)
+- [x] **Accessibility & UX Polish** (partial)
+  - [x] Semantic HTML throughout (nav, main, aside, etc.)
+  - [x] ARIA labels on icon-only buttons (upload, delete, rename, etc.)
+  - [x] Visible focus rings on interactive elements (`focus-visible:ring`)
+  - [x] `aria-live="polite"` region for flash messages
+  - [x] Disable submit buttons during in-flight requests to prevent double-submit
   - [ ] Keyboard navigation: tab through file list, Enter to open folder / download file
-  - [ ] Focus management after HTMX swaps (focus first item or flash message)
-  - [ ] Visible focus rings on all interactive elements (Tailwind `focus-visible:ring`)
-  - [ ] `aria-live="polite"` region for flash messages / HTMX swap notifications
-  - [ ] Sufficient color contrast (WCAG AA minimum)
-  - [ ] Loading states: skeleton / spinner shown during HTMX requests (`hx-indicator`)
-  - [ ] Disable submit buttons during in-flight requests to prevent double-submit
-- [ ] **Security Hardening (frontend)**
-  - [ ] CSP meta tag or Rocket fairing: restrict `script-src`, `style-src`, `connect-src`
+  - [ ] Focus management after HTMX swaps
+  - [ ] Loading states: skeleton / spinner during HTMX requests (`hx-indicator`)
+- [x] **Security Hardening (frontend)** (partial)
+  - [x] CSP Rocket fairing: restrict `script-src`, `style-src`, `connect-src`, `font-src`
+  - [x] `SameSite=Lax` + `HttpOnly` on session cookie
+  - [x] `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` response headers
+  - [x] Tera auto-escapes all user-supplied values (no `| safe` on user data)
   - [ ] CSRF tokens on all state-changing forms (Rocket `CsrfToken` cookie + hidden field)
-  - [ ] `SameSite=Lax` (or `Strict`) + `HttpOnly` + `Secure` on session cookie
-  - [ ] `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` response headers
-  - [ ] Sanitize / escape all user-supplied values rendered in templates (Tera auto-escapes by default — verify no `| safe` on user data)
-  - [ ] Rate-limit login / register form submissions (Rocket fairing or middleware)
+  - [ ] Rate-limit login / register form submissions
 - [ ] **Performance & Caching**
   - [ ] Cache-bust static assets (append hash or version query param to CSS/JS URLs)
   - [ ] `Cache-Control` headers: long cache for versioned static assets, no-cache for HTML
-  - [ ] Gzip / Brotli compression fairing for responses (`rocket_compression` or reverse proxy note)
-  - [ ] Lazy-load file icons / thumbnails for large directories (if applicable)
-- [ ] **Dark Mode**
-  - [ ] Tailwind `dark:` variant support (OS preference via `prefers-color-scheme`)
-  - [ ] Toggle button in nav (vanilla JS, persist choice in `localStorage`)
-  - [ ] Consistent dark palette across all pages and components
-- [ ] **Favicon & Branding**
-  - [ ] `static/favicon.ico` + `static/favicon.svg`
-  - [ ] `<meta>` tags: `og:title`, `og:description`, `theme-color`
-  - [ ] App title / logo in nav bar and login page
-- [ ] **SEO & Meta (minimal)**
-  - [ ] `<meta name="robots" content="noindex, nofollow">` (private app — don't index)
-  - [ ] Proper `<title>` on every page (`IronDrive — Login`, `IronDrive — Files`, etc.)
-  - [ ] `<meta name="description">` on login page (for bookmarks / link previews)
-- [ ] **Tests**
-  - [ ] Page-level integration tests: unauthenticated → redirects to login
-  - [ ] Page-level integration tests: authenticated → renders file browser
-  - [ ] Page-level integration tests: setup guard redirects correctly
-  - [ ] Upload via HTML form → file appears in listing
-  - [ ] Create folder → appears in listing
-  - [ ] Delete → removed from listing
-  - [ ] Rename → updated in listing
+  - [ ] Gzip / Brotli compression fairing for responses
+- [x] **Dark Mode**
+  - [x] Tailwind `dark:` variant support (`darkMode: "class"`)
+  - [x] Toggle in user menu panel (vanilla JS, persist choice in `localStorage`)
+  - [x] Consistent dark palette across all pages and components
+  - [x] OS preference detection via `prefers-color-scheme`
+- [x] **Favicon & Branding**
+  - [x] `static/favicon.svg`
+  - [x] `<meta>` tags: `theme-color`
+  - [x] App title / logo in sidebar and login page
+- [x] **SEO & Meta (minimal)**
+  - [x] `<meta name="robots" content="noindex, nofollow">`
+  - [x] Proper `<title>` on every page
+  - [x] `<meta name="description">`
+- [x] **Tests**
+  - [x] Page-level integration tests: unauthenticated → redirects to login
+  - [x] Page-level integration tests: authenticated → renders file browser
+  - [x] Page-level integration tests: setup guard redirects correctly
+  - [x] Upload via XHR → file appears in listing
+  - [x] Create folder → appears in listing
+  - [x] Delete → removed from listing
+  - [x] Rename → updated in listing
   - [ ] CSRF token present on all forms
-  - [ ] CSP header present on all responses
-  - [ ] Error pages render correctly (404, 403, 500)
+  - [x] CSP header present on all responses
+  - [x] Error pages render correctly (404, 403, 500)
 
 ### M5.5 — Chunked Transfers
 
