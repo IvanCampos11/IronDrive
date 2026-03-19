@@ -14,9 +14,38 @@ env:
   BINARY_NAME: irondrive
 
 jobs:
+  branch_guard:
+    name: Verify tag source branch
+    runs-on: ubuntu-latest
+    outputs:
+      source_branch: ${{ steps.guard.outputs.source_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tag is on main or dev
+        id: guard
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          commit="$(git rev-list -n 1 "$tag")"
+
+          git fetch origin main dev --no-tags
+
+          if git merge-base --is-ancestor "$commit" origin/main; then
+            echo "source_branch=main" >> "$GITHUB_OUTPUT"
+          elif git merge-base --is-ancestor "$commit" origin/dev; then
+            echo "source_branch=dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag '$tag' must point to a commit on 'main' or 'dev'."
+            exit 1
+          fi
+
   # First, run tests before building release artifacts
   check:
     name: Pre-release checks
+    needs: branch_guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
