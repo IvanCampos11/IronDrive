@@ -1,0 +1,797 @@
+use rocket::form::Form;
+use rocket::http::{Cookie, CookieJar, SameSite, Status};
+use rocket::request::FlashMessage;
+use rocket::response::{Flash, Redirect};
+use rocket::Route;
+use rocket::State;
+use rocket_dyn_templates::{context, Template};
+
+use crate::config::AppConfig;
+use crate::db::DbPool;
+use crate::errors::AppError;
+use crate::guards::session_guard::{SessionSetupComplete, SessionUser, COOKIE_NAME};
+use crate::models::library::PersonalLibrary;
+use crate::services::{auth_service, fs_service, library_service};
+use crate::services::crypto_service::MasterKey;
+use crate::services::unlock_state::UnlockState;
+
+// ---------------------------------------------------------------------------
+// Form structs
+// ---------------------------------------------------------------------------
+
+#[derive(FromForm)]
+pub struct LoginForm {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(FromForm)]
+pub struct RegisterForm {
+    pub username: String,
+    pub email: String,
+    pub password: String,
+    pub password_confirm: String,
+}
+
+#[derive(FromForm)]
+pub struct MkdirForm {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(FromForm)]
+pub struct RenameForm {
+    pub old_path: String,
+    pub new_name: String,
+}
+
+#[derive(FromForm)]
+pub struct DeleteForm {
+    pub path: String,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn set_session_cookie(cookies: &CookieJar<'_>, token: &str) {
+    let mut cookie = Cookie::new(COOKIE_NAME, token.to_string());
+    cookie.set_http_only(true);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookies.add(cookie);
+}
+
+fn clear_session_cookie(cookies: &CookieJar<'_>) {
+    cookies.remove(Cookie::from(COOKIE_NAME));
+}
+
+/// Look up the user's personal library.
+async fn require_library(pool: &DbPool, user_id: &str) -> Result<PersonalLibrary, AppError> {
+    PersonalLibrary::find_by_user(pool, user_id)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+/// Format bytes into something human readable.
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth pages
+// ---------------------------------------------------------------------------
+
+/// GET / — redirect to files or login.
+#[get("/")]
+pub async fn index(user: Option<SessionUser>) -> Redirect {
+    match user {
+        Some(u) => {
+            if u.0.setup_complete {
+                Redirect::to(uri!(files_page(path = Option::<String>::None)))
+            } else {
+                Redirect::to(uri!(setup_page))
+            }
+        }
+        None => Redirect::to(uri!(login_page)),
+    }
+}
+
+/// GET /login
+#[get("/login")]
+pub async fn login_page(
+    user: Option<SessionUser>,
+    flash: Option<FlashMessage<'_>>,
+) -> Result<Template, Redirect> {
+    if user.is_some() {
+        return Err(Redirect::to(uri!(index)));
+    }
+    Ok(Template::render(
+        "auth/login",
+        context! {
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    ))
+}
+
+/// POST /login
+#[post("/login", data = "<form>")]
+pub async fn login_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    form: Form<LoginForm>,
+) -> Result<Redirect, Flash<Redirect>> {
+    let result = auth_service::login(pool.inner(), config.inner(), &form.username, &form.password)
+        .await;
+
+    match result {
+        Ok(login_result) => {
+            set_session_cookie(cookies, &login_result.token);
+            if login_result.setup_complete {
+                Ok(Redirect::to(uri!(files_page(path = Option::<String>::None))))
+            } else {
+                Ok(Redirect::to(uri!(setup_page)))
+            }
+        }
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(login_page)),
+            "Invalid username or password.",
+        )),
+    }
+}
+
+/// GET /register
+#[get("/register")]
+pub async fn register_page(
+    user: Option<SessionUser>,
+    flash: Option<FlashMessage<'_>>,
+) -> Result<Template, Redirect> {
+    if user.is_some() {
+        return Err(Redirect::to(uri!(index)));
+    }
+    Ok(Template::render(
+        "auth/register",
+        context! {
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    ))
+}
+
+/// POST /register
+#[post("/register", data = "<form>")]
+pub async fn register_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    form: Form<RegisterForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    if form.password != form.password_confirm {
+        return Err(Flash::error(
+            Redirect::to(uri!(register_page)),
+            "Passwords do not match.",
+        ));
+    }
+
+    match auth_service::register(
+        pool.inner(),
+        config.inner(),
+        &form.username,
+        &form.email,
+        &form.password,
+    )
+    .await
+    {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(uri!(login_page)),
+            "Account created! Please log in.",
+        )),
+        Err(AppError::Conflict(msg)) => {
+            Err(Flash::error(Redirect::to(uri!(register_page)), msg))
+        }
+        Err(AppError::Validation(msg)) => {
+            Err(Flash::error(Redirect::to(uri!(register_page)), msg))
+        }
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(register_page)),
+            "Registration failed. Please try again.",
+        )),
+    }
+}
+
+/// POST /logout
+#[post("/logout")]
+pub async fn logout_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: Option<SessionUser>,
+) -> Redirect {
+    if let Some(session_user) = user {
+        if let Some(cookie) = cookies.get(COOKIE_NAME) {
+            let token_hash = crate::guards::auth_guard::hash_token(cookie.value());
+            let _ = auth_service::logout(pool.inner(), &session_user.0.id, &token_hash).await;
+        }
+    }
+    clear_session_cookie(cookies);
+    Redirect::to(uri!(login_page))
+}
+
+// ---------------------------------------------------------------------------
+// Setup wizard
+// ---------------------------------------------------------------------------
+
+/// GET /setup
+#[get("/setup")]
+pub async fn setup_page(
+    user: SessionUser,
+    flash: Option<FlashMessage<'_>>,
+) -> Result<Template, Redirect> {
+    if user.0.setup_complete {
+        return Err(Redirect::to(uri!(files_page(path = Option::<String>::None))));
+    }
+    Ok(Template::render(
+        "setup/wizard",
+        context! {
+            user: &user.0.username,
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    ))
+}
+
+/// POST /setup
+#[post("/setup")]
+pub async fn setup_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    master_key: &State<MasterKey>,
+    unlock_state: &State<UnlockState>,
+    user: SessionUser,
+) -> Result<Redirect, Flash<Redirect>> {
+    if user.0.setup_complete {
+        return Ok(Redirect::to(uri!(files_page(path = Option::<String>::None))));
+    }
+
+    match library_service::setup_library(
+        pool.inner(),
+        config.inner(),
+        master_key.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+    )
+    .await
+    {
+        Ok(_) => Ok(Redirect::to(uri!(files_page(path = Option::<String>::None)))),
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(setup_page)),
+            "Library setup failed. Please try again.",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File browser
+// ---------------------------------------------------------------------------
+
+/// GET /files?<path>
+#[get("/files?<path>")]
+pub async fn files_page(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: Option<String>,
+    flash: Option<FlashMessage<'_>>,
+) -> Result<Template, Redirect> {
+    let lib = match require_library(pool.inner(), &user.0.id).await {
+        Ok(l) => l,
+        Err(_) => return Err(Redirect::to(uri!(setup_page))),
+    };
+
+    let user_path = path.as_deref().unwrap_or("");
+
+    let entries =
+        match fs_service::list_directory(config.inner(), unlock_state.inner(), &lib.id, user_path, false)
+            .await
+        {
+            Ok(e) => e,
+            Err(_) => Vec::new(),
+        };
+
+    // Build breadcrumb segments
+    let breadcrumbs = build_breadcrumbs(user_path);
+
+    // Format entries for display
+    let display_entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+                "is_dir": e.is_dir,
+                "size": e.size.map(|s| format_bytes(s)),
+                "raw_size": e.size.unwrap_or(0),
+                "disk_size": e.disk_size.map(|s| format_bytes(s)),
+                "mime_type": e.mime_type,
+                "modified": e.modified.as_deref().map(format_timestamp),
+                "raw_modified": e.modified,
+                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
+            })
+        })
+        .collect();
+
+    Ok(Template::render(
+        "files/browser",
+        context! {
+            user: &user.0.username,
+            path: user_path,
+            entries: display_entries,
+            breadcrumbs: breadcrumbs,
+            is_root: user_path.is_empty(),
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    ))
+}
+
+/// GET /files/partial?<path> — HTMX partial for file list swap
+#[get("/files/partial?<path>")]
+pub async fn files_partial(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: Option<String>,
+) -> Result<Template, Status> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let user_path = path.as_deref().unwrap_or("");
+
+    let entries =
+        fs_service::list_directory(config.inner(), unlock_state.inner(), &lib.id, user_path, false)
+            .await
+            .unwrap_or_default();
+
+    let breadcrumbs = build_breadcrumbs(user_path);
+
+    let display_entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+                "is_dir": e.is_dir,
+                "size": e.size.map(|s| format_bytes(s)),
+                "raw_size": e.size.unwrap_or(0),
+                "disk_size": e.disk_size.map(|s| format_bytes(s)),
+                "mime_type": e.mime_type,
+                "modified": e.modified.as_deref().map(format_timestamp),
+                "raw_modified": e.modified,
+                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
+            })
+        })
+        .collect();
+
+    Ok(Template::render(
+        "partials/file_list",
+        context! {
+            path: user_path,
+            entries: display_entries,
+            breadcrumbs: breadcrumbs,
+            is_root: user_path.is_empty(),
+        },
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// File operations (form-based for HTMX)
+// ---------------------------------------------------------------------------
+
+/// POST /files/mkdir
+#[post("/files/mkdir", data = "<form>")]
+pub async fn mkdir_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SessionSetupComplete,
+    form: Form<MkdirForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Some(form.path.clone())))), "Library not found."))?;
+
+    let full_path = if form.path.is_empty() {
+        form.name.clone()
+    } else {
+        format!("{}/{}", form.path, form.name)
+    };
+
+    match fs_service::create_directory(config.inner(), &lib.id, &full_path).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(uri!(files_page(path = Some(form.path.clone())))),
+            format!("Folder \"{}\" created.", form.name),
+        )),
+        Err(AppError::Conflict(msg)) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Some(form.path.clone())))),
+            msg,
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Some(form.path.clone())))),
+            msg,
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Some(form.path.clone())))),
+            "Failed to create folder.",
+        )),
+    }
+}
+
+/// POST /files/rename
+#[post("/files/rename", data = "<form>")]
+pub async fn rename_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SessionSetupComplete,
+    form: Form<RenameForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
+
+    // Compute parent dir and new full path
+    let parent = parent_path(&form.old_path);
+    let new_path = if parent.is_empty() {
+        form.new_name.clone()
+    } else {
+        format!("{}/{}", parent, form.new_name)
+    };
+
+    match fs_service::rename_entry(config.inner(), &lib.id, &form.old_path, &new_path).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            format!("Renamed to \"{}\".", form.new_name),
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            msg,
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            "Rename failed.",
+        )),
+    }
+}
+
+/// POST /files/delete
+#[post("/files/delete", data = "<form>")]
+pub async fn delete_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SessionSetupComplete,
+    form: Form<DeleteForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
+
+    let parent = parent_path(&form.path);
+
+    match fs_service::delete_entry(config.inner(), &lib.id, &form.path).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            "Deleted successfully.",
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            "Delete failed.",
+        )),
+    }
+}
+
+/// POST /files/upload?<path> — receives raw file data from XHR
+#[post("/files/upload?<path>", data = "<data>")]
+pub async fn upload_file(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: String,
+    data: rocket::data::Data<'_>,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    use rocket::data::ToByteUnit;
+
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| (Status::NotFound, rocket::serde::json::Json(serde_json::json!({"error": "Library not found."}))))?;
+
+    let max_bytes = config.max_upload_bytes;
+    let hard_cap: u64 = 50 * 1024 * 1024;
+    let allowed = std::cmp::min(max_bytes, hard_cap);
+    let stream = data
+        .open(allowed.bytes())
+        .into_bytes()
+        .await
+        .map_err(|e| (Status::InternalServerError, rocket::serde::json::Json(serde_json::json!({"error": format!("Read failed: {e}")}))))?;
+
+    if !stream.is_complete() {
+        return Err((
+            Status::PayloadTooLarge,
+            rocket::serde::json::Json(serde_json::json!({"error": format!("File exceeds maximum size of {} bytes.", allowed)})),
+        ));
+    }
+
+    let bytes = stream.into_inner();
+
+    match fs_service::upload_file(config.inner(), unlock_state.inner(), &lib.id, &path, &bytes, false).await {
+        Ok(result) => Ok(rocket::serde::json::Json(serde_json::json!({
+            "success": true,
+            "path": result.path,
+            "size": result.size,
+            "disk_size": result.disk_size,
+            "checksum_sha256": result.checksum_sha256,
+            "mime_type": result.mime_type,
+        }))),
+        Err(e) => Err((
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )),
+    }
+}
+
+/// GET /files/download?<path> — browser download
+#[get("/files/download?<path>")]
+pub async fn download_file(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: String,
+) -> Result<crate::routes::library::FileDownload, Flash<Redirect>> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
+
+    let result = fs_service::download_file(config.inner(), unlock_state.inner(), &lib.id, &path)
+        .await
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Download failed."))?;
+
+    let content_type = result
+        .mime_type
+        .as_deref()
+        .and_then(|m| {
+            let parts: Vec<&str> = m.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                Some(rocket::http::ContentType::new(parts[0].to_string(), parts[1].to_string()))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(rocket::http::ContentType::Binary);
+
+    Ok(crate::routes::library::FileDownload {
+        data: result.data,
+        filename: result.filename,
+        content_type,
+        checksum_sha256: result.checksum_sha256,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar usage snippet (HTMX partial)
+// ---------------------------------------------------------------------------
+
+/// GET /usage/sidebar — tiny HTMX partial for the sidebar storage bar
+#[get("/usage/sidebar")]
+pub async fn usage_sidebar(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SessionSetupComplete,
+) -> Result<Template, Status> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let usage = fs_service::calculate_usage(config.inner(), &lib.id, "")
+        .await
+        .unwrap_or(fs_service::UsageResult {
+            disk_bytes: 0,
+            file_count: 0,
+            dir_count: 0,
+        });
+
+    let pct = if user.0.quota_bytes > 0 {
+        (usage.disk_bytes as f64 / user.0.quota_bytes as f64 * 100.0).min(100.0) as u64
+    } else {
+        0u64
+    };
+
+    Ok(Template::render(
+        "partials/sidebar_usage",
+        context! {
+            disk_bytes_fmt: format_bytes(usage.disk_bytes),
+            quota_bytes_fmt: format_bytes(user.0.quota_bytes as u64),
+            usage_pct: pct,
+        },
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Usage page
+// ---------------------------------------------------------------------------
+
+/// GET /usage
+#[get("/usage")]
+pub async fn usage_page(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SessionSetupComplete,
+) -> Result<Template, Redirect> {
+    let lib = match require_library(pool.inner(), &user.0.id).await {
+        Ok(l) => l,
+        Err(_) => return Err(Redirect::to(uri!(setup_page))),
+    };
+
+    let usage = fs_service::calculate_usage(config.inner(), &lib.id, "")
+        .await
+        .unwrap_or(fs_service::UsageResult {
+            disk_bytes: 0,
+            file_count: 0,
+            dir_count: 0,
+        });
+
+    Ok(Template::render(
+        "files/usage",
+        context! {
+            user: &user.0.username,
+            disk_bytes: usage.disk_bytes,
+            disk_bytes_fmt: format_bytes(usage.disk_bytes),
+            file_count: usage.file_count,
+            dir_count: usage.dir_count,
+            quota_bytes: user.0.quota_bytes,
+            quota_bytes_fmt: format_bytes(user.0.quota_bytes as u64),
+            usage_pct: if user.0.quota_bytes > 0 { (usage.disk_bytes as f64 / user.0.quota_bytes as f64 * 100.0).min(100.0) as u64 } else { 0u64 },
+        },
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Settings page
+// ---------------------------------------------------------------------------
+
+/// GET /settings
+#[get("/settings")]
+pub async fn settings_page(
+    pool: &State<DbPool>,
+    user: SessionSetupComplete,
+) -> Result<Template, Redirect> {
+    let lib = PersonalLibrary::find_by_user(pool.inner(), &user.0.id)
+        .await
+        .ok()
+        .flatten();
+
+    Ok(Template::render(
+        "settings/index",
+        context! {
+            user_id: &user.0.id,
+            username: &user.0.username,
+            email: &user.0.email,
+            role: &user.0.role,
+            created_at: &user.0.created_at,
+            library_id: lib.as_ref().map(|l| l.id.as_str()),
+            encryption_mode: lib.as_ref().map(|l| l.encryption_mode.as_str()),
+            library_created: lib.as_ref().map(|l| l.created_at.as_str()),
+        },
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Utility functions
+// ---------------------------------------------------------------------------
+
+fn build_breadcrumbs(path: &str) -> Vec<serde_json::Value> {
+    let mut crumbs = vec![serde_json::json!({ "name": "Files", "path": "" })];
+    if !path.is_empty() {
+        let mut accumulated = String::new();
+        for segment in path.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            if !accumulated.is_empty() {
+                accumulated.push('/');
+            }
+            accumulated.push_str(segment);
+            crumbs.push(serde_json::json!({
+                "name": segment,
+                "path": accumulated.clone(),
+            }));
+        }
+    }
+    crumbs
+}
+
+fn parent_path(path: &str) -> String {
+    match path.rfind('/') {
+        Some(pos) => path[..pos].to_string(),
+        None => String::new(),
+    }
+}
+
+fn format_timestamp(ts: &str) -> String {
+    // ISO-8601 → "Mar 19, 2026 14:30"
+    match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
+        Ok(dt) => dt.format("%b %d, %Y %H:%M").to_string(),
+        Err(_) => {
+            match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+                Ok(dt) => dt.format("%b %d, %Y %H:%M").to_string(),
+                Err(_) => ts.to_string(),
+            }
+        }
+    }
+}
+
+fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
+    if is_dir {
+        return "folder";
+    }
+    match mime {
+        Some(m) if m.starts_with("image/") => "image",
+        Some(m) if m.starts_with("video/") => "video",
+        Some(m) if m.starts_with("audio/") => "audio",
+        Some(m) if m.starts_with("text/") => "text",
+        Some("application/pdf") => "pdf",
+        Some(m) if m.contains("zip") || m.contains("tar") || m.contains("compress") => "archive",
+        _ => {
+            let ext = name.rsplit('.').next().unwrap_or("");
+            match ext.to_ascii_lowercase().as_str() {
+                "pdf" => "pdf",
+                "doc" | "docx" | "odt" => "document",
+                "xls" | "xlsx" | "ods" | "csv" => "spreadsheet",
+                "ppt" | "pptx" | "odp" => "presentation",
+                "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => "archive",
+                "rs" | "py" | "js" | "ts" | "go" | "c" | "cpp" | "h" | "java" | "rb" | "php" | "sh" | "toml" | "yaml" | "yml" | "json" | "xml" | "html" | "css" => "code",
+                _ => "file",
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Route collection
+// ---------------------------------------------------------------------------
+
+pub fn routes() -> Vec<Route> {
+    routes![
+        index,
+        login_page,
+        login_submit,
+        register_page,
+        register_submit,
+        logout_submit,
+        setup_page,
+        setup_submit,
+        files_page,
+        files_partial,
+        mkdir_submit,
+        rename_submit,
+        delete_submit,
+        upload_file,
+        download_file,
+        usage_sidebar,
+        usage_page,
+        settings_page,
+    ]
+}

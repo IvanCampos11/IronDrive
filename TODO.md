@@ -139,7 +139,7 @@
 
 ### M5F — Frontend (Tera + HTMX + Tailwind)
 
-Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Tera) + HTMX + Alpine.js + Tailwind CSS.
+Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Tera) + HTMX + vanilla JS + Tailwind CSS.
 
 - [ ] **Setup & Infrastructure**
   - [ ] Add `rocket_dyn_templates` with Tera to `Cargo.toml`
@@ -147,15 +147,15 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [ ] `src/routes/pages.rs` — page-serving routes (HTML responses, separate from `/api/v1/` JSON routes)
   - [ ] Wire `Template::fairing()` into Rocket launch
   - [ ] Serve static assets via `FileServer` from `static/`
-  - [ ] Download HTMX (~14KB) + Alpine.js (~17KB) into `static/vendor/`
+  - [ ] Download HTMX (~14KB) into `static/vendor/`
   - [ ] Tailwind CSS build (standalone CLI or npm script) → `static/css/style.css`
   - [ ] `Makefile` / script: `build-css` target for Tailwind rebuild
 - [ ] **Base Layout & Shared Components**
-  - [ ] `templates/base.html.tera` — HTML shell (head, nav, footer, HTMX + Alpine + Tailwind includes)
+  - [ ] `templates/base.html.tera` — HTML shell (head, nav, footer, HTMX + Tailwind includes, `static/js/app.js`)
   - [ ] `templates/partials/nav.html.tera` — top nav bar (logo, user menu, logout)
   - [ ] `templates/partials/flash.html.tera` — flash message / toast component
   - [ ] `templates/partials/breadcrumb.html.tera` — path breadcrumbs for file browser
-  - [ ] `templates/partials/confirm_modal.html.tera` — reusable Alpine.js confirmation dialog
+  - [ ] `templates/partials/confirm_modal.html.tera` — reusable confirmation dialog (vanilla JS)
   - [ ] `templates/partials/empty_state.html.tera` — empty folder / no results placeholder
 - [ ] **Auth Pages**
   - [ ] `GET /login` → `templates/auth/login.html.tera` — login form
@@ -179,18 +179,31 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [ ] File icons by type/extension (folder icon, document icon, image icon, etc.)
   - [ ] File size formatting (human-readable: KB, MB, GB)
   - [ ] Last modified timestamp display
-  - [ ] Sort by name / size / date (HTMX swap or Alpine.js client-side)
+  - [ ] Sort by name / size / date (HTMX swap or vanilla JS client-side)
   - [ ] Breadcrumb navigation (clickable path segments)
 - [ ] **File Operations UI**
   - [ ] **Upload**: drag-and-drop zone + file input button
     - [ ] `POST /files/upload?path=...` — multipart or raw body upload
-    - [ ] Progress indicator (HTMX `hx-indicator` or `htmx:xhr:progress` event + small JS)
-    - [ ] Success → HTMX refresh of file list
+    - [ ] **Upload progress panel** (fixed bottom-right, vanilla JS component):
+      - [ ] `templates/partials/upload_panel.html.tera` — collapsible panel listing active uploads
+      - [ ] Per-file progress bar driven by `XMLHttpRequest` `upload.onprogress` (percentage + bytes sent)
+      - [ ] States per file: uploading → processing (server encrypting) → complete / failed
+      - [ ] Panel auto-opens when upload starts, stays visible until dismissed or all complete
+      - [ ] Multiple concurrent uploads shown as stacked rows in the panel
+      - [ ] Minimize / expand toggle so panel doesn't block the file browser
+      - [ ] "Clear completed" button to dismiss finished items
+    - [ ] **Placeholder row in file list** while server is processing:
+      - [ ] After browser upload finishes (100%), inject a ghost/placeholder row into the file list via vanilla JS DOM manipulation
+      - [ ] Placeholder shows filename + spinning/pulsing indicator + "Encrypting…" status text
+      - [ ] Row styled distinctly (muted/translucent) so it's clearly not a real entry yet
+      - [ ] On upload success → HTMX refresh replaces placeholder with real `FsEntry` row
+      - [ ] On upload failure → placeholder turns into error state with retry/dismiss action
+      - [ ] Handles edge case: user navigates away from target folder → placeholder only shown when viewing that folder
     - [ ] Error flash on failure (size limit, conflict, etc.)
   - [ ] **Download**: click file name or download button → `GET /files/download?path=...` (direct browser download)
   - [ ] **Create Folder**: button → inline input or modal → `POST /files/mkdir?path=...` → HTMX refresh
   - [ ] **Rename**: click rename action → inline edit or modal → `POST /files/rename` → HTMX refresh
-  - [ ] **Delete**: click delete action → confirmation modal (Alpine.js) → `DELETE /files/delete?path=...` → HTMX refresh
+  - [ ] **Delete**: click delete action → confirmation modal (vanilla JS) → `DELETE /files/delete?path=...` → HTMX refresh
   - [ ] Multi-select with checkboxes → bulk delete (stretch goal)
 - [ ] **Usage / Storage Page**
   - [ ] `GET /usage` → `templates/files/usage.html.tera`
@@ -207,9 +220,43 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [ ] `templates/errors/403.html.tera` — forbidden / locked
   - [ ] Rocket catcher routes → render error templates
 - [ ] **Responsive Design**
-  - [ ] Mobile-friendly nav (hamburger menu via Alpine.js)
+  - [ ] Mobile-friendly nav (hamburger menu via vanilla JS)
   - [ ] File browser works on mobile (card layout or compact table)
   - [ ] Upload works on mobile (file picker, no drag-and-drop)
+- [ ] **Accessibility & UX Polish**
+  - [ ] Semantic HTML throughout (nav, main, section, article, etc.)
+  - [ ] ARIA labels on icon-only buttons (upload, delete, rename, etc.)
+  - [ ] Keyboard navigation: tab through file list, Enter to open folder / download file
+  - [ ] Focus management after HTMX swaps (focus first item or flash message)
+  - [ ] Visible focus rings on all interactive elements (Tailwind `focus-visible:ring`)
+  - [ ] `aria-live="polite"` region for flash messages / HTMX swap notifications
+  - [ ] Sufficient color contrast (WCAG AA minimum)
+  - [ ] Loading states: skeleton / spinner shown during HTMX requests (`hx-indicator`)
+  - [ ] Disable submit buttons during in-flight requests to prevent double-submit
+- [ ] **Security Hardening (frontend)**
+  - [ ] CSP meta tag or Rocket fairing: restrict `script-src`, `style-src`, `connect-src`
+  - [ ] CSRF tokens on all state-changing forms (Rocket `CsrfToken` cookie + hidden field)
+  - [ ] `SameSite=Lax` (or `Strict`) + `HttpOnly` + `Secure` on session cookie
+  - [ ] `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` response headers
+  - [ ] Sanitize / escape all user-supplied values rendered in templates (Tera auto-escapes by default — verify no `| safe` on user data)
+  - [ ] Rate-limit login / register form submissions (Rocket fairing or middleware)
+- [ ] **Performance & Caching**
+  - [ ] Cache-bust static assets (append hash or version query param to CSS/JS URLs)
+  - [ ] `Cache-Control` headers: long cache for versioned static assets, no-cache for HTML
+  - [ ] Gzip / Brotli compression fairing for responses (`rocket_compression` or reverse proxy note)
+  - [ ] Lazy-load file icons / thumbnails for large directories (if applicable)
+- [ ] **Dark Mode**
+  - [ ] Tailwind `dark:` variant support (OS preference via `prefers-color-scheme`)
+  - [ ] Toggle button in nav (vanilla JS, persist choice in `localStorage`)
+  - [ ] Consistent dark palette across all pages and components
+- [ ] **Favicon & Branding**
+  - [ ] `static/favicon.ico` + `static/favicon.svg`
+  - [ ] `<meta>` tags: `og:title`, `og:description`, `theme-color`
+  - [ ] App title / logo in nav bar and login page
+- [ ] **SEO & Meta (minimal)**
+  - [ ] `<meta name="robots" content="noindex, nofollow">` (private app — don't index)
+  - [ ] Proper `<title>` on every page (`IronDrive — Login`, `IronDrive — Files`, etc.)
+  - [ ] `<meta name="description">` on login page (for bookmarks / link previews)
 - [ ] **Tests**
   - [ ] Page-level integration tests: unauthenticated → redirects to login
   - [ ] Page-level integration tests: authenticated → renders file browser
@@ -218,6 +265,9 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [ ] Create folder → appears in listing
   - [ ] Delete → removed from listing
   - [ ] Rename → updated in listing
+  - [ ] CSRF token present on all forms
+  - [ ] CSP header present on all responses
+  - [ ] Error pages render correctly (404, 403, 500)
 
 ### M5.5 — Chunked Transfers
 

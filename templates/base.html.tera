@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="IronDrive — Encrypted file storage">
+  <meta name="theme-color" content="#0f172a">
+  <title>{% block title %}IronDrive{% endblock %}</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body class="h-full bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans antialiased" hx-boost="false">
+  {% block nav %}
+    {% include "partials/nav" %}
+  {% endblock %}
+
+  <div class="flex h-full">
+    <main class="flex-1 {% if user is defined and user %}sm:ml-60{% endif %} min-h-screen flex flex-col">
+      <!-- Toast notifications -->
+      <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none">
+        <div class="pointer-events-auto">
+          {% include "partials/flash" %}
+        </div>
+      </div>
+
+      <div class="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {% block content %}{% endblock %}
+      </div>
+
+      <footer class="border-t border-gray-200/60 dark:border-gray-800/60">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between text-xs text-gray-400 dark:text-gray-600">
+          <span>IronDrive v{{ "0.1.0" }}</span>
+          <span class="flex items-center gap-1">
+            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+            End-to-end encrypted
+          </span>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

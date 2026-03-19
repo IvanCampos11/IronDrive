@@ -1,0 +1,64 @@
+{% extends "base" %}
+{% block title %}IronDrive — Setup{% endblock %}
+
+{% block nav %}{% endblock %}
+
+{% block content %}
+<div class="min-h-[85vh] flex items-center justify-center px-4">
+  <div class="w-full max-w-[480px] animate-fade-in">
+    <!-- Brand header -->
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl shadow-lg shadow-blue-600/20 mb-5">
+        <svg class="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
+        </svg>
+      </div>
+      <h1 class="text-2xl font-bold text-gray-900 dark:text-white tracking-tight">Welcome, {{ user }}!</h1>
+      <p class="mt-1.5 text-sm text-gray-500 dark:text-gray-400">Let's set up your personal encrypted library.</p>
+    </div>
+
+    <!-- Card -->
+    <div class="card p-6 sm:p-8">
+      <div class="flex items-center gap-3 mb-4">
+        <div class="flex items-center justify-center w-9 h-9 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
+          <svg class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+          </svg>
+        </div>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Server-side encryption</h2>
+      </div>
+      <p class="text-sm text-gray-600 dark:text-gray-400 mb-5 leading-relaxed">
+        Your files will be encrypted at rest using AES-256-GCM with a unique data key.
+        The server manages encryption automatically — no passphrase needed.
+      </p>
+      <ul class="text-sm text-gray-600 dark:text-gray-400 space-y-2.5 mb-7">
+        <li class="flex items-start gap-2.5">
+          <div class="flex items-center justify-center w-5 h-5 bg-green-50 dark:bg-green-900/30 rounded-full mt-0.5 flex-shrink-0">
+            <svg class="w-3 h-3 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          </div>
+          Files encrypted at rest on disk
+        </li>
+        <li class="flex items-start gap-2.5">
+          <div class="flex items-center justify-center w-5 h-5 bg-green-50 dark:bg-green-900/30 rounded-full mt-0.5 flex-shrink-0">
+            <svg class="w-3 h-3 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          </div>
+          SHA-256 integrity verification on every download
+        </li>
+        <li class="flex items-start gap-2.5">
+          <div class="flex items-center justify-center w-5 h-5 bg-green-50 dark:bg-green-900/30 rounded-full mt-0.5 flex-shrink-0">
+            <svg class="w-3 h-3 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          </div>
+          Always accessible — no unlock step required
+        </li>
+      </ul>
+
+      <form method="post" action="/setup">
+        <button type="submit" class="btn-primary w-full">
+          Create my library
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
