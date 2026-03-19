@@ -22,6 +22,7 @@
       {% include "partials/flash" %}
 
       <form method="post" action="/login" class="space-y-5">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div>
           <label for="username" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Username</label>
           <input

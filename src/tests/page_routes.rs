@@ -83,8 +83,10 @@ async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
         .manage(pool)
         .manage(master_key)
         .manage(unlock_state)
+        .manage(services::rate_limit::RateLimiter::new())
         .attach(Template::fairing())
         .attach(crate::security_headers_fairing())
+        .attach(crate::cache_control_fairing())
         .mount("/", routes::all_routes())
         .mount("/static", routes::static_file_server())
         .register(
@@ -106,6 +108,16 @@ async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
+
+/// GET a page to establish the CSRF cookie, then return the token value.
+async fn get_csrf_token(client: &Client, path: &str) -> String {
+    let _ = client.get(path).dispatch().await;
+    client
+        .cookies()
+        .get("csrf_token")
+        .map(|c| c.value().to_string())
+        .expect("CSRF cookie should be set after GET")
+}
 
 #[tokio::test]
 async fn unauthenticated_index_redirects_to_login() {
@@ -189,10 +201,12 @@ async fn invalid_login_shows_error() {
     let tmp = tempfile::tempdir().unwrap();
     let client = page_test_client(&tmp).await;
 
+    let csrf = get_csrf_token(&client, "/login").await;
+
     let response = client
         .post("/login")
         .header(rocket::http::ContentType::Form)
-        .body("username=nonexistent&password=wrongpassword")
+        .body(format!("username=nonexistent&password=wrongpassword&csrf_token={}", csrf))
         .dispatch()
         .await;
 
@@ -207,10 +221,12 @@ async fn register_password_mismatch_error() {
     let tmp = tempfile::tempdir().unwrap();
     let client = page_test_client(&tmp).await;
 
+    let csrf = get_csrf_token(&client, "/register").await;
+
     let response = client
         .post("/register")
         .header(rocket::http::ContentType::Form)
-        .body("username=testuser&email=test@example.com&password=Password123&password_confirm=Different456")
+        .body(format!("username=testuser&email=test@example.com&password=Password123&password_confirm=Different456&csrf_token={}", csrf))
         .dispatch()
         .await;
 
@@ -239,11 +255,14 @@ async fn full_page_auth_flow() {
         .await;
     assert_eq!(response.status(), Status::Ok);
 
+    // GET login page to establish CSRF cookie
+    let csrf = get_csrf_token(&client, "/login").await;
+
     // Login via page form
     let response = client
         .post("/login")
         .header(rocket::http::ContentType::Form)
-        .body(format!("username=alice&password={}", pw))
+        .body(format!("username=alice&password={}&csrf_token={}", pw, csrf))
         .dispatch()
         .await;
 
@@ -255,4 +274,49 @@ async fn full_page_auth_flow() {
         "Should redirect to /setup after login without library, got {}",
         location
     );
+}
+
+#[tokio::test]
+async fn csrf_token_set_on_login_page() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+
+    let response = client.get("/login").dispatch().await;
+    assert_eq!(response.status(), Status::Ok);
+
+    let cookies = client.cookies();
+    let csrf_cookie = cookies.get("csrf_token");
+    assert!(csrf_cookie.is_some(), "CSRF cookie should be set on login page");
+    let token = csrf_cookie.unwrap().value().to_string();
+    assert_eq!(token.len(), 64, "CSRF token should be 64 characters");
+
+    let body = response.into_string().await.unwrap_or_default();
+    assert!(body.contains(&token), "CSRF token should appear in the HTML form");
+}
+
+#[tokio::test]
+async fn post_without_csrf_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+
+    // POST without getting CSRF token first — should get 422 (missing field)
+    let response = client
+        .post("/login")
+        .header(rocket::http::ContentType::Form)
+        .body("username=alice&password=test1234")
+        .dispatch()
+        .await;
+
+    // Rocket returns 422 when form field is missing
+    assert_eq!(response.status(), Status::UnprocessableEntity);
+}
+
+#[tokio::test]
+async fn cache_control_static_assets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+
+    let response = client.get("/login").dispatch().await;
+    let cache = response.headers().get_one("Cache-Control").unwrap_or("");
+    assert!(cache.contains("no-cache"), "HTML pages should have no-cache, got: {}", cache);
 }

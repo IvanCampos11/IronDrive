@@ -1,6 +1,6 @@
 # IronDrive — TODO
 
-> **Last Updated:** 2026-03-19
+> **Last Updated:** 2026-03-20
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ---
@@ -23,7 +23,7 @@
 | **M3** | Server Encryption Core | Master key bootstrap, data key gen, AES-256-GCM encrypt/decrypt + SHA-256, `UnlockState` | ✅ Complete |
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ✅ Complete |
 | **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ✅ Complete |
-| **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings, sidebar nav | ✅ Complete (CSRF & polish remaining) |
+| **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings, sidebar nav | ✅ Complete |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ⬜ Not started |
 | **M5.6** | Data Integrity | `integrity_service`, integrity events table, corruption detection + notifications | ⬜ Not started |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ⬜ Not started |
@@ -225,19 +225,19 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [x] Visible focus rings on interactive elements (`focus-visible:ring`)
   - [x] `aria-live="polite"` region for flash messages
   - [x] Disable submit buttons during in-flight requests to prevent double-submit
-  - [ ] Keyboard navigation: tab through file list, Enter to open folder / download file
-  - [ ] Focus management after HTMX swaps
-  - [ ] Loading states: skeleton / spinner during HTMX requests (`hx-indicator`)
+  - [x] Keyboard navigation: ArrowUp/Down through file list, Enter to open folder / download file
+  - [x] Focus management after HTMX swaps (re-init keyboard nav on `htmx:afterSwap`)
+  - [x] Loading states: animated progress bar during HTMX requests (`hx-indicator`)
 - [x] **Security Hardening (frontend)** (partial)
   - [x] CSP Rocket fairing: restrict `script-src`, `style-src`, `connect-src`, `font-src`
   - [x] `SameSite=Lax` + `HttpOnly` on session cookie
   - [x] `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` response headers
   - [x] Tera auto-escapes all user-supplied values (no `| safe` on user data)
-  - [ ] CSRF tokens on all state-changing forms (Rocket `CsrfToken` cookie + hidden field)
-  - [ ] Rate-limit login / register form submissions
-- [ ] **Performance & Caching**
-  - [ ] Cache-bust static assets (append hash or version query param to CSS/JS URLs)
-  - [ ] `Cache-Control` headers: long cache for versioned static assets, no-cache for HTML
+  - [x] CSRF tokens on all state-changing forms (double-submit cookie + hidden field + `X-CSRF-Token` header for XHR)
+  - [x] Rate-limit login / register form submissions (in-memory sliding window: 10 login/15min, 5 register/15min)
+- [x] **Performance & Caching** (partial)
+  - [x] Cache-bust static assets (version query param `?v=0.1.0` on CSS/JS URLs)
+  - [x] `Cache-Control` headers: `immutable` for `/static/*`, `no-cache, no-store` for HTML
   - [ ] Gzip / Brotli compression fairing for responses
 - [x] **Dark Mode**
   - [x] Tailwind `dark:` variant support (`darkMode: "class"`)
@@ -260,7 +260,9 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [x] Create folder → appears in listing
   - [x] Delete → removed from listing
   - [x] Rename → updated in listing
-  - [ ] CSRF token present on all forms
+  - [x] CSRF token present on all forms
+  - [x] CSRF rejection test (POST without token → 422)
+  - [x] Cache-Control header test (HTML → no-cache)
   - [x] CSP header present on all responses
   - [x] Error pages render correctly (404, 403, 500)
 

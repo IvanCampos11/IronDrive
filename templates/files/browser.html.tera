@@ -19,6 +19,7 @@
       <h3 id="mkdir-modal-title" class="text-lg font-semibold text-gray-900 dark:text-white">New folder</h3>
     </div>
     <form method="post" action="/files/mkdir" id="mkdir-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="path" value="{{ path }}">
       <input
         type="text" name="name" id="mkdir-name" required autofocus
@@ -43,6 +44,7 @@
       <h3 id="rename-modal-title" class="text-lg font-semibold text-gray-900 dark:text-white">Rename</h3>
     </div>
     <form method="post" action="/files/rename" id="rename-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="old_path" id="rename-old-path">
       <input
         type="text" name="new_name" id="rename-new-name" required
@@ -59,5 +61,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/upload.js" defer></script>
+<script src="/static/js/upload.js?v=0.1.1" defer></script>
 {% endblock %}

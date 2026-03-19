@@ -99,6 +99,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         .manage(pool)
         .manage(master_key)
         .manage(unlock_state)
+        .manage(services::rate_limit::RateLimiter::new())
         .mount("/", routes::all_routes())
         .register(
             "/",

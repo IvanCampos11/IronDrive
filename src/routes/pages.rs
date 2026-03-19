@@ -4,15 +4,18 @@ use rocket::request::FlashMessage;
 use rocket::response::{Flash, Redirect};
 use rocket::Route;
 use rocket::State;
+use rocket::serde::json::serde_json;
 use rocket_dyn_templates::{context, Template};
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::errors::AppError;
+use crate::guards::csrf_guard::{ensure_csrf_token, validate_csrf, CsrfXhr};
 use crate::guards::session_guard::{SessionSetupComplete, SessionUser, COOKIE_NAME};
 use crate::models::library::PersonalLibrary;
 use crate::services::{auth_service, fs_service, library_service};
 use crate::services::crypto_service::MasterKey;
+use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
 
 // ---------------------------------------------------------------------------
@@ -23,6 +26,7 @@ use crate::services::unlock_state::UnlockState;
 pub struct LoginForm {
     pub username: String,
     pub password: String,
+    pub csrf_token: String,
 }
 
 #[derive(FromForm)]
@@ -31,23 +35,37 @@ pub struct RegisterForm {
     pub email: String,
     pub password: String,
     pub password_confirm: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct CsrfOnlyForm {
+    pub csrf_token: String,
 }
 
 #[derive(FromForm)]
 pub struct MkdirForm {
     pub name: String,
     pub path: String,
+    pub csrf_token: String,
 }
 
 #[derive(FromForm)]
 pub struct RenameForm {
     pub old_path: String,
     pub new_name: String,
+    pub csrf_token: String,
 }
 
 #[derive(FromForm)]
 pub struct DeleteForm {
     pub path: String,
+    pub csrf_token: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BulkDeleteRequest {
+    pub paths: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +131,17 @@ pub async fn index(user: Option<SessionUser>) -> Redirect {
 #[get("/login")]
 pub async fn login_page(
     user: Option<SessionUser>,
+    cookies: &CookieJar<'_>,
     flash: Option<FlashMessage<'_>>,
 ) -> Result<Template, Redirect> {
     if user.is_some() {
         return Err(Redirect::to(uri!(index)));
     }
+    let csrf_token = ensure_csrf_token(cookies);
     Ok(Template::render(
         "auth/login",
         context! {
+            csrf_token: csrf_token,
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -133,8 +154,20 @@ pub async fn login_submit(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     cookies: &CookieJar<'_>,
+    rate_limiter: &State<RateLimiter>,
+    client_ip: ClientIp,
     form: Form<LoginForm>,
 ) -> Result<Redirect, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(uri!(login_page)), "Invalid request. Please try again."))?;
+
+    if !rate_limiter.check(&format!("login:{}", client_ip.0), 10, 900) {
+        return Err(Flash::error(
+            Redirect::to(uri!(login_page)),
+            "Too many login attempts. Please wait 15 minutes.",
+        ));
+    }
+
     let result = auth_service::login(pool.inner(), config.inner(), &form.username, &form.password)
         .await;
 
@@ -158,14 +191,17 @@ pub async fn login_submit(
 #[get("/register")]
 pub async fn register_page(
     user: Option<SessionUser>,
+    cookies: &CookieJar<'_>,
     flash: Option<FlashMessage<'_>>,
 ) -> Result<Template, Redirect> {
     if user.is_some() {
         return Err(Redirect::to(uri!(index)));
     }
+    let csrf_token = ensure_csrf_token(cookies);
     Ok(Template::render(
         "auth/register",
         context! {
+            csrf_token: csrf_token,
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -177,8 +213,21 @@ pub async fn register_page(
 pub async fn register_submit(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    rate_limiter: &State<RateLimiter>,
+    client_ip: ClientIp,
     form: Form<RegisterForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(uri!(register_page)), "Invalid request. Please try again."))?;
+
+    if !rate_limiter.check(&format!("register:{}", client_ip.0), 5, 900) {
+        return Err(Flash::error(
+            Redirect::to(uri!(register_page)),
+            "Too many registration attempts. Please wait 15 minutes.",
+        ));
+    }
+
     if form.password != form.password_confirm {
         return Err(Flash::error(
             Redirect::to(uri!(register_page)),
@@ -213,12 +262,16 @@ pub async fn register_submit(
 }
 
 /// POST /logout
-#[post("/logout")]
+#[post("/logout", data = "<form>")]
 pub async fn logout_submit(
     pool: &State<DbPool>,
     cookies: &CookieJar<'_>,
     user: Option<SessionUser>,
+    form: Form<CsrfOnlyForm>,
 ) -> Redirect {
+    if validate_csrf(cookies, &form.csrf_token).is_err() {
+        return Redirect::to(uri!(login_page));
+    }
     if let Some(session_user) = user {
         if let Some(cookie) = cookies.get(COOKIE_NAME) {
             let token_hash = crate::guards::auth_guard::hash_token(cookie.value());
@@ -237,15 +290,18 @@ pub async fn logout_submit(
 #[get("/setup")]
 pub async fn setup_page(
     user: SessionUser,
+    cookies: &CookieJar<'_>,
     flash: Option<FlashMessage<'_>>,
 ) -> Result<Template, Redirect> {
     if user.0.setup_complete {
         return Err(Redirect::to(uri!(files_page(path = Option::<String>::None))));
     }
+    let csrf_token = ensure_csrf_token(cookies);
     Ok(Template::render(
         "setup/wizard",
         context! {
             user: &user.0.username,
+            csrf_token: csrf_token,
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -253,14 +309,19 @@ pub async fn setup_page(
 }
 
 /// POST /setup
-#[post("/setup")]
+#[post("/setup", data = "<form>")]
 pub async fn setup_submit(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     master_key: &State<MasterKey>,
     unlock_state: &State<UnlockState>,
+    cookies: &CookieJar<'_>,
     user: SessionUser,
+    form: Form<CsrfOnlyForm>,
 ) -> Result<Redirect, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(uri!(setup_page)), "Invalid request. Please try again."))?;
+
     if user.0.setup_complete {
         return Ok(Redirect::to(uri!(files_page(path = Option::<String>::None))));
     }
@@ -292,6 +353,7 @@ pub async fn files_page(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
+    cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     path: Option<String>,
     flash: Option<FlashMessage<'_>>,
@@ -333,10 +395,13 @@ pub async fn files_page(
         })
         .collect();
 
+    let csrf_token = ensure_csrf_token(cookies);
+
     Ok(Template::render(
         "files/browser",
         context! {
             user: &user.0.username,
+            csrf_token: csrf_token,
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
@@ -407,9 +472,13 @@ pub async fn files_partial(
 pub async fn mkdir_submit(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     form: Form<MkdirForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Some(form.path.clone())))), "Invalid request. Please try again."))?;
+
     let lib = require_library(pool.inner(), &user.0.id)
         .await
         .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Some(form.path.clone())))), "Library not found."))?;
@@ -445,9 +514,13 @@ pub async fn mkdir_submit(
 pub async fn rename_submit(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     form: Form<RenameForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Invalid request. Please try again."))?;
+
     let lib = require_library(pool.inner(), &user.0.id)
         .await
         .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
@@ -481,9 +554,13 @@ pub async fn rename_submit(
 pub async fn delete_submit(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     form: Form<DeleteForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Invalid request. Please try again."))?;
+
     let lib = require_library(pool.inner(), &user.0.id)
         .await
         .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
@@ -502,12 +579,47 @@ pub async fn delete_submit(
     }
 }
 
+/// POST /files/bulk-delete — XHR JSON endpoint for multi-file delete
+#[post("/files/bulk-delete", data = "<data>")]
+pub async fn bulk_delete(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    data: rocket::serde::json::Json<BulkDeleteRequest>,
+) -> rocket::serde::json::Json<serde_json::Value> {
+    let lib = match require_library(pool.inner(), &user.0.id).await {
+        Ok(l) => l,
+        Err(_) => return rocket::serde::json::Json(serde_json::json!({"deleted": 0, "errors": ["Library not found."]})),
+    };
+
+    if data.paths.is_empty() || data.paths.len() > 500 {
+        return rocket::serde::json::Json(serde_json::json!({"deleted": 0, "errors": ["Invalid number of paths (1–500)."]}));
+    }
+
+    let mut deleted = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    for path in &data.paths {
+        match fs_service::delete_entry(config.inner(), &lib.id, path).await {
+            Ok(_) => deleted += 1,
+            Err(e) => errors.push(format!("{}: {}", path, e)),
+        }
+    }
+
+    rocket::serde::json::Json(serde_json::json!({
+        "deleted": deleted,
+        "errors": errors,
+    }))
+}
+
 /// POST /files/upload?<path> — receives raw file data from XHR
 #[post("/files/upload?<path>", data = "<data>")]
 pub async fn upload_file(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
+    _csrf: CsrfXhr,
     user: SessionSetupComplete,
     path: String,
     data: rocket::data::Data<'_>,
@@ -638,6 +750,7 @@ pub async fn usage_sidebar(
 pub async fn usage_page(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
 ) -> Result<Template, Redirect> {
     let lib = match require_library(pool.inner(), &user.0.id).await {
@@ -657,6 +770,7 @@ pub async fn usage_page(
         "files/usage",
         context! {
             user: &user.0.username,
+            csrf_token: ensure_csrf_token(cookies),
             disk_bytes: usage.disk_bytes,
             disk_bytes_fmt: format_bytes(usage.disk_bytes),
             file_count: usage.file_count,
@@ -676,6 +790,7 @@ pub async fn usage_page(
 #[get("/settings")]
 pub async fn settings_page(
     pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
 ) -> Result<Template, Redirect> {
     let lib = PersonalLibrary::find_by_user(pool.inner(), &user.0.id)
@@ -688,6 +803,7 @@ pub async fn settings_page(
         context! {
             user_id: &user.0.id,
             username: &user.0.username,
+            csrf_token: ensure_csrf_token(cookies),
             email: &user.0.email,
             role: &user.0.role,
             created_at: &user.0.created_at,
@@ -788,6 +904,7 @@ pub fn routes() -> Vec<Route> {
         mkdir_submit,
         rename_submit,
         delete_submit,
+        bulk_delete,
         upload_file,
         download_file,
         usage_sidebar,

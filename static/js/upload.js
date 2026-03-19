@@ -6,6 +6,11 @@
   var uploads = [];
   var nextId = 1;
 
+  function getCsrfToken() {
+    var match = document.cookie.match('(?:^|; )csrf_token=([^;]*)');
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
   // DOM references (lazy, resolved after each HTMX swap)
   function getPanel() { return document.getElementById('upload-panel'); }
   function getPanelList() { return document.getElementById('upload-panel-list'); }
@@ -13,10 +18,8 @@
   function getFileInput() { return document.getElementById('file-upload-input'); }
   function getDropZone() { return document.getElementById('drop-zone'); }
 
-  // Current directory path from the page
+  // Current directory path from the URL (HTMX keeps it updated via hx-push-url)
   function getCurrentPath() {
-    var hidden = document.querySelector('input[name="path"]');
-    if (hidden) return hidden.value;
     var params = new URLSearchParams(window.location.search);
     return params.get('path') || '';
   }
@@ -136,6 +139,7 @@
 
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/files/upload?path=' + encodeURIComponent(fullPath), true);
+    xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
 
     xhr.upload.addEventListener('progress', function (e) {
       if (e.lengthComputable) {

@@ -3,6 +3,14 @@
   'use strict';
 
   // -----------------------------------------------------------------------
+  // CSRF helper — read csrf_token from cookie
+  // -----------------------------------------------------------------------
+  function getCsrfToken() {
+    var match = document.cookie.match('(?:^|; )csrf_token=([^;]*)');
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  // -----------------------------------------------------------------------
   // Dark mode
   // -----------------------------------------------------------------------
   const html = document.documentElement;
@@ -171,7 +179,120 @@
   });
 
   // -----------------------------------------------------------------------
-  // Delete confirmation modal
+  // Multi-file selection
+  // -----------------------------------------------------------------------
+  var lastCheckedIndex = -1;
+
+  function getSelectedPaths() {
+    var checked = document.querySelectorAll('.file-select-cb:checked');
+    var paths = [];
+    checked.forEach(function (cb) { paths.push(cb.getAttribute('data-path')); });
+    return paths;
+  }
+
+  function updateSelectionToolbar() {
+    var paths = getSelectedPaths();
+    var toolbar = document.getElementById('selection-toolbar');
+    var countEl = document.getElementById('selection-count');
+    if (!toolbar) return;
+    if (paths.length === 0) {
+      toolbar.classList.add('hidden');
+    } else {
+      toolbar.classList.remove('hidden');
+      if (countEl) countEl.textContent = paths.length + ' selected';
+    }
+    var selectAll = document.getElementById('select-all-checkbox');
+    var allCbs = document.querySelectorAll('.file-select-cb');
+    if (selectAll && allCbs.length > 0) {
+      selectAll.checked = paths.length === allCbs.length;
+      selectAll.indeterminate = paths.length > 0 && paths.length < allCbs.length;
+    }
+    allCbs.forEach(function (cb) {
+      var row = cb.closest('tr');
+      if (!row) return;
+      if (cb.checked) {
+        row.classList.add('bg-blue-50/60', 'dark:bg-blue-900/20');
+      } else {
+        row.classList.remove('bg-blue-50/60', 'dark:bg-blue-900/20');
+      }
+    });
+  }
+
+  // Select-all checkbox
+  document.addEventListener('change', function (e) {
+    if (e.target.id !== 'select-all-checkbox') return;
+    var checked = e.target.checked;
+    document.querySelectorAll('.file-select-cb').forEach(function (cb) {
+      cb.checked = checked;
+    });
+    lastCheckedIndex = -1;
+    updateSelectionToolbar();
+  });
+
+  // Individual checkbox with Shift+click range selection
+  document.addEventListener('click', function (e) {
+    var cb = e.target.closest('.file-select-cb');
+    if (!cb || cb.id === 'select-all-checkbox') return;
+    var allCbs = Array.from(document.querySelectorAll('.file-select-cb'));
+    var idx = allCbs.indexOf(cb);
+    if (e.shiftKey && lastCheckedIndex >= 0 && lastCheckedIndex !== idx) {
+      var start = Math.min(lastCheckedIndex, idx);
+      var end = Math.max(lastCheckedIndex, idx);
+      var state = cb.checked;
+      for (var i = start; i <= end; i++) {
+        allCbs[i].checked = state;
+      }
+    }
+    lastCheckedIndex = idx;
+    updateSelectionToolbar();
+  });
+
+  // Clear selection button
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#selection-clear-btn')) return;
+    document.querySelectorAll('.file-select-cb').forEach(function (cb) { cb.checked = false; });
+    var selectAll = document.getElementById('select-all-checkbox');
+    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+    lastCheckedIndex = -1;
+    updateSelectionToolbar();
+  });
+
+  // Bulk download
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#bulk-download-btn')) return;
+    var paths = getSelectedPaths();
+    paths.forEach(function (p) {
+      var row = document.querySelector('tr[data-path="' + CSS.escape(p) + '"]');
+      var isDir = row && row.getAttribute('data-is-dir') === 'true';
+      if (!isDir) {
+        var a = document.createElement('a');
+        a.href = '/files/download?path=' + encodeURIComponent(p);
+        a.download = '';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    });
+  });
+
+  // Bulk delete — open confirm modal
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#bulk-delete-btn')) return;
+    var paths = getSelectedPaths();
+    if (paths.length === 0) return;
+    var modal = document.getElementById('confirm-modal');
+    if (!modal) return;
+    var msg = modal.querySelector('#confirm-message');
+    if (msg) msg.textContent = 'Are you sure you want to delete ' + paths.length + ' item' + (paths.length > 1 ? 's' : '') + '? This cannot be undone.';
+    pendingBulkDeletePaths = paths;
+    openModal('confirm-modal');
+  });
+
+  var pendingBulkDeletePaths = null;
+
+  // -----------------------------------------------------------------------
+  // Delete confirmation modal (single + bulk)
   // -----------------------------------------------------------------------
   var pendingDeletePath = '';
   var pendingDeleteName = '';
@@ -181,6 +302,7 @@
     if (!btn) return;
     pendingDeletePath = btn.getAttribute('data-path');
     pendingDeleteName = btn.getAttribute('data-name');
+    pendingBulkDeletePaths = null;
     var modal = document.getElementById('confirm-modal');
     if (!modal) return;
     var msg = modal.querySelector('#confirm-message');
@@ -190,11 +312,32 @@
 
   document.addEventListener('click', function (e) {
     if (!e.target.closest('#confirm-action')) return;
+
+    // Bulk delete path
+    if (pendingBulkDeletePaths && pendingBulkDeletePaths.length > 0) {
+      var paths = pendingBulkDeletePaths;
+      pendingBulkDeletePaths = null;
+      closeAllModals();
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/files/bulk-delete', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
+      xhr.addEventListener('load', function () { window.location.reload(); });
+      xhr.addEventListener('error', function () { window.location.reload(); });
+      xhr.send(JSON.stringify({ paths: paths }));
+      return;
+    }
+
+    // Single delete path
     if (!pendingDeletePath) return;
-    // Create and submit a hidden form
     var form = document.createElement('form');
     form.method = 'POST';
     form.action = '/files/delete';
+    var csrfInput = document.createElement('input');
+    csrfInput.type = 'hidden';
+    csrfInput.name = 'csrf_token';
+    csrfInput.value = getCsrfToken();
+    form.appendChild(csrfInput);
     var input = document.createElement('input');
     input.type = 'hidden';
     input.name = 'path';
@@ -274,6 +417,62 @@
   // -----------------------------------------------------------------------
   document.addEventListener('htmx:afterSwap', function () {
     autoDismissFlashes();
+    initFileKeyboardNav();
+    lastCheckedIndex = -1;
+    updateSelectionToolbar();
+    // Keep mkdir-form path in sync after HTMX navigation
+    var mkdirPath = document.querySelector('#mkdir-form input[name="path"]');
+    if (mkdirPath) {
+      mkdirPath.value = new URLSearchParams(window.location.search).get('path') || '';
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Keyboard navigation for file list
+  // -----------------------------------------------------------------------
+  function initFileKeyboardNav() {
+    var rows = document.querySelectorAll('#file-tbody tr');
+    rows.forEach(function (row) {
+      if (!row.getAttribute('tabindex')) {
+        row.setAttribute('tabindex', '0');
+        row.setAttribute('role', 'row');
+      }
+    });
+  }
+  initFileKeyboardNav();
+
+  document.addEventListener('keydown', function (e) {
+    var row = e.target.closest('#file-tbody tr');
+    if (!row) return;
+
+    var rows = Array.from(document.querySelectorAll('#file-tbody tr'));
+    var idx = rows.indexOf(row);
+    if (idx === -1) return;
+
+    if (e.key === 'ArrowDown' && idx < rows.length - 1) {
+      e.preventDefault();
+      rows[idx + 1].focus();
+    } else if (e.key === 'ArrowUp' && idx > 0) {
+      e.preventDefault();
+      rows[idx - 1].focus();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      var link = row.querySelector('td:first-child a');
+      if (link) link.click();
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // hx-indicator loading states
+  // -----------------------------------------------------------------------
+  document.addEventListener('htmx:beforeRequest', function (e) {
+    var indicator = document.getElementById('htmx-loading');
+    if (indicator) indicator.classList.remove('hidden');
+  });
+
+  document.addEventListener('htmx:afterRequest', function (e) {
+    var indicator = document.getElementById('htmx-loading');
+    if (indicator) indicator.classList.add('hidden');
   });
 
 })();

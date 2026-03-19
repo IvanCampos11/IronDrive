@@ -43,4 +43,42 @@
   .card-hover {
     @apply card hover:shadow-card-hover hover:border-gray-300/80 dark:hover:border-gray-600/50 transition-all duration-200;
   }
+
+  /* Custom checkbox — no @tailwindcss/forms needed */
+  .file-checkbox {
+    @apply appearance-none w-4 h-4 border-2 border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 cursor-pointer transition-all duration-150 relative flex-shrink-0;
+  }
+  .file-checkbox:hover {
+    @apply border-blue-500 dark:border-blue-400;
+  }
+  .file-checkbox:checked {
+    @apply bg-blue-600 border-blue-600 dark:bg-blue-500 dark:border-blue-500;
+  }
+  .file-checkbox:checked::after {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 1px;
+    width: 5px;
+    height: 9px;
+    border: solid white;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  .file-checkbox:indeterminate {
+    @apply bg-blue-600 border-blue-600 dark:bg-blue-500 dark:border-blue-500;
+  }
+  .file-checkbox:indeterminate::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 5px;
+    width: 8px;
+    height: 2px;
+    background: white;
+    border-radius: 1px;
+  }
+  .file-checkbox:focus-visible {
+    @apply ring-2 ring-blue-500/50 ring-offset-1 ring-offset-white dark:ring-offset-gray-900;
+  }
 }

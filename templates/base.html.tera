@@ -11,9 +11,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css">
-  <script src="/static/vendor/htmx.min.js" defer></script>
-  <script src="/static/js/app.js" defer></script>
+  <link rel="stylesheet" href="/static/css/style.css?v=0.2.0">
+  <script src="/static/vendor/htmx.min.js?v=2.0.4" defer></script>
+  <script src="/static/js/app.js?v=0.2.0" defer></script>
 </head>
 <body class="h-full bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans antialiased" hx-boost="false">
   {% block nav %}
@@ -27,6 +27,11 @@
         <div class="pointer-events-auto">
           {% include "partials/flash" %}
         </div>
+      </div>
+
+      <!-- HTMX loading indicator -->
+      <div id="htmx-loading" class="hidden fixed top-0 left-0 right-0 z-50">
+        <div class="h-0.5 bg-blue-600 animate-pulse"></div>
       </div>
 
       <div class="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
