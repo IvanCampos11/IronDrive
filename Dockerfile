@@ -18,7 +18,7 @@ COPY templates ./templates
 COPY static ./static
 COPY Rocket.toml ./Rocket.toml
 
-RUN cargo build --release --locked
+RUN cargo build --release
 
 FROM debian:bookworm-slim AS runtime
 
