@@ -1,0 +1,80 @@
+{% extends "base" %}
+
+{% block title %}Settings – IronDrive{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto animate-fade-in">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">Settings</h1>
+    <a href="/files" class="btn-secondary text-sm">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+      Back to files
+    </a>
+  </div>
+
+  <!-- Account info -->
+  <section class="card p-6 mb-6">
+    <div class="flex items-center gap-3 mb-5">
+      <div class="flex items-center justify-center w-9 h-9 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
+        <svg class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+      </div>
+      <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Account</h2>
+    </div>
+    <dl class="space-y-3 text-sm">
+      <div class="flex justify-between py-1">
+        <dt class="text-gray-500 dark:text-gray-400">Username</dt>
+        <dd class="text-gray-900 dark:text-gray-100 font-medium">{{ username }}</dd>
+      </div>
+      <div class="flex justify-between py-1 border-t border-gray-100 dark:border-gray-700/50">
+        <dt class="text-gray-500 dark:text-gray-400">Email</dt>
+        <dd class="text-gray-900 dark:text-gray-100 font-medium">{{ email }}</dd>
+      </div>
+      <div class="flex justify-between py-1 border-t border-gray-100 dark:border-gray-700/50">
+        <dt class="text-gray-500 dark:text-gray-400">Role</dt>
+        <dd><span class="inline-flex px-2 py-0.5 text-xs font-medium rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 capitalize">{{ role }}</span></dd>
+      </div>
+      <div class="flex justify-between py-1 border-t border-gray-100 dark:border-gray-700/50">
+        <dt class="text-gray-500 dark:text-gray-400">User ID</dt>
+        <dd class="text-gray-900 dark:text-gray-100 font-mono text-xs">{{ user_id }}</dd>
+      </div>
+      <div class="flex justify-between py-1 border-t border-gray-100 dark:border-gray-700/50">
+        <dt class="text-gray-500 dark:text-gray-400">Member since</dt>
+        <dd class="text-gray-900 dark:text-gray-100 font-medium">{{ created_at }}</dd>
+      </div>
+    </dl>
+  </section>
+
+  <!-- Library info -->
+  {% if library_id %}
+  <section class="card p-6 mb-6">
+    <div class="flex items-center gap-3 mb-5">
+      <div class="flex items-center justify-center w-9 h-9 bg-green-50 dark:bg-green-900/30 rounded-lg">
+        <svg class="w-5 h-5 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+      </div>
+      <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Library</h2>
+    </div>
+    <dl class="space-y-3 text-sm">
+      <div class="flex justify-between py-1">
+        <dt class="text-gray-500 dark:text-gray-400">Library ID</dt>
+        <dd class="text-gray-900 dark:text-gray-100 font-mono text-xs">{{ library_id }}</dd>
+      </div>
+      {% if encryption_mode %}
+      <div class="flex justify-between py-1 border-t border-gray-100 dark:border-gray-700/50">
+        <dt class="text-gray-500 dark:text-gray-400">Encryption</dt>
+        <dd><span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          {{ encryption_mode }}
+        </span></dd>
+      </div>
+      {% endif %}
+      {% if library_created %}
+      <div class="flex justify-between py-1 border-t border-gray-100 dark:border-gray-700/50">
+        <dt class="text-gray-500 dark:text-gray-400">Created</dt>
+        <dd class="text-gray-900 dark:text-gray-100 font-medium">{{ library_created }}</dd>
+      </div>
+      {% endif %}
+    </dl>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

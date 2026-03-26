@@ -1,0 +1,23 @@
+<nav aria-label="Breadcrumb" class="mb-5">
+  <ol class="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400">
+    {% for crumb in breadcrumbs %}
+      {% if loop.last %}
+        <li class="text-gray-900 dark:text-gray-100 font-semibold" aria-current="page">{{ crumb.name }}</li>
+      {% else %}
+        <li>
+          <a
+            href="/files{% if crumb.path %}?path={{ crumb.path }}{% endif %}"
+            class="hover:text-gray-900 dark:hover:text-white transition-colors"
+            hx-get="/files/partial{% if crumb.path %}?path={{ crumb.path }}{% endif %}"
+            hx-target="#file-browser-content"
+            hx-swap="innerHTML"
+            hx-push-url="/files{% if crumb.path %}?path={{ crumb.path }}{% endif %}"
+          >{{ crumb.name }}</a>
+        </li>
+        <li aria-hidden="true" class="text-gray-300 dark:text-gray-600">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+        </li>
+      {% endif %}
+    {% endfor %}
+  </ol>
+</nav>

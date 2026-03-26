@@ -1,0 +1,42 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      - chore
+      - dependencies
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking
+        - semver-major
+    - title: Features
+      labels:
+        - feature
+        - enhancement
+        - semver-minor
+    - title: Fixes
+      labels:
+        - bug
+        - bugfix
+        - fix
+        - semver-patch
+    - title: Security
+      labels:
+        - security
+    - title: Performance
+      labels:
+        - performance
+    - title: Documentation
+      labels:
+        - documentation
+        - docs
+    - title: Maintenance
+      labels:
+        - refactor
+        - test
+        - ci
+        - build
+        - maintenance
+    - title: Other Changes
+      labels:
+        - '*'
