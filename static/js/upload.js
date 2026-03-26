@@ -24,6 +24,48 @@
     return params.get('path') || '';
   }
 
+  function getChunkSizeBytes() {
+    var root = document.getElementById('file-browser-content');
+    if (!root) return 8 * 1024 * 1024;
+    var raw = root.getAttribute('data-chunk-size-bytes');
+    var parsed = parseInt(raw || '', 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 8 * 1024 * 1024;
+    return parsed;
+  }
+
+  function parseErrorMessage(payload, fallback) {
+    if (!payload) return fallback;
+    if (typeof payload === 'string') return payload;
+    if (payload.error && typeof payload.error === 'string') return payload.error;
+    if (payload.error && payload.error.description) return payload.error.description;
+    if (payload.message && typeof payload.message === 'string') return payload.message;
+    return fallback;
+  }
+
+  function jsonRequest(method, url, body) {
+    return fetch(url, {
+      method: method,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCsrfToken()
+      },
+      body: JSON.stringify(body)
+    }).then(function (resp) {
+      return resp.text().then(function (txt) {
+        var payload = {};
+        try {
+          payload = txt ? JSON.parse(txt) : {};
+        } catch (_) {
+          payload = {};
+        }
+        if (!resp.ok) {
+          throw new Error(parseErrorMessage(payload, 'Request failed'));
+        }
+        return payload;
+      });
+    });
+  }
+
   // -----------------------------------------------------------------------
   // Upload Panel UI
   // -----------------------------------------------------------------------
@@ -43,13 +85,17 @@
     list.classList.toggle('hidden');
   }
 
-  function createUploadRow(id, filename) {
+  function createUploadRow(id, filename, mode) {
+    var modeBadge = mode === 'chunked'
+      ? '<span class="ml-2 inline-flex items-center rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">Chunked</span>'
+      : '';
+
     var div = document.createElement('div');
     div.id = 'upload-item-' + id;
     div.className = 'px-3 py-2 border-b border-gray-100 dark:border-gray-700 last:border-0';
     div.innerHTML =
       '<div class="flex items-center justify-between mb-1">' +
-        '<span class="text-sm text-gray-700 dark:text-gray-300 truncate max-w-[180px]" title="' + escapeHtml(filename) + '">' + escapeHtml(filename) + '</span>' +
+        '<span class="flex min-w-0 items-center text-sm text-gray-700 dark:text-gray-300 truncate max-w-[220px]" title="' + escapeHtml(filename) + '"><span class="truncate">' + escapeHtml(filename) + '</span>' + modeBadge + '</span>' +
         '<span class="upload-status text-xs text-gray-400">0%</span>' +
       '</div>' +
       '<div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">' +
@@ -122,64 +168,165 @@
   }
 
   // -----------------------------------------------------------------------
-  // Core upload function
+  // Core upload functions
   // -----------------------------------------------------------------------
+  function uploadFileSingle(id, file, fullPath) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/files/upload?path=' + encodeURIComponent(fullPath), true);
+      xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
+
+      xhr.upload.addEventListener('progress', function (e) {
+        if (e.lengthComputable) {
+          var pct = Math.round((e.loaded / e.total) * 100);
+          updateUploadRow(id, pct);
+        }
+      });
+
+      xhr.upload.addEventListener('load', function () {
+        markUploadProcessing(id);
+      });
+
+      xhr.addEventListener('load', function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          var msg = 'Upload failed';
+          try {
+            var payload = JSON.parse(xhr.responseText);
+            msg = parseErrorMessage(payload, msg);
+          } catch (_) { /* ignore */ }
+          reject(new Error(msg));
+        }
+      });
+
+      xhr.addEventListener('error', function () {
+        reject(new Error('Network error'));
+      });
+
+      uploads.push({ id: id, xhr: xhr, name: file.name });
+      xhr.send(file);
+    });
+  }
+
+  function uploadChunkXhr(uploadId, chunkIndex, chunkBlob, loadedSoFar, totalSize, onProgress) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('PUT', '/files/chunked/upload/' + encodeURIComponent(uploadId) + '/' + chunkIndex, true);
+      xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
+
+      xhr.upload.addEventListener('progress', function (e) {
+        if (!e.lengthComputable) return;
+        var uploaded = loadedSoFar + e.loaded;
+        var pct = Math.min(99, Math.round((uploaded / totalSize) * 100));
+        onProgress(pct);
+      });
+
+      xhr.addEventListener('load', function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          var msg = 'Chunk upload failed';
+          try {
+            var payload = JSON.parse(xhr.responseText);
+            msg = parseErrorMessage(payload, msg);
+          } catch (_) { /* ignore */ }
+          reject(new Error(msg));
+        }
+      });
+
+      xhr.addEventListener('error', function () {
+        reject(new Error('Network error'));
+      });
+
+      xhr.send(chunkBlob);
+    });
+  }
+
+  function uploadFileChunked(id, file, fullPath) {
+    var chunkSize = getChunkSizeBytes();
+    var totalChunks = Math.ceil(file.size / chunkSize);
+    var uploadId = '';
+
+    return jsonRequest('POST', '/files/chunked/init', {
+      path: fullPath,
+      total_chunks: totalChunks,
+      total_bytes: file.size
+    }).then(function (initPayload) {
+      uploadId = initPayload.upload_id;
+
+      var loaded = 0;
+      var chain = Promise.resolve();
+      for (var idx = 0; idx < totalChunks; idx++) {
+        (function (chunkIndex) {
+          chain = chain.then(function () {
+            var start = chunkIndex * chunkSize;
+            var end = Math.min(start + chunkSize, file.size);
+            var chunk = file.slice(start, end);
+
+            return uploadChunkXhr(uploadId, chunkIndex, chunk, loaded, file.size, function (pct) {
+              updateUploadRow(id, pct);
+            }).then(function () {
+              loaded += chunk.size;
+              var pct = Math.min(99, Math.round((loaded / file.size) * 100));
+              updateUploadRow(id, pct);
+            });
+          });
+        })(idx);
+      }
+
+      return chain;
+    }).then(function () {
+      markUploadProcessing(id);
+      return jsonRequest('POST', '/files/chunked/complete', {
+        upload_id: uploadId,
+        verify: false
+      });
+    }).catch(function (err) {
+      if (!uploadId) {
+        throw err;
+      }
+
+      return fetch('/files/chunked/cancel?upload_id=' + encodeURIComponent(uploadId), {
+        method: 'DELETE',
+        headers: { 'X-CSRF-Token': getCsrfToken() }
+      }).catch(function () {
+        return null;
+      }).then(function () {
+        throw err;
+      });
+    });
+  }
+
   function uploadFile(file) {
     var id = nextId++;
     var currentPath = getCurrentPath();
     var fullPath = currentPath ? (currentPath + '/' + file.name) : file.name;
+    var chunkSize = getChunkSizeBytes();
+    var shouldUseChunked = file.size > chunkSize;
 
     // Show UI
     showPanel();
     var panelList = getPanelList();
     if (panelList) {
-      panelList.appendChild(createUploadRow(id, file.name));
+      panelList.appendChild(createUploadRow(id, file.name, shouldUseChunked ? 'chunked' : 'single'));
     }
     addGhostRow(id, file.name);
 
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/files/upload?path=' + encodeURIComponent(fullPath), true);
-    xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
+    var promise = shouldUseChunked
+      ? uploadFileChunked(id, file, fullPath)
+      : uploadFileSingle(id, file, fullPath);
 
-    xhr.upload.addEventListener('progress', function (e) {
-      if (e.lengthComputable) {
-        var pct = Math.round((e.loaded / e.total) * 100);
-        updateUploadRow(id, pct);
-      }
-    });
-
-    xhr.addEventListener('load', function () {
+    promise.then(function () {
       removeGhostRow(id);
-      if (xhr.status >= 200 && xhr.status < 300) {
-        markUploadComplete(id);
-        refreshFileList();
-      } else {
-        var msg = 'Failed';
-        try {
-          var resp = JSON.parse(xhr.responseText);
-          if (resp.error) msg = resp.error;
-        } catch (_) { /* ignore parse errors */ }
-        markUploadFailed(id, msg);
-      }
-    });
-
-    xhr.addEventListener('error', function () {
+      markUploadComplete(id);
+      refreshFileList();
+    }).catch(function (err) {
       removeGhostRow(id);
-      markUploadFailed(id, 'Network error');
-    });
-
-    xhr.addEventListener('loadend', function () {
-      // Remove from active uploads
+      markUploadFailed(id, err && err.message ? err.message : 'Upload failed');
+    }).finally(function () {
       uploads = uploads.filter(function (u) { return u.id !== id; });
     });
-
-    // Mark as processing once upload bytes are sent
-    xhr.upload.addEventListener('load', function () {
-      markUploadProcessing(id);
-    });
-
-    uploads.push({ id: id, xhr: xhr, name: file.name });
-    xhr.send(file);
   }
 
   // Refresh the file list via HTMX after upload
@@ -252,7 +399,7 @@
   // Panel controls
   // -----------------------------------------------------------------------
   document.addEventListener('click', function (e) {
-    if (e.target.closest('#upload-panel-minimize')) {
+    if (e.target.closest('#upload-panel-toggle')) {
       toggleMinimise();
     }
     if (e.target.closest('#upload-panel-clear')) {

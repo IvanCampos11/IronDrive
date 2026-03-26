@@ -10,6 +10,121 @@
     return match ? decodeURIComponent(match[1]) : '';
   }
 
+  function getChunkSizeBytes() {
+    var root = document.getElementById('file-browser-content');
+    if (!root) return 8 * 1024 * 1024;
+    var raw = root.getAttribute('data-chunk-size-bytes');
+    var parsed = parseInt(raw || '', 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 8 * 1024 * 1024;
+    return parsed;
+  }
+
+  function parseErrorMessage(payload, fallback) {
+    if (!payload) return fallback;
+    if (typeof payload === 'string') return payload;
+    if (payload.error && typeof payload.error === 'string') return payload.error;
+    if (payload.error && payload.error.description) return payload.error.description;
+    if (payload.message && typeof payload.message === 'string') return payload.message;
+    return fallback;
+  }
+
+  function jsonFetch(url, options) {
+    var opts = options || {};
+    opts.headers = opts.headers || {};
+    opts.headers['X-CSRF-Token'] = getCsrfToken();
+
+    return fetch(url, opts).then(function (resp) {
+      return resp.text().then(function (txt) {
+        var payload = {};
+        try {
+          payload = txt ? JSON.parse(txt) : {};
+        } catch (_) {
+          payload = {};
+        }
+        if (!resp.ok) {
+          throw new Error(parseErrorMessage(payload, 'Request failed'));
+        }
+        return payload;
+      });
+    });
+  }
+
+  function arrayBufferFetch(url) {
+    return fetch(url, {
+      headers: { 'X-CSRF-Token': getCsrfToken() }
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return resp.text().then(function (txt) {
+          var payload = {};
+          try {
+            payload = txt ? JSON.parse(txt) : {};
+          } catch (_) {
+            payload = {};
+          }
+          throw new Error(parseErrorMessage(payload, 'Download failed'));
+        });
+      }
+      return resp.arrayBuffer();
+    });
+  }
+
+  function triggerBlobDownload(blob, filename) {
+    var objectUrl = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename || 'download.bin';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () {
+      URL.revokeObjectURL(objectUrl);
+    }, 5000);
+  }
+
+  function downloadViaChunked(path) {
+    return jsonFetch('/files/chunked/download/init?path=' + encodeURIComponent(path))
+      .then(function (initPayload) {
+        var totalChunks = initPayload.total_chunks || 0;
+        var token = initPayload.token;
+        var filename = initPayload.filename || 'download.bin';
+        var parts = [];
+        var chain = Promise.resolve();
+
+        for (var i = 0; i < totalChunks; i++) {
+          (function (idx) {
+            chain = chain.then(function () {
+              return arrayBufferFetch('/files/chunked/download/chunk?token=' + encodeURIComponent(token) + '&index=' + idx)
+                .then(function (ab) {
+                  parts.push(new Uint8Array(ab));
+                });
+            });
+          })(i);
+        }
+
+        return chain.then(function () {
+          var blob = new Blob(parts, { type: initPayload.mime_type || 'application/octet-stream' });
+          triggerBlobDownload(blob, filename);
+        });
+      });
+  }
+
+  function downloadViaSingle(path) {
+    var a = document.createElement('a');
+    a.href = '/files/download?path=' + encodeURIComponent(path);
+    a.download = '';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function shouldUseChunkedDownload(path, fileSize) {
+    if (!path) return false;
+    if (!Number.isFinite(fileSize) || fileSize <= 0) return false;
+    return fileSize > getChunkSizeBytes();
+  }
+
   // -----------------------------------------------------------------------
   // Dark mode
   // -----------------------------------------------------------------------
@@ -261,18 +376,41 @@
   document.addEventListener('click', function (e) {
     if (!e.target.closest('#bulk-download-btn')) return;
     var paths = getSelectedPaths();
+    var chain = Promise.resolve();
     paths.forEach(function (p) {
       var row = document.querySelector('tr[data-path="' + CSS.escape(p) + '"]');
       var isDir = row && row.getAttribute('data-is-dir') === 'true';
       if (!isDir) {
-        var a = document.createElement('a');
-        a.href = '/files/download?path=' + encodeURIComponent(p);
-        a.download = '';
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        var size = parseInt(row.getAttribute('data-size') || '0', 10);
+        chain = chain.then(function () {
+          if (shouldUseChunkedDownload(p, size)) {
+            return downloadViaChunked(p).catch(function () {
+              downloadViaSingle(p);
+            });
+          }
+          downloadViaSingle(p);
+          return Promise.resolve();
+        });
       }
+    });
+  });
+
+  // Intercept file download links for large files and switch to chunked download.
+  document.addEventListener('click', function (e) {
+    var link = e.target.closest('a[href^="/files/download?path="]');
+    if (!link) return;
+
+    var row = link.closest('tr[data-path]');
+    if (!row) return;
+    if (row.getAttribute('data-is-dir') === 'true') return;
+
+    var path = row.getAttribute('data-path') || '';
+    var size = parseInt(row.getAttribute('data-size') || '0', 10);
+    if (!shouldUseChunkedDownload(path, size)) return;
+
+    e.preventDefault();
+    downloadViaChunked(path).catch(function () {
+      downloadViaSingle(path);
     });
   });
 

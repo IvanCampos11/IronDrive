@@ -13,7 +13,7 @@ use crate::errors::AppError;
 use crate::guards::csrf_guard::{ensure_csrf_token, validate_csrf, CsrfXhr};
 use crate::guards::session_guard::{SessionSetupComplete, SessionUser, COOKIE_NAME};
 use crate::models::library::PersonalLibrary;
-use crate::services::{auth_service, fs_service, library_service};
+use crate::services::{auth_service, chunk_service, fs_service, library_service};
 use crate::services::crypto_service::MasterKey;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
@@ -66,6 +66,20 @@ pub struct DeleteForm {
 #[derive(serde::Deserialize)]
 pub struct BulkDeleteRequest {
     pub paths: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChunkedInitRequest {
+    pub path: String,
+    pub total_chunks: u32,
+    pub total_bytes: u64,
+    pub checksum_sha256: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChunkedCompleteRequest {
+    pub upload_id: String,
+    pub verify: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +416,7 @@ pub async fn files_page(
         context! {
             user: &user.0.username,
             csrf_token: csrf_token,
+            chunk_size_bytes: config.chunk_size_bytes,
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
@@ -664,6 +679,280 @@ pub async fn upload_file(
     }
 }
 
+/// POST /files/chunked/init — starts a chunked upload session for the browser UI.
+#[post("/files/chunked/init", data = "<body>")]
+pub async fn chunked_init_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<ChunkedInitRequest>,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| (Status::NotFound, rocket::serde::json::Json(serde_json::json!({"error": "Library not found."}))))?;
+
+    let result = chunk_service::init_upload(
+        pool.inner(),
+        config.inner(),
+        chunk_service::InitUploadParams {
+            user_id: user.0.id.clone(),
+            library_id: lib.id,
+            target_path: body.path.clone(),
+            total_chunks: body.total_chunks,
+            total_bytes: body.total_bytes,
+            checksum_sha256: body.checksum_sha256.clone(),
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "upload_id": result.upload_id,
+        "chunk_size_bytes": result.chunk_size_bytes,
+        "total_chunks": result.total_chunks,
+        "total_bytes": result.total_bytes,
+        "expires_at": result.expires_at,
+    })))
+}
+
+/// PUT /files/chunked/upload/<upload_id>/<chunk_index> — receives one chunk.
+#[put("/files/chunked/upload/<upload_id>/<chunk_index>", data = "<data>")]
+pub async fn chunked_receive_chunk(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    upload_id: &str,
+    chunk_index: u32,
+    data: rocket::data::Data<'_>,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    use rocket::data::ToByteUnit;
+
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| (Status::NotFound, rocket::serde::json::Json(serde_json::json!({"error": "Library not found."}))))?;
+
+    let allowed = (config.chunk_size_bytes + 1).bytes();
+    let stream = data
+        .open(allowed)
+        .into_bytes()
+        .await
+        .map_err(|e| {
+            (
+                Status::InternalServerError,
+                rocket::serde::json::Json(serde_json::json!({"error": format!("Failed to read chunk data: {e}")})),
+            )
+        })?;
+
+    if !stream.is_complete() {
+        return Err((
+            Status::PayloadTooLarge,
+            rocket::serde::json::Json(serde_json::json!({
+                "error": format!("Chunk exceeds the maximum chunk size of {} bytes.", config.chunk_size_bytes)
+            })),
+        ));
+    }
+
+    let result = chunk_service::receive_chunk(
+        pool.inner(),
+        config.inner(),
+        &user.0.id,
+        &lib.id,
+        upload_id,
+        chunk_index,
+        &stream.into_inner(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "upload_id": result.upload_id,
+        "chunk_index": result.chunk_index,
+        "received_chunks": result.received_chunks,
+        "total_chunks": result.total_chunks,
+    })))
+}
+
+/// POST /files/chunked/complete — assembles and persists a chunked upload.
+#[post("/files/chunked/complete", data = "<body>")]
+pub async fn chunked_complete_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<ChunkedCompleteRequest>,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| (Status::NotFound, rocket::serde::json::Json(serde_json::json!({"error": "Library not found."}))))?;
+
+    let result = chunk_service::complete_upload(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &lib.id,
+        &body.upload_id,
+        body.verify.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "success": true,
+        "path": result.path,
+        "size": result.size,
+        "disk_size": result.disk_size,
+        "checksum_sha256": result.checksum_sha256,
+        "mime_type": result.mime_type,
+    })))
+}
+
+/// DELETE /files/chunked/cancel?upload_id=<id> — cancels a chunked upload.
+#[delete("/files/chunked/cancel?<upload_id>")]
+pub async fn chunked_cancel_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    upload_id: String,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| (Status::NotFound, rocket::serde::json::Json(serde_json::json!({"error": "Library not found."}))))?;
+
+    chunk_service::cancel_upload(
+        pool.inner(),
+        config.inner(),
+        &user.0.id,
+        &lib.id,
+        &upload_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "success": true,
+        "upload_id": upload_id,
+    })))
+}
+
+/// GET /files/chunked/download/init?<path> — initialize chunked browser download.
+#[get("/files/chunked/download/init?<path>")]
+pub async fn chunked_init_download(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: String,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    let result = chunk_service::init_download(
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &lib.id,
+        &path,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "token": result.token,
+        "filename": result.filename,
+        "mime_type": result.mime_type,
+        "chunk_size_bytes": result.chunk_size_bytes,
+        "total_chunks": result.total_chunks,
+        "total_bytes": result.total_bytes,
+        "expires_at": result.expires_at,
+    })))
+}
+
+/// GET /files/chunked/download/chunk?<token>&<index> — stream one chunk for browser download.
+#[get("/files/chunked/download/chunk?<token>&<index>")]
+pub async fn chunked_download_chunk(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    token: String,
+    index: u32,
+) -> Result<crate::routes::library::FileChunkDownload, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    let result = chunk_service::serve_chunk(
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &token,
+        index,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let content_type = result
+        .mime_type
+        .as_deref()
+        .and_then(|m| {
+            let parts: Vec<&str> = m.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                Some(rocket::http::ContentType::new(
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(rocket::http::ContentType::Binary);
+
+    Ok(crate::routes::library::FileChunkDownload {
+        data: result.data,
+        content_type,
+        checksum_sha256: result.checksum_sha256,
+        chunk_index: result.chunk_index,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+    })
+}
+
 /// GET /files/download?<path> — browser download
 #[get("/files/download?<path>")]
 pub async fn download_file(
@@ -906,6 +1195,12 @@ pub fn routes() -> Vec<Route> {
         delete_submit,
         bulk_delete,
         upload_file,
+        chunked_init_upload,
+        chunked_receive_chunk,
+        chunked_complete_upload,
+        chunked_cancel_upload,
+        chunked_init_download,
+        chunked_download_chunk,
         download_file,
         usage_sidebar,
         usage_page,
