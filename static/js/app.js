@@ -248,6 +248,32 @@
     });
   }
 
+  function normalizeDirPath(path) {
+    if (!path) return '';
+    return path.trim().replace(/^\/+|\/+$/g, '');
+  }
+
+  function getCurrentViewerPath() {
+    return normalizeDirPath(new URLSearchParams(window.location.search).get('path') || '');
+  }
+
+  function refreshCurrentFileList() {
+    if (window.htmx) {
+      var path = getCurrentViewerPath();
+      var url = '/files/partial' + (path ? '?path=' + encodeURIComponent(path) : '');
+      window.htmx.ajax('GET', url, { target: '#file-browser-content', swap: 'innerHTML' });
+      return;
+    }
+    window.location.reload();
+  }
+
+  function parentDir(path) {
+    var normalized = normalizeDirPath(path);
+    var idx = normalized.lastIndexOf('/');
+    if (idx < 0) return '';
+    return normalized.slice(0, idx);
+  }
+
   // Escape key closes modals
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeAllModals();
@@ -291,6 +317,245 @@
     if (pathInput) pathInput.value = path;
     if (nameInput) nameInput.value = name;
     openModal('rename-modal');
+  });
+
+  // -----------------------------------------------------------------------
+  // Move modal (single + bulk)
+  // -----------------------------------------------------------------------
+  var pendingMovePath = '';
+  var pendingBulkMovePaths = null;
+  var moveCurrentDir = '';
+
+  function getMoveSourcePaths() {
+    var paths = [];
+    if (pendingMovePath) {
+      paths.push(normalizeDirPath(pendingMovePath));
+    }
+    if (pendingBulkMovePaths && pendingBulkMovePaths.length > 0) {
+      pendingBulkMovePaths.forEach(function (p) {
+        paths.push(normalizeDirPath(p));
+      });
+    }
+
+    // De-duplicate and drop empties.
+    var seen = Object.create(null);
+    return paths.filter(function (p) {
+      if (!p || seen[p]) return false;
+      seen[p] = true;
+      return true;
+    });
+  }
+
+  function isInvalidMoveDestination(destPath) {
+    var destination = normalizeDirPath(destPath);
+    if (!destination) return false;
+
+    var sources = getMoveSourcePaths();
+    for (var i = 0; i < sources.length; i++) {
+      var source = sources[i];
+      if (!source) continue;
+      if (destination === source) return true;
+      if (destination.startsWith(source + '/')) return true;
+    }
+    return false;
+  }
+
+  function moveFolderListLoading() {
+    var list = document.getElementById('move-folder-list');
+    if (!list) return;
+    list.innerHTML = '<div class="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">Loading folders...</div>';
+  }
+
+  function moveFolderListError(msg) {
+    var list = document.getElementById('move-folder-list');
+    if (!list) return;
+    list.innerHTML = '<div class="px-3 py-2 text-sm text-red-500 dark:text-red-400">' + (msg || 'Failed to load folders.') + '</div>';
+  }
+
+  function moveFetchFolders(path) {
+    var url = '/files/folders?path=' + encodeURIComponent(path || '');
+    return fetch(url, {
+      headers: { 'X-CSRF-Token': getCsrfToken() }
+    }).then(function (resp) {
+      return resp.text().then(function (txt) {
+        var payload = {};
+        try {
+          payload = txt ? JSON.parse(txt) : {};
+        } catch (_) {
+          payload = {};
+        }
+        if (!resp.ok) {
+          throw new Error(parseErrorMessage(payload, 'Failed to load folders'));
+        }
+        return payload;
+      });
+    });
+  }
+
+  function moveBuildBreadcrumbs(path) {
+    var crumbs = [{ name: 'Root', path: '' }];
+    if (!path) return crumbs;
+
+    var accumulated = '';
+    path.split('/').forEach(function (segment) {
+      if (!segment) return;
+      accumulated = accumulated ? (accumulated + '/' + segment) : segment;
+      crumbs.push({ name: segment, path: accumulated });
+    });
+    return crumbs;
+  }
+
+  function moveRenderBrowser(path, folders) {
+    var normalized = normalizeDirPath(path);
+    moveCurrentDir = normalized;
+
+    var targetInput = document.getElementById('move-target-dir');
+    if (targetInput) targetInput.value = normalized;
+
+    var breadcrumbsEl = document.getElementById('move-breadcrumbs');
+    if (breadcrumbsEl) {
+      breadcrumbsEl.innerHTML = '';
+      var crumbs = moveBuildBreadcrumbs(normalized);
+
+      crumbs.forEach(function (crumb, idx) {
+        if (idx > 0) {
+          var sep = document.createElement('span');
+          sep.className = 'text-gray-400 dark:text-gray-500';
+          sep.textContent = '/';
+          breadcrumbsEl.appendChild(sep);
+        }
+
+        var isLast = idx === crumbs.length - 1;
+        if (isLast) {
+          var label = document.createElement('span');
+          label.className = 'text-gray-700 dark:text-gray-200 truncate';
+          label.textContent = crumb.name;
+          breadcrumbsEl.appendChild(label);
+        } else {
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'text-blue-600 dark:text-blue-400 hover:underline';
+          btn.textContent = crumb.name;
+          btn.addEventListener('click', function () {
+            moveLoadFolder(crumb.path);
+          });
+          breadcrumbsEl.appendChild(btn);
+        }
+      });
+    }
+
+    var list = document.getElementById('move-folder-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    function appendRow(name, clickHandler, isMuted) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors flex items-center gap-2';
+      if (isMuted) btn.className += ' text-gray-500 dark:text-gray-400';
+      btn.innerHTML = '<svg class="w-4 h-4 text-blue-500 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg><span class="truncate"></span>';
+      btn.querySelector('span').textContent = name;
+      btn.addEventListener('click', clickHandler);
+      list.appendChild(btn);
+    }
+
+    if (normalized) {
+      var parent = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
+      appendRow('..', function () { moveLoadFolder(parent); }, true);
+    }
+
+    if (!folders.length) {
+      var empty = document.createElement('div');
+      empty.className = 'px-3 py-2 text-sm text-gray-500 dark:text-gray-400';
+      empty.textContent = 'No subfolders here. Use Move to place items in this folder.';
+      list.appendChild(empty);
+      return;
+    }
+
+    folders.forEach(function (entry) {
+      var nextPath = normalizeDirPath(entry.path || '');
+      if (isInvalidMoveDestination(nextPath)) return;
+      appendRow(entry.name || nextPath, function () { moveLoadFolder(nextPath); }, false);
+    });
+
+    if (!list.children.length) {
+      var none = document.createElement('div');
+      none.className = 'px-3 py-2 text-sm text-gray-500 dark:text-gray-400';
+      none.textContent = 'No valid subfolders to move into from here.';
+      list.appendChild(none);
+    }
+  }
+
+  function moveLoadFolder(path) {
+    var normalized = normalizeDirPath(path);
+    moveFolderListLoading();
+    moveFetchFolders(normalized)
+      .then(function (payload) {
+        var entries = Array.isArray(payload.entries) ? payload.entries : [];
+        var folders = entries.filter(function (e) {
+          if (!e) return false;
+          // /files/folders returns folders-only objects { name, path }.
+          // Keep compatibility with older/full listing shapes that include is_dir.
+          return typeof e.path === 'string' && (typeof e.is_dir === 'undefined' || e.is_dir === true);
+        });
+        folders.sort(function (a, b) {
+          return (a.name || '').localeCompare((b.name || ''));
+        });
+        moveRenderBrowser(normalized, folders);
+      })
+      .catch(function (err) {
+        moveFolderListError(err && err.message ? err.message : 'Failed to load folders.');
+      });
+  }
+
+  function openMoveModal(mode, payload) {
+    var modal = document.getElementById('move-modal');
+    if (!modal) return;
+
+    var oldPathInput = modal.querySelector('input[name="old_path"]');
+    var targetInput = modal.querySelector('input[name="target_dir"]');
+    var returnPathInput = modal.querySelector('input[name="return_path"]');
+    var subtitle = modal.querySelector('#move-modal-subtitle');
+    var submitBtn = modal.querySelector('#move-submit-btn');
+
+    var currentDir = getCurrentViewerPath();
+    var startDir = currentDir;
+    if (returnPathInput) returnPathInput.value = currentDir;
+
+    if (mode === 'single') {
+      pendingMovePath = payload.path;
+      pendingBulkMovePaths = null;
+      if (oldPathInput) oldPathInput.value = payload.path;
+      startDir = parentDir(payload.path || currentDir);
+      if (subtitle) subtitle.textContent = 'Select destination folder for "' + payload.name + '".';
+      if (submitBtn) submitBtn.textContent = 'Move';
+      modal.setAttribute('data-mode', 'single');
+    } else {
+      pendingMovePath = '';
+      pendingBulkMovePaths = payload.paths;
+      if (oldPathInput) oldPathInput.value = '';
+      if (subtitle) subtitle.textContent = 'Select destination folder for ' + payload.paths.length + ' item' + (payload.paths.length > 1 ? 's' : '') + '.';
+      if (submitBtn) submitBtn.textContent = 'Move selected';
+      modal.setAttribute('data-mode', 'bulk');
+
+      if (payload.paths && payload.paths.length > 0) {
+        startDir = parentDir(payload.paths[0]);
+      }
+    }
+
+    if (targetInput) targetInput.value = startDir;
+
+    openModal('move-modal');
+    moveLoadFolder(startDir);
+  }
+
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.btn-move');
+    if (!btn) return;
+    openMoveModal('single', {
+      path: btn.getAttribute('data-path') || '',
+      name: btn.getAttribute('data-name') || 'item'
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -395,6 +660,14 @@
     });
   });
 
+  // Bulk move
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#bulk-move-btn')) return;
+    var paths = getSelectedPaths();
+    if (paths.length === 0) return;
+    openMoveModal('bulk', { paths: paths });
+  });
+
   // Intercept file download links for large files and switch to chunked download.
   document.addEventListener('click', function (e) {
     var link = e.target.closest('a[href^="/files/download?path="]');
@@ -487,6 +760,183 @@
     pendingDeleteName = '';
   });
 
+  // Move submit (single form submit or bulk XHR)
+  document.addEventListener('submit', function (e) {
+    if (e.target.id !== 'move-form') return;
+
+    var form = e.target;
+    var modal = document.getElementById('move-modal');
+    var mode = modal ? modal.getAttribute('data-mode') : 'single';
+    var targetInput = form.querySelector('input[name="target_dir"]');
+    var targetDir = normalizeDirPath(targetInput ? targetInput.value : moveCurrentDir);
+
+    if (mode === 'bulk') {
+      e.preventDefault();
+      var paths = pendingBulkMovePaths || [];
+      if (paths.length === 0) {
+        closeAllModals();
+        return;
+      }
+
+      closeAllModals();
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/files/bulk-move', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
+      xhr.addEventListener('load', function () { refreshCurrentFileList(); });
+      xhr.addEventListener('error', function () { refreshCurrentFileList(); });
+      xhr.send(JSON.stringify({ paths: paths, target_dir: targetDir }));
+
+      pendingBulkMovePaths = null;
+      pendingMovePath = '';
+      return;
+    }
+
+    var oldPathInput = form.querySelector('input[name="old_path"]');
+    if (oldPathInput && !oldPathInput.value && pendingMovePath) {
+      oldPathInput.value = pendingMovePath;
+    }
+
+    var returnPathInput = form.querySelector('input[name="return_path"]');
+    if (returnPathInput) {
+      returnPathInput.value = getCurrentViewerPath();
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Drag & drop move in file viewer
+  // -----------------------------------------------------------------------
+  var dragMoveState = null;
+  var dragOverFolderRow = null;
+
+  function clearDragOverFolder() {
+    if (!dragOverFolderRow) return;
+    dragOverFolderRow.classList.remove('bg-blue-100/60', 'dark:bg-blue-900/30');
+    dragOverFolderRow = null;
+  }
+
+  function setDragOverFolder(row) {
+    if (dragOverFolderRow === row) return;
+    clearDragOverFolder();
+    dragOverFolderRow = row;
+    dragOverFolderRow.classList.add('bg-blue-100/60', 'dark:bg-blue-900/30');
+  }
+
+  function executeBulkMove(paths, targetDir) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/files/bulk-move', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
+
+      xhr.addEventListener('load', function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          reject(new Error('Move failed'));
+        }
+      });
+      xhr.addEventListener('error', function () { reject(new Error('Network error')); });
+      xhr.send(JSON.stringify({ paths: paths, target_dir: normalizeDirPath(targetDir) }));
+    });
+  }
+
+  function canDropIntoTarget(paths, targetDir) {
+    var normalizedTarget = normalizeDirPath(targetDir);
+    for (var i = 0; i < paths.length; i++) {
+      var source = normalizeDirPath(paths[i]);
+      if (!source) return false;
+      if (normalizedTarget === source) return false;
+      if (normalizedTarget.startsWith(source + '/')) return false;
+    }
+    return true;
+  }
+
+  document.addEventListener('dragstart', function (e) {
+    var row = e.target.closest('tr[data-path]');
+    if (!row) return;
+
+    if (e.target.closest('a,button,input,label')) {
+      e.preventDefault();
+      return;
+    }
+
+    var rowPath = row.getAttribute('data-path') || '';
+    var selectedPaths = getSelectedPaths();
+    var paths = (selectedPaths.length > 1 && selectedPaths.indexOf(rowPath) >= 0)
+      ? selectedPaths.slice()
+      : [rowPath];
+
+    dragMoveState = { paths: paths };
+    row.classList.add('opacity-60');
+
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', rowPath);
+      e.dataTransfer.setData('text/x-irondrive-move', JSON.stringify(paths));
+    }
+  });
+
+  document.addEventListener('dragend', function () {
+    clearDragOverFolder();
+    document.querySelectorAll('tr[data-path].opacity-60').forEach(function (row) {
+      row.classList.remove('opacity-60');
+    });
+    dragMoveState = null;
+  });
+
+  document.addEventListener('dragover', function (e) {
+    if (!dragMoveState || !dragMoveState.paths || dragMoveState.paths.length === 0) return;
+    var folderRow = e.target.closest('tr[data-path][data-is-dir="true"]');
+    if (!folderRow) return;
+
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    setDragOverFolder(folderRow);
+  });
+
+  document.addEventListener('dragleave', function (e) {
+    if (!dragOverFolderRow) return;
+    if (e.target === dragOverFolderRow || dragOverFolderRow.contains(e.target)) {
+      var related = e.relatedTarget;
+      if (!related || !dragOverFolderRow.contains(related)) {
+        clearDragOverFolder();
+      }
+    }
+  });
+
+  document.addEventListener('drop', function (e) {
+    if (!dragMoveState || !dragMoveState.paths || dragMoveState.paths.length === 0) return;
+    var folderRow = e.target.closest('tr[data-path][data-is-dir="true"]');
+    if (!folderRow) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    var targetDir = folderRow.getAttribute('data-path') || '';
+    var paths = dragMoveState.paths.slice();
+
+    clearDragOverFolder();
+
+    if (!canDropIntoTarget(paths, targetDir)) {
+      dragMoveState = null;
+      document.querySelectorAll('tr[data-path].opacity-60').forEach(function (row) {
+        row.classList.remove('opacity-60');
+      });
+      return;
+    }
+
+    executeBulkMove(paths, targetDir)
+      .then(function () { refreshCurrentFileList(); })
+      .catch(function () { refreshCurrentFileList(); })
+      .finally(function () {
+        dragMoveState = null;
+        document.querySelectorAll('tr[data-path].opacity-60').forEach(function (row) {
+          row.classList.remove('opacity-60');
+        });
+      });
+  });
+
   // -----------------------------------------------------------------------
   // Prevent double form submission
   // -----------------------------------------------------------------------
@@ -574,6 +1024,9 @@
       if (!row.getAttribute('tabindex')) {
         row.setAttribute('tabindex', '0');
         row.setAttribute('role', 'row');
+      }
+      if (row.hasAttribute('data-path')) {
+        row.setAttribute('draggable', 'true');
       }
     });
   }

@@ -58,6 +58,14 @@ pub struct RenameForm {
 }
 
 #[derive(FromForm)]
+pub struct MoveForm {
+    pub old_path: String,
+    pub target_dir: String,
+    pub return_path: Option<String>,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
 pub struct DeleteForm {
     pub path: String,
     pub csrf_token: String,
@@ -66,6 +74,12 @@ pub struct DeleteForm {
 #[derive(serde::Deserialize)]
 pub struct BulkDeleteRequest {
     pub paths: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BulkMoveRequest {
+    pub paths: Vec<String>,
+    pub target_dir: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -505,6 +519,58 @@ pub async fn files_partial(
     ))
 }
 
+/// GET /files/folders?<path> — session-auth folder listing for move modal
+#[get("/files/folders?<path>")]
+pub async fn files_folders(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: Option<String>,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    let user_path = path.as_deref().unwrap_or("");
+
+    let entries = fs_service::list_directory(
+        config.inner(),
+        unlock_state.inner(),
+        &lib.id,
+        user_path,
+        false,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let folders: Vec<serde_json::Value> = entries
+        .into_iter()
+        .filter(|e| e.is_dir)
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+            })
+        })
+        .collect();
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "path": user_path,
+        "entries": folders,
+    })))
+}
+
 // ---------------------------------------------------------------------------
 // File operations (form-based for HTMX)
 // ---------------------------------------------------------------------------
@@ -627,6 +693,69 @@ pub async fn rename_submit(
     }
 }
 
+/// POST /files/move
+#[post("/files/move", data = "<form>")]
+pub async fn move_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    form: Form<MoveForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Invalid request. Please try again.",
+        )
+    })?;
+
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            Flash::error(
+                Redirect::to(uri!(files_page(path = Option::<String>::None))),
+                "Library not found.",
+            )
+        })?;
+
+    let name = file_name_from_path(&form.old_path);
+    if name.is_empty() {
+        return Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Invalid source path.",
+        ));
+    }
+
+    let target_dir = normalize_dir_path(&form.target_dir);
+    let new_path = join_dir_and_name(&target_dir, &name);
+
+    let return_dir = normalize_dir_path(form.return_path.as_deref().unwrap_or(""));
+    let redirect_path = if return_dir.is_empty() {
+        None
+    } else {
+        Some(return_dir)
+    };
+
+    match fs_service::rename_entry(config.inner(), &lib.id, &form.old_path, &new_path).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(uri!(files_page(path = redirect_path))),
+            "Moved successfully.",
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            msg,
+        )),
+        Err(AppError::Conflict(msg)) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            msg,
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Move failed.",
+        )),
+    }
+}
+
 /// POST /files/delete
 #[post("/files/delete", data = "<form>")]
 pub async fn delete_submit(
@@ -714,6 +843,54 @@ pub async fn bulk_delete(
 
     rocket::serde::json::Json(serde_json::json!({
         "deleted": deleted,
+        "errors": errors,
+    }))
+}
+
+/// POST /files/bulk-move — XHR JSON endpoint for multi-file/folder move
+#[post("/files/bulk-move", data = "<data>")]
+pub async fn bulk_move(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    data: rocket::serde::json::Json<BulkMoveRequest>,
+) -> rocket::serde::json::Json<serde_json::Value> {
+    let lib = match require_library(pool.inner(), &user.0.id).await {
+        Ok(l) => l,
+        Err(_) => {
+            return rocket::serde::json::Json(
+                serde_json::json!({"moved": 0, "errors": ["Library not found."]}),
+            )
+        }
+    };
+
+    if data.paths.is_empty() || data.paths.len() > 500 {
+        return rocket::serde::json::Json(
+            serde_json::json!({"moved": 0, "errors": ["Invalid number of paths (1–500)."]}),
+        );
+    }
+
+    let target_dir = normalize_dir_path(&data.target_dir);
+    let mut moved = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    for old_path in &data.paths {
+        let name = file_name_from_path(old_path);
+        if name.is_empty() {
+            errors.push(format!("{}: Invalid source path.", old_path));
+            continue;
+        }
+
+        let new_path = join_dir_and_name(&target_dir, &name);
+        match fs_service::rename_entry(config.inner(), &lib.id, old_path, &new_path).await {
+            Ok(_) => moved += 1,
+            Err(e) => errors.push(format!("{}: {}", old_path, e)),
+        }
+    }
+
+    rocket::serde::json::Json(serde_json::json!({
+        "moved": moved,
         "errors": errors,
     }))
 }
@@ -1294,6 +1471,22 @@ fn parent_path(path: &str) -> String {
     }
 }
 
+fn normalize_dir_path(path: &str) -> String {
+    path.trim().trim_matches('/').to_string()
+}
+
+fn file_name_from_path(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or("").to_string()
+}
+
+fn join_dir_and_name(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", dir, name)
+    }
+}
+
 fn format_timestamp(ts: &str) -> String {
     // ISO-8601 → "Mar 19, 2026 14:30"
     match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
@@ -1348,10 +1541,13 @@ pub fn routes() -> Vec<Route> {
         setup_submit,
         files_page,
         files_partial,
+        files_folders,
         mkdir_submit,
         rename_submit,
+        move_submit,
         delete_submit,
         bulk_delete,
+        bulk_move,
         upload_file,
         chunked_init_upload,
         chunked_receive_chunk,

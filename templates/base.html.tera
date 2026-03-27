@@ -13,7 +13,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/css/style.css?v=0.2.0">
   <script src="/static/vendor/htmx.min.js?v=2.0.4" defer></script>
-  <script src="/static/js/app.js?v=0.2.0" defer></script>
+  <script src="/static/js/app.js?v=0.2.7" defer></script>
 </head>
 <body class="h-full bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans antialiased" hx-boost="false">
   {% block nav %}

@@ -5,6 +5,7 @@
   // State
   var uploads = [];
   var nextId = 1;
+  var GHOST_MIN_VISIBLE_MS = 450;
 
   function getCsrfToken() {
     var match = document.cookie.match('(?:^|; )csrf_token=([^;]*)');
@@ -96,7 +97,7 @@
 
   function createUploadRow(id, filename, mode) {
     var modeBadge = mode === 'chunked'
-      ? '<span class="ml-2 inline-flex items-center rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">Chunked</span>'
+      ? '<span class="ml-1 text-xs text-gray-400 dark:text-gray-500">· multipart</span>'
       : '';
 
     var div = document.createElement('div');
@@ -104,7 +105,7 @@
     div.className = 'px-3 py-2 border-b border-gray-100 dark:border-gray-700 last:border-0';
     div.innerHTML =
       '<div class="flex items-center justify-between mb-1">' +
-        '<span class="flex min-w-0 items-center text-sm text-gray-700 dark:text-gray-300 truncate max-w-[220px]" title="' + escapeHtml(filename) + '"><span class="truncate">' + escapeHtml(filename) + '</span>' + modeBadge + '</span>' +
+        '<span class="flex min-w-0 items-center text-sm text-gray-700 dark:text-gray-300 truncate max-w-[300px]" title="' + escapeHtml(filename) + '"><span class="truncate">' + escapeHtml(filename) + '</span>' + modeBadge + '</span>' +
         '<span class="upload-status text-xs text-gray-400">0%</span>' +
       '</div>' +
       '<div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">' +
@@ -152,28 +153,77 @@
   // -----------------------------------------------------------------------
   // Placeholder (ghost) rows in file table
   // -----------------------------------------------------------------------
-  function addGhostRow(id, filename) {
+  function ensureGhostTbody() {
     var tbody = getTbody();
+    if (tbody) return tbody;
+
+    var root = document.getElementById('file-browser-content');
+    if (!root) return null;
+
+    var emptyState = root.querySelector('.card.text-center');
+    if (emptyState) emptyState.remove();
+
+    var shell = document.createElement('div');
+    shell.className = 'card overflow-hidden';
+    shell.innerHTML =
+      '<div class="overflow-x-auto">' +
+        '<table class="w-full text-sm" id="file-table">' +
+          '<thead>' +
+            '<tr class="border-b border-gray-200 dark:border-gray-700 text-left text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider bg-gray-50/50 dark:bg-gray-800/50">' +
+              '<th class="py-3 pl-3 pr-1 w-8"><input type="checkbox" id="select-all-checkbox" class="file-checkbox" aria-label="Select all files"></th>' +
+              '<th class="py-3 pl-2 pr-4 font-medium cursor-pointer select-none" data-sort="name">Name</th>' +
+              '<th class="py-3 px-4 font-medium cursor-pointer select-none hidden sm:table-cell" data-sort="size">Size</th>' +
+              '<th class="py-3 px-4 font-medium cursor-pointer select-none hidden md:table-cell" data-sort="modified">Modified</th>' +
+              '<th class="py-3 px-4 font-medium text-right">Actions</th>' +
+            '</tr>' +
+          '</thead>' +
+          '<tbody class="divide-y divide-gray-100 dark:divide-gray-800" id="file-tbody"></tbody>' +
+        '</table>' +
+      '</div>';
+
+    root.appendChild(shell);
+    return getTbody();
+  }
+
+  function addGhostRow(id, filename) {
+    var tbody = ensureGhostTbody();
     if (!tbody) return;
     var tr = document.createElement('tr');
     tr.id = 'ghost-' + id;
-    tr.className = 'opacity-50 animate-pulse';
+    tr.className = 'opacity-60 animate-pulse';
+    tr.setAttribute('data-added-at', String(Date.now()));
     tr.innerHTML =
-      '<td class="py-2 pl-2 pr-4">' +
+      '<td class="py-2.5 pl-3 pr-1 w-8">' +
+        '<span class="block w-4 h-4 rounded border-2 border-gray-200 dark:border-gray-700"></span>' +
+      '</td>' +
+      '<td class="py-2.5 pl-2 pr-4">' +
         '<div class="flex items-center gap-2.5">' +
           '<svg class="w-5 h-5 flex-shrink-0 text-gray-300 dark:text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>' +
           '<span class="text-gray-400 dark:text-gray-500 truncate">' + escapeHtml(filename) + '</span>' +
         '</div>' +
       '</td>' +
-      '<td class="py-2 px-4 hidden sm:table-cell"><span class="text-gray-300 dark:text-gray-600">Uploading…</span></td>' +
-      '<td class="py-2 px-4 hidden md:table-cell"></td>' +
-      '<td class="py-2 px-4"></td>';
+      '<td class="py-2.5 px-4 text-gray-300 dark:text-gray-600 whitespace-nowrap hidden sm:table-cell">Uploading…</td>' +
+      '<td class="py-2.5 px-4 hidden md:table-cell"></td>' +
+      '<td class="py-2.5 px-4"></td>';
     tbody.appendChild(tr);
   }
 
-  function removeGhostRow(id) {
+  function removeGhostRow(id, done) {
     var ghost = document.getElementById('ghost-' + id);
-    if (ghost) ghost.remove();
+    if (!ghost) {
+      if (typeof done === 'function') done();
+      return;
+    }
+
+    var addedAt = parseInt(ghost.getAttribute('data-added-at') || '0', 10);
+    var elapsed = Date.now() - addedAt;
+    var wait = Math.max(0, GHOST_MIN_VISIBLE_MS - elapsed);
+
+    setTimeout(function () {
+      var current = document.getElementById('ghost-' + id);
+      if (current) current.remove();
+      if (typeof done === 'function') done();
+    }, wait);
   }
 
   // -----------------------------------------------------------------------
@@ -353,12 +403,14 @@
       : uploadFileSingle(id, file, fullPath);
 
     promise.then(function () {
-      removeGhostRow(id);
-      markUploadComplete(id);
-      refreshFileList();
+      removeGhostRow(id, function () {
+        markUploadComplete(id);
+        refreshFileList();
+      });
     }).catch(function (err) {
-      removeGhostRow(id);
-      markUploadFailed(id, err && err.message ? err.message : 'Upload failed');
+      removeGhostRow(id, function () {
+        markUploadFailed(id, err && err.message ? err.message : 'Upload failed');
+      });
     }).finally(function () {
       uploads = uploads.filter(function (u) { return u.id !== id; });
     });
@@ -392,7 +444,17 @@
   // -----------------------------------------------------------------------
   var dragCounter = 0;
 
+  function isFileDragEvent(e) {
+    var dt = e.dataTransfer;
+    if (!dt || !dt.types) return false;
+    for (var i = 0; i < dt.types.length; i++) {
+      if (dt.types[i] === 'Files') return true;
+    }
+    return false;
+  }
+
   document.addEventListener('dragenter', function (e) {
+    if (!isFileDragEvent(e)) return;
     e.preventDefault();
     dragCounter++;
     var dz = getDropZone();
@@ -400,6 +462,7 @@
   });
 
   document.addEventListener('dragleave', function (e) {
+    if (!isFileDragEvent(e)) return;
     e.preventDefault();
     dragCounter--;
     if (dragCounter <= 0) {
@@ -410,10 +473,12 @@
   });
 
   document.addEventListener('dragover', function (e) {
+    if (!isFileDragEvent(e)) return;
     e.preventDefault();
   });
 
   document.addEventListener('drop', function (e) {
+    if (!isFileDragEvent(e)) return;
     e.preventDefault();
     dragCounter = 0;
     var dz = getDropZone();
