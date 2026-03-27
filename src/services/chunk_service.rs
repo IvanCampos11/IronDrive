@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use chrono::{Duration, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -14,6 +16,7 @@ use crate::services::unlock_state::UnlockState;
 
 const DOWNLOAD_TOKEN_VERSION: &str = "v1";
 const DOWNLOAD_TOKEN_TTL_MINUTES: i64 = 10;
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
 pub struct InitUploadParams {
@@ -99,7 +102,12 @@ fn expected_total_chunks(total_bytes: u64, chunk_size_bytes: u64) -> u32 {
     ((total_bytes + chunk_size_bytes - 1) / chunk_size_bytes) as u32
 }
 
-fn expected_chunk_len(total_bytes: u64, chunk_size_bytes: u64, total_chunks: u32, index: u32) -> u64 {
+fn expected_chunk_len(
+    total_bytes: u64,
+    chunk_size_bytes: u64,
+    total_chunks: u32,
+    index: u32,
+) -> u64 {
     if index + 1 < total_chunks {
         return chunk_size_bytes;
     }
@@ -112,7 +120,15 @@ fn normalize_hex(s: &str) -> String {
     s.trim().to_ascii_lowercase()
 }
 
-async fn load_upload_row(pool: &DbPool, upload_id: &str) -> Result<Option<ChunkedUploadRow>, AppError> {
+fn is_valid_sha256_hex(s: &str) -> bool {
+    let normalized = normalize_hex(s);
+    normalized.len() == 64 && normalized.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+async fn load_upload_row(
+    pool: &DbPool,
+    upload_id: &str,
+) -> Result<Option<ChunkedUploadRow>, AppError> {
     let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, Option<String>, String)>(
         "SELECT id, user_id, target_id, target_path, total_chunks, received_chunks, total_bytes, checksum, expires_at
          FROM chunked_uploads
@@ -165,12 +181,11 @@ fn is_expired(expires_at: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn sign_payload(secret_key: &str, payload_b64: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret_key.as_bytes());
-    hasher.update(b"|");
-    hasher.update(payload_b64.as_bytes());
-    hex::encode(hasher.finalize())
+fn sign_payload(secret_key: &str, payload_b64: &str) -> Result<String, AppError> {
+    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
+        .map_err(|e| AppError::Internal(format!("Failed to initialize HMAC signer: {e}")))?;
+    mac.update(payload_b64.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 fn build_download_token(
@@ -193,7 +208,7 @@ fn build_download_token(
     let payload_json = serde_json::to_vec(&payload)
         .map_err(|e| AppError::Internal(format!("Failed to serialize token payload: {e}")))?;
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json);
-    let sig = sign_payload(secret_key, &payload_b64);
+    let sig = sign_payload(secret_key, &payload_b64)?;
 
     Ok((
         format!("{payload_b64}.{sig}"),
@@ -210,10 +225,14 @@ fn verify_download_token(secret_key: &str, token: &str) -> Result<DownloadTokenP
         .next()
         .ok_or_else(|| AppError::Validation("Invalid download token.".into()))?;
 
-    let expected_sig = sign_payload(secret_key, payload_b64);
-    if expected_sig != normalize_hex(sig) {
-        return Err(AppError::Validation("Invalid download token signature.".into()));
-    }
+    let provided_sig = hex::decode(normalize_hex(sig))
+        .map_err(|_| AppError::Validation("Invalid download token signature.".into()))?;
+
+    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
+        .map_err(|e| AppError::Internal(format!("Failed to initialize HMAC verifier: {e}")))?;
+    mac.update(payload_b64.as_bytes());
+    mac.verify_slice(&provided_sig)
+        .map_err(|_| AppError::Validation("Invalid download token signature.".into()))?;
 
     let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload_b64)
@@ -223,7 +242,9 @@ fn verify_download_token(secret_key: &str, token: &str) -> Result<DownloadTokenP
         .map_err(|_| AppError::Validation("Invalid download token payload.".into()))?;
 
     if payload.v != DOWNLOAD_TOKEN_VERSION {
-        return Err(AppError::Validation("Unsupported download token version.".into()));
+        return Err(AppError::Validation(
+            "Unsupported download token version.".into(),
+        ));
     }
 
     if Utc::now().timestamp() >= payload.exp {
@@ -247,7 +268,9 @@ pub async fn init_upload(
     params: InitUploadParams,
 ) -> Result<InitUploadResult, AppError> {
     if params.target_path.trim().is_empty() {
-        return Err(AppError::Validation("Target path must not be empty.".into()));
+        return Err(AppError::Validation(
+            "Target path must not be empty.".into(),
+        ));
     }
     if params.target_path.ends_with('/') {
         return Err(AppError::Validation(
@@ -264,6 +287,19 @@ pub async fn init_upload(
             "File is small enough for single-request upload; use /api/v1/library/upload instead."
                 .into(),
         ));
+    }
+    if params.total_bytes > config.max_upload_bytes {
+        return Err(AppError::Validation(format!(
+            "File exceeds maximum allowed upload size of {} bytes.",
+            config.max_upload_bytes
+        )));
+    }
+    if let Some(ref checksum) = params.checksum_sha256 {
+        if !is_valid_sha256_hex(checksum) {
+            return Err(AppError::Validation(
+                "checksum_sha256 must be a 64-character SHA-256 hex string.".into(),
+            ));
+        }
     }
 
     let expected_chunks = expected_total_chunks(params.total_bytes, config.chunk_size_bytes);
@@ -354,13 +390,29 @@ pub async fn receive_chunk(
         .map_err(|e| AppError::Internal(format!("Failed to ensure staging directory: {e}")))?;
 
     let path = chunk_path(config, upload_id, chunk_index);
-    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        return Err(AppError::Conflict("Chunk already uploaded.".into()));
-    }
+    let mut file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(AppError::Conflict("Chunk already uploaded.".into()))
+        }
+        Err(e) => {
+            return Err(AppError::Internal(format!(
+                "Failed to create chunk file: {e}"
+            )))
+        }
+    };
 
-    tokio::fs::write(&path, data)
+    file.write_all(data)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write chunk: {e}")))?;
+    file.flush()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to flush chunk: {e}")))?;
 
     let received_chunks = count_uploaded_chunks(config, upload_id).await?;
     sqlx::query("UPDATE chunked_uploads SET received_chunks = ? WHERE id = ?")
@@ -418,7 +470,8 @@ pub async fn complete_upload(
     }
 
     if let Some(expected_checksum) = &row.checksum {
-        let actual_checksum = hex::encode(crate::services::crypto_service::sha256_bytes(&assembled));
+        let actual_checksum =
+            hex::encode(crate::services::crypto_service::sha256_bytes(&assembled));
         if normalize_hex(expected_checksum) != normalize_hex(&actual_checksum) {
             return Err(AppError::Validation(
                 "Assembled file checksum mismatch; upload rejected.".into(),

@@ -6,6 +6,7 @@
   id="file-browser-content"
   class="animate-fade-in"
   data-chunk-size-bytes="{{ chunk_size_bytes }}"
+  data-max-parallel-chunks="{{ max_parallel_chunks }}"
 >
   {% include "partials/file_list" %}
 </div>

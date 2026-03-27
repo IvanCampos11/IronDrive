@@ -13,8 +13,8 @@
 
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
-use rocket_dyn_templates::Template;
 use rocket::serde::json::serde_json;
+use rocket_dyn_templates::Template;
 use serde_json::Value;
 
 use crate::config::AppConfig;

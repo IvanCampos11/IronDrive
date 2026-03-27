@@ -33,6 +33,15 @@
     return parsed;
   }
 
+  function getMaxParallelChunks() {
+    var root = document.getElementById('file-browser-content');
+    if (!root) return 4;
+    var raw = root.getAttribute('data-max-parallel-chunks');
+    var parsed = parseInt(raw || '', 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 4;
+    return Math.min(parsed, 16);
+  }
+
   function parseErrorMessage(payload, fallback) {
     if (!payload) return fallback;
     if (typeof payload === 'string') return payload;
@@ -209,7 +218,7 @@
     });
   }
 
-  function uploadChunkXhr(uploadId, chunkIndex, chunkBlob, loadedSoFar, totalSize, onProgress) {
+  function uploadChunkXhr(uploadId, chunkIndex, chunkBlob, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       xhr.open('PUT', '/files/chunked/upload/' + encodeURIComponent(uploadId) + '/' + chunkIndex, true);
@@ -217,9 +226,7 @@
 
       xhr.upload.addEventListener('progress', function (e) {
         if (!e.lengthComputable) return;
-        var uploaded = loadedSoFar + e.loaded;
-        var pct = Math.min(99, Math.round((uploaded / totalSize) * 100));
-        onProgress(pct);
+        onProgress(e.loaded);
       });
 
       xhr.addEventListener('load', function () {
@@ -246,6 +253,7 @@
   function uploadFileChunked(id, file, fullPath) {
     var chunkSize = getChunkSizeBytes();
     var totalChunks = Math.ceil(file.size / chunkSize);
+    var maxParallel = Math.min(getMaxParallelChunks(), totalChunks);
     var uploadId = '';
 
     return jsonRequest('POST', '/files/chunked/init', {
@@ -255,27 +263,54 @@
     }).then(function (initPayload) {
       uploadId = initPayload.upload_id;
 
-      var loaded = 0;
-      var chain = Promise.resolve();
-      for (var idx = 0; idx < totalChunks; idx++) {
-        (function (chunkIndex) {
-          chain = chain.then(function () {
-            var start = chunkIndex * chunkSize;
-            var end = Math.min(start + chunkSize, file.size);
-            var chunk = file.slice(start, end);
+      var committedBytes = 0;
+      var inflightBytes = Object.create(null);
+      var nextChunkIndex = 0;
 
-            return uploadChunkXhr(uploadId, chunkIndex, chunk, loaded, file.size, function (pct) {
-              updateUploadRow(id, pct);
-            }).then(function () {
-              loaded += chunk.size;
-              var pct = Math.min(99, Math.round((loaded / file.size) * 100));
-              updateUploadRow(id, pct);
-            });
-          });
-        })(idx);
+      function reportProgress() {
+        var pending = 0;
+        Object.keys(inflightBytes).forEach(function (key) {
+          pending += inflightBytes[key] || 0;
+        });
+        var uploaded = Math.min(file.size, committedBytes + pending);
+        var pct = Math.min(99, Math.round((uploaded / file.size) * 100));
+        updateUploadRow(id, pct);
       }
 
-      return chain;
+      function uploadOneChunk(chunkIndex) {
+        var start = chunkIndex * chunkSize;
+        var end = Math.min(start + chunkSize, file.size);
+        var chunk = file.slice(start, end);
+        var key = String(chunkIndex);
+        inflightBytes[key] = 0;
+
+        return uploadChunkXhr(uploadId, chunkIndex, chunk, function (loaded) {
+          inflightBytes[key] = loaded;
+          reportProgress();
+        }).then(function () {
+          committedBytes += chunk.size;
+          delete inflightBytes[key];
+          reportProgress();
+        }).catch(function (err) {
+          delete inflightBytes[key];
+          throw err;
+        });
+      }
+
+      function worker() {
+        if (nextChunkIndex >= totalChunks) {
+          return Promise.resolve();
+        }
+        var chunkIndex = nextChunkIndex;
+        nextChunkIndex += 1;
+        return uploadOneChunk(chunkIndex).then(worker);
+      }
+
+      var workers = [];
+      for (var i = 0; i < maxParallel; i++) {
+        workers.push(worker());
+      }
+      return Promise.all(workers);
     }).then(function () {
       markUploadProcessing(id);
       return jsonRequest('POST', '/files/chunked/complete', {

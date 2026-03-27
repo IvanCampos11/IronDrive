@@ -540,11 +540,7 @@ pub async fn chunked_receive_chunk(
 /// POST /api/v1/library/chunked/complete
 ///
 /// Assemble all uploaded chunks and persist the final encrypted file.
-#[post(
-    "/api/v1/library/chunked/complete",
-    format = "json",
-    data = "<body>"
-)]
+#[post("/api/v1/library/chunked/complete", format = "json", data = "<body>")]
 pub async fn chunked_complete_upload(
     pool: &State<DbPool>,
     config: &State<AppConfig>,

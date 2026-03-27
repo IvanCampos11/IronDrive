@@ -93,7 +93,7 @@ async fn rocket() -> _ {
 /// Build the Rocket Figment, merging `Rocket.toml` defaults with our
 /// `IRONDRIVE_SECRET_KEY` so Rocket has a `secret_key` in release mode.
 fn rocket_figment(app_config: &config::AppConfig) -> rocket::figment::Figment {
-    use rocket::figment::providers::{Serialized, Format, Toml, Env};
+    use rocket::figment::providers::{Env, Format, Serialized, Toml};
     rocket::figment::Figment::from(rocket::Config::default())
         .merge(Toml::file("Rocket.toml").nested())
         .merge(Env::prefixed("ROCKET_").global())
@@ -107,8 +107,14 @@ pub fn security_headers_fairing() -> AdHoc {
             use rocket::http::Header;
             res.set_header(Header::new("X-Content-Type-Options", "nosniff"));
             res.set_header(Header::new("X-Frame-Options", "DENY"));
-            res.set_header(Header::new("Referrer-Policy", "strict-origin-when-cross-origin"));
-            res.set_header(Header::new("Permissions-Policy", "camera=(), microphone=(), geolocation=()"));
+            res.set_header(Header::new(
+                "Referrer-Policy",
+                "strict-origin-when-cross-origin",
+            ));
+            res.set_header(Header::new(
+                "Permissions-Policy",
+                "camera=(), microphone=(), geolocation=()",
+            ));
             res.set_header(Header::new(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
@@ -193,9 +199,7 @@ impl<'r> Responder<'r, 'static> for CatcherJsonBody {
                 _ => "errors/500",
             };
             if let Ok(template) = Template::render(template_name, context! {}).respond_to(request) {
-                return Response::build_from(template)
-                    .status(self.status)
-                    .ok();
+                return Response::build_from(template).status(self.status).ok();
             }
         }
 

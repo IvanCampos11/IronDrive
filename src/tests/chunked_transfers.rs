@@ -189,7 +189,10 @@ async fn chunked_upload_download_roundtrip() {
         let chunk = &payload[start..end];
 
         let put_resp = client
-            .put(format!("/api/v1/library/chunked/upload/{}/{}", upload_id, index))
+            .put(format!(
+                "/api/v1/library/chunked/upload/{}/{}",
+                upload_id, index
+            ))
             .header(auth_header(&token))
             .body(chunk.to_vec())
             .dispatch()
@@ -275,7 +278,10 @@ async fn chunked_upload_accepts_out_of_order_chunks() {
         let end = std::cmp::min(start + chunk_size, payload.len());
 
         let resp = client
-            .put(format!("/api/v1/library/chunked/upload/{}/{}", upload_id, index))
+            .put(format!(
+                "/api/v1/library/chunked/upload/{}/{}",
+                upload_id, index
+            ))
             .header(auth_header(&token))
             .body(payload[start..end].to_vec())
             .dispatch()
@@ -340,17 +346,16 @@ async fn incomplete_upload_cancel_cleans_staging() {
     assert_eq!(put_resp.status(), Status::Ok);
 
     let cancel_resp = client
-        .delete(format!("/api/v1/library/chunked/cancel?upload_id={}", upload_id))
+        .delete(format!(
+            "/api/v1/library/chunked/cancel?upload_id={}",
+            upload_id
+        ))
         .header(auth_header(&token))
         .dispatch()
         .await;
     assert_eq!(cancel_resp.status(), Status::Ok);
 
-    let staging_dir = tmp
-        .path()
-        .join("data")
-        .join(".chunks")
-        .join(&upload_id);
+    let staging_dir = tmp.path().join("data").join(".chunks").join(&upload_id);
     let exists = tokio::fs::try_exists(staging_dir).await.unwrap();
     assert!(!exists);
 
@@ -383,7 +388,7 @@ async fn checksum_mismatch_on_complete_is_rejected() {
                 "path": "docs/bad_checksum.bin",
                 "total_chunks": total_chunks,
                 "total_bytes": payload.len(),
-                "checksum_sha256": "deadbeef",
+                "checksum_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
             })
             .to_string(),
         )
@@ -398,7 +403,10 @@ async fn checksum_mismatch_on_complete_is_rejected() {
         let start = index as usize * chunk_size;
         let end = std::cmp::min(start + chunk_size, payload.len());
         let resp = client
-            .put(format!("/api/v1/library/chunked/upload/{}/{}", upload_id, index))
+            .put(format!(
+                "/api/v1/library/chunked/upload/{}/{}",
+                upload_id, index
+            ))
             .header(auth_header(&token))
             .body(payload[start..end].to_vec())
             .dispatch()
@@ -434,6 +442,110 @@ async fn small_file_falls_back_to_single_request_upload() {
                 "path": "docs/small.bin",
                 "total_chunks": 1,
                 "total_bytes": total_bytes,
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+
+    assert_eq!(init_resp.status(), Status::BadRequest);
+}
+
+#[tokio::test]
+async fn duplicate_chunk_upload_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = test_client(&tmp).await;
+    let token = create_ready_user(&client, "frank", "frank@example.com", "test-password-6").await;
+
+    let chunk_size = 64 * 1024usize;
+    let payload = vec![0x33u8; chunk_size * 2 + 77];
+    let total_chunks = chunks_for(payload.len(), chunk_size);
+
+    let init_resp = client
+        .post("/api/v1/library/chunked/init")
+        .header(auth_header(&token))
+        .header(ContentType::JSON)
+        .body(
+            serde_json::json!({
+                "path": "docs/duplicate.bin",
+                "total_chunks": total_chunks,
+                "total_bytes": payload.len(),
+                "checksum_sha256": checksum_hex(&payload),
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(init_resp.status(), Status::Ok);
+
+    let init_json: Value = serde_json::from_str(&init_resp.into_string().await.unwrap()).unwrap();
+    let upload_id = init_json["upload_id"].as_str().unwrap().to_string();
+
+    let first = client
+        .put(format!("/api/v1/library/chunked/upload/{}/0", upload_id))
+        .header(auth_header(&token))
+        .body(payload[..chunk_size].to_vec())
+        .dispatch()
+        .await;
+    assert_eq!(first.status(), Status::Ok);
+
+    let duplicate = client
+        .put(format!("/api/v1/library/chunked/upload/{}/0", upload_id))
+        .header(auth_header(&token))
+        .body(payload[..chunk_size].to_vec())
+        .dispatch()
+        .await;
+    assert_eq!(duplicate.status(), Status::Conflict);
+}
+
+#[tokio::test]
+async fn chunked_init_rejects_oversized_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = test_client(&tmp).await;
+    let token = create_ready_user(&client, "gina", "gina@example.com", "test-password-7").await;
+
+    let chunk_size = 64 * 1024usize;
+    let total_bytes = 10 * 1024 * 1024usize + 1;
+    let total_chunks = chunks_for(total_bytes, chunk_size);
+
+    let init_resp = client
+        .post("/api/v1/library/chunked/init")
+        .header(auth_header(&token))
+        .header(ContentType::JSON)
+        .body(
+            serde_json::json!({
+                "path": "docs/too_large.bin",
+                "total_chunks": total_chunks,
+                "total_bytes": total_bytes,
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+
+    assert_eq!(init_resp.status(), Status::BadRequest);
+}
+
+#[tokio::test]
+async fn chunked_init_rejects_invalid_checksum_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = test_client(&tmp).await;
+    let token = create_ready_user(&client, "hank", "hank@example.com", "test-password-8").await;
+
+    let chunk_size = 64 * 1024usize;
+    let total_bytes = chunk_size + 17;
+    let total_chunks = chunks_for(total_bytes, chunk_size);
+
+    let init_resp = client
+        .post("/api/v1/library/chunked/init")
+        .header(auth_header(&token))
+        .header(ContentType::JSON)
+        .body(
+            serde_json::json!({
+                "path": "docs/invalid-checksum.bin",
+                "total_chunks": total_chunks,
+                "total_bytes": total_bytes,
+                "checksum_sha256": "deadbeef",
             })
             .to_string(),
         )
