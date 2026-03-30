@@ -17,7 +17,11 @@
   function getPanelList() { return document.getElementById('upload-panel-list'); }
   function getTbody() { return document.getElementById('file-tbody'); }
   function getFileInput() { return document.getElementById('file-upload-input'); }
+  function getFolderInput() { return document.getElementById('folder-upload-input'); }
   function getDropZone() { return document.getElementById('drop-zone'); }
+  function getUploadMenu() { return document.getElementById('upload-menu'); }
+  function getUploadMenuToggle() { return document.getElementById('upload-menu-toggle'); }
+  function getUploadMenuItems() { return document.getElementById('upload-menu-items'); }
 
   // Current directory path from the URL (HTMX keeps it updated via hx-push-url)
   function getCurrentPath() {
@@ -87,6 +91,26 @@
   function hidePanel() {
     var panel = getPanel();
     if (panel) panel.classList.add('hidden');
+  }
+
+  function closeUploadMenu() {
+    var menuItems = getUploadMenuItems();
+    var toggle = getUploadMenuToggle();
+    if (menuItems) menuItems.classList.add('hidden');
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  }
+
+  function toggleUploadMenu() {
+    var menuItems = getUploadMenuItems();
+    var toggle = getUploadMenuToggle();
+    if (!menuItems || !toggle) return;
+    var willOpen = menuItems.classList.contains('hidden');
+    if (willOpen) {
+      menuItems.classList.remove('hidden');
+      toggle.setAttribute('aria-expanded', 'true');
+      return;
+    }
+    closeUploadMenu();
   }
 
   function toggleMinimise() {
@@ -384,9 +408,21 @@
   }
 
   function uploadFile(file) {
+    return uploadFileWithRelativePath(file, file.name);
+  }
+
+  function normaliseRelativePath(path) {
+    var normalised = (path || '').replace(/\\/g, '/');
+    normalised = normalised.replace(/^\/+/, '');
+    normalised = normalised.replace(/^(\.\/)+/, '');
+    return normalised || 'file';
+  }
+
+  function uploadFileWithRelativePath(file, relativePath) {
     var id = nextId++;
     var currentPath = getCurrentPath();
-    var fullPath = currentPath ? (currentPath + '/' + file.name) : file.name;
+    var safeRelativePath = normaliseRelativePath(relativePath || file.name);
+    var fullPath = currentPath ? (currentPath + '/' + safeRelativePath) : safeRelativePath;
     var chunkSize = getChunkSizeBytes();
     var shouldUseChunked = file.size > chunkSize;
 
@@ -394,9 +430,9 @@
     showPanel();
     var panelList = getPanelList();
     if (panelList) {
-      panelList.appendChild(createUploadRow(id, file.name, shouldUseChunked ? 'chunked' : 'single'));
+      panelList.appendChild(createUploadRow(id, safeRelativePath, shouldUseChunked ? 'chunked' : 'single'));
     }
-    addGhostRow(id, file.name);
+    addGhostRow(id, safeRelativePath);
 
     var promise = shouldUseChunked
       ? uploadFileChunked(id, file, fullPath)
@@ -429,14 +465,29 @@
   // -----------------------------------------------------------------------
   // File input change handler
   // -----------------------------------------------------------------------
-  document.addEventListener('change', function (e) {
-    if (e.target.id !== 'file-upload-input') return;
-    var files = e.target.files;
+  function handleInputFiles(inputEl) {
+    if (!inputEl) return;
+    var files = inputEl.files;
     if (!files || files.length === 0) return;
+
     for (var i = 0; i < files.length; i++) {
-      uploadFile(files[i]);
+      var file = files[i];
+      var relativePath = file.webkitRelativePath || file.name;
+      uploadFileWithRelativePath(file, relativePath);
     }
-    e.target.value = '';
+    inputEl.value = '';
+  }
+
+  document.addEventListener('change', function (e) {
+    if (e.target.id === 'file-upload-input') {
+      closeUploadMenu();
+      handleInputFiles(getFileInput());
+      return;
+    }
+    if (e.target.id === 'folder-upload-input') {
+      closeUploadMenu();
+      handleInputFiles(getFolderInput());
+    }
   });
 
   // -----------------------------------------------------------------------
@@ -499,6 +550,15 @@
   // Panel controls
   // -----------------------------------------------------------------------
   document.addEventListener('click', function (e) {
+    if (e.target.closest('#upload-menu-toggle')) {
+      toggleUploadMenu();
+      return;
+    }
+
+    if (!e.target.closest('#upload-menu')) {
+      closeUploadMenu();
+    }
+
     if (e.target.closest('#upload-panel-toggle')) {
       toggleMinimise();
     }
@@ -507,6 +567,12 @@
       if (panelList) panelList.innerHTML = '';
       // Hide panel if no active uploads
       if (uploads.length === 0) hidePanel();
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      closeUploadMenu();
     }
   });
 

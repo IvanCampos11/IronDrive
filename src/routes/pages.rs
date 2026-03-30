@@ -1001,6 +1001,16 @@ pub async fn chunked_init_upload(
     )
     .await
     .map_err(|e| {
+        tracing::warn!(
+            user = %user.0.id,
+            path = %body.path,
+            total_bytes = body.total_bytes,
+            total_chunks = body.total_chunks,
+            chunk_size_bytes = config.chunk_size_bytes,
+            max_upload_bytes = config.max_upload_bytes,
+            error = %e,
+            "chunked init rejected"
+        );
         (
             e.status(),
             rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),

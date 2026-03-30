@@ -60,7 +60,9 @@ async fn init_database(db_url: &str) -> SqlitePool {
 
 #[rocket::launch]
 async fn rocket() -> _ {
-    let _ = dotenvy::dotenv();
+    // dotenv_override so .env always wins over stale shell env vars.
+    // Log the outcome so misconfigured working directories are immediately visible.
+    let dotenv_result = dotenvy::dotenv_override();
 
     fmt()
         .with_env_filter(
@@ -68,10 +70,17 @@ async fn rocket() -> _ {
         )
         .init();
 
+    match dotenv_result {
+        Ok(path) => tracing::info!(path = %path.display(), "Loaded .env file"),
+        Err(e) => tracing::warn!("No .env file loaded ({e}); using environment variables / defaults"),
+    }
+
     let app_config = config::AppConfig::from_env();
     tracing::info!(
         data_dir = %app_config.data_dir,
         db_dir = %app_config.db_dir,
+        max_upload_bytes = app_config.max_upload_bytes,
+        default_quota_bytes = app_config.default_quota_bytes,
         "IronDrive starting up"
     );
 

@@ -98,5 +98,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/upload.js?v=0.2.6" defer></script>
+<script src="/static/js/upload.js?v=0.2.7" defer></script>
 {% endblock %}

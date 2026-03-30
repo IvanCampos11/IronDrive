@@ -13,6 +13,7 @@ use crate::errors::AppError;
 use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
 use crate::services::chunk_service;
+use crate::utils::format_bytes;
 use crate::services::fs_service::{self, FsEntry};
 use crate::services::unlock_state::UnlockState;
 
@@ -302,8 +303,8 @@ pub async fn upload(
 
     if !stream.is_complete() {
         return Err(AppError::Validation(format!(
-            "Upload exceeds the maximum allowed size of {} bytes.",
-            allowed_bytes
+            "Upload exceeds the maximum allowed size of {}.",
+            format_bytes(allowed_bytes.into())
         )));
     }
 

@@ -13,6 +13,7 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::services::fs_service::{self, DownloadResult, UploadResult};
 use crate::services::unlock_state::UnlockState;
+use crate::utils::format_bytes;
 
 const DOWNLOAD_TOKEN_VERSION: &str = "v1";
 const DOWNLOAD_TOKEN_TTL_MINUTES: i64 = 10;
@@ -290,8 +291,8 @@ pub async fn init_upload(
     }
     if params.total_bytes > config.max_upload_bytes {
         return Err(AppError::Validation(format!(
-            "File exceeds maximum allowed upload size of {} bytes.",
-            config.max_upload_bytes
+            "File exceeds maximum allowed upload size of {}.",
+            format_bytes(config.max_upload_bytes)
         )));
     }
     if let Some(ref checksum) = params.checksum_sha256 {
@@ -452,39 +453,40 @@ pub async fn complete_upload(
     let total_chunks = row.total_chunks as u32;
     let total_bytes = row.total_bytes as u64;
 
-    let mut assembled = Vec::with_capacity(total_bytes as usize);
-    for idx in 0..total_chunks {
-        let path = chunk_path(config, upload_id, idx);
-        let chunk = tokio::fs::read(&path)
-            .await
-            .map_err(|_| AppError::Validation(format!("Missing chunk {}.", idx)))?;
-        assembled.extend_from_slice(&chunk);
-    }
+    // Build ordered list of chunk paths — do NOT read them into memory.
+    let chunk_paths: Vec<PathBuf> = (0..total_chunks)
+        .map(|idx| chunk_path(config, upload_id, idx))
+        .collect();
 
-    if assembled.len() as u64 != total_bytes {
-        return Err(AppError::Validation(format!(
-            "Assembled size mismatch: expected {} bytes, got {} bytes.",
-            total_bytes,
-            assembled.len()
-        )));
-    }
-
-    if let Some(expected_checksum) = &row.checksum {
-        let actual_checksum =
-            hex::encode(crate::services::crypto_service::sha256_bytes(&assembled));
-        if normalize_hex(expected_checksum) != normalize_hex(&actual_checksum) {
-            return Err(AppError::Validation(
-                "Assembled file checksum mismatch; upload rejected.".into(),
-            ));
+    // Verify every chunk file is present before we start writing.
+    for (idx, path) in chunk_paths.iter().enumerate() {
+        if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+            return Err(AppError::Validation(format!("Missing chunk {}.", idx)));
         }
     }
 
-    let upload = fs_service::upload_file(
+    // Parse optional expected checksum from DB into a byte array.
+    let expected_checksum: Option<[u8; 32]> = if let Some(hex_str) = &row.checksum {
+        let bytes = hex::decode(normalize_hex(hex_str))
+            .map_err(|_| AppError::Validation("Invalid checksum format in upload record.".into()))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| AppError::Validation("Checksum must be 32 bytes (SHA-256).".into()))?;
+        Some(arr)
+    } else {
+        None
+    };
+
+    // Streaming encrypt: reads each chunk file, encrypts in-place segment by
+    // segment, and writes the V2 stream format. RAM stays bounded to one chunk.
+    let upload = fs_service::upload_file_streaming(
         config,
         unlock_state,
         library_id,
         &row.target_path,
-        &assembled,
+        &chunk_paths,
+        total_bytes,
+        expected_checksum,
         write_verify,
     )
     .await?;
