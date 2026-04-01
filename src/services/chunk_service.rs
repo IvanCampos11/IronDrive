@@ -479,20 +479,8 @@ pub async fn complete_upload(
         }
     }
 
-    // Parse optional expected checksum from DB into a byte array.
-    let expected_checksum: Option<[u8; 32]> = if let Some(hex_str) = &row.checksum {
-        let bytes = hex::decode(normalize_hex(hex_str))
-            .map_err(|_| AppError::Validation("Invalid checksum format in upload record.".into()))?;
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| AppError::Validation("Checksum must be 32 bytes (SHA-256).".into()))?;
-        Some(arr)
-    } else {
-        None
-    };
-
-    // Streaming encrypt: reads each chunk file, encrypts in-place segment by
-    // segment, and writes the V2 stream format. RAM stays bounded to one chunk.
+    // Streaming encrypt: reads each chunk file, encrypts segment-by-segment,
+    // and writes the STREAM format. RAM stays bounded to one chunk.
     let upload = fs_service::upload_file_streaming(
         config,
         unlock_state,
@@ -500,7 +488,6 @@ pub async fn complete_upload(
         &row.target_path,
         &chunk_paths,
         total_bytes,
-        expected_checksum,
         write_verify,
     )
     .await?;

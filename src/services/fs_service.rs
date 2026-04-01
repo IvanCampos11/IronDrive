@@ -272,10 +272,12 @@ pub async fn list_directory(
 
         let integrity = if check_integrity && !is_dir {
             if let Some(ref dk) = data_key {
-                let status = verify_file_integrity_async(dk, &entry_path).await;
+                let status = verify_file_integrity_async(Some(dk), &entry_path).await;
                 Some(format_integrity_status(&status))
             } else {
-                None
+                // No key available — key-free file hash check only.
+                let status = verify_file_integrity_async(None, &entry_path).await;
+                Some(format_integrity_status(&status))
             }
         } else {
             None
@@ -437,15 +439,9 @@ pub async fn upload_file_owned(
 
 /// Upload (encrypt and write) a file into a library directly from chunk staging files.
 ///
-/// This is the streaming path for large chunked uploads: chunk files are
-/// read, encrypted, and written segment-by-segment without assembling the
-/// full plaintext into memory. RAM usage is bounded to O(chunk_size).
-///
-/// `chunk_paths` are the ordered staging paths for each chunk.
-/// `total_plaintext_bytes` is the sum of all plaintext chunk sizes.
-/// `expected_checksum` is an optional pre-computed SHA-256 of the assembled
-/// plaintext (from the upload manifest); if provided it is verified before
-/// writing.
+/// Streaming path for large chunked uploads: chunk files are read, encrypted,
+/// and written segment-by-segment without assembling the full plaintext into
+/// memory. RAM usage is bounded to O(chunk_size).
 pub async fn upload_file_streaming(
     config: &AppConfig,
     unlock_state: &UnlockState,
@@ -453,7 +449,6 @@ pub async fn upload_file_streaming(
     user_path: &str,
     chunk_paths: &[std::path::PathBuf],
     total_plaintext_bytes: u64,
-    expected_checksum: Option<[u8; 32]>,
     write_verify: bool,
 ) -> Result<UploadResult, AppError> {
     if user_path.is_empty() {
@@ -471,11 +466,10 @@ pub async fn upload_file_streaming(
             .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
     }
 
-    let plaintext_checksum = stream_encrypt_chunks_to_file(
+    stream_encrypt_chunks_to_file(
         &data_key,
         chunk_paths,
         total_plaintext_bytes,
-        expected_checksum.as_ref(),
         &target,
         write_verify,
     )
@@ -494,7 +488,7 @@ pub async fn upload_file_streaming(
         path: user_path.to_string(),
         size: total_plaintext_bytes,
         disk_size: disk_meta.len(),
-        checksum_sha256: hex::encode(plaintext_checksum),
+        checksum_sha256: String::new(),
         mime_type: mime_from_filename(&filename),
     })
 }
@@ -715,7 +709,7 @@ pub async fn get_entry_info(
 
     let integrity = if check_integrity && !is_dir {
         let dk = require_data_key(unlock_state, library_id)?;
-        let status = verify_file_integrity_async(&dk, &target).await;
+        let status = verify_file_integrity_async(Some(&dk), &target).await;
         Some(format_integrity_status(&status))
     } else {
         None
