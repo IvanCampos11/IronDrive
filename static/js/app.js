@@ -82,12 +82,89 @@
     }, 5000);
   }
 
+  // -----------------------------------------------------------------------
+  // Download progress toast helpers
+  // -----------------------------------------------------------------------
+  function showDownloadToast(filename) {
+    var toast = document.getElementById('download-toast');
+    if (!toast) return;
+    toast.classList.remove('hidden');
+    var nameEl = document.getElementById('download-toast-filename');
+    var pctEl = document.getElementById('download-toast-percent');
+    var barEl = document.getElementById('download-toast-bar');
+    var statusEl = document.getElementById('download-toast-status');
+    var closeBtn = document.getElementById('download-toast-close');
+    if (nameEl) nameEl.textContent = filename || 'download';
+    if (pctEl) pctEl.textContent = '0%';
+    if (barEl) barEl.style.width = '0%';
+    if (statusEl) statusEl.textContent = 'Preparing...';
+    if (closeBtn) closeBtn.classList.add('hidden');
+    // Shift upload panel when both visible
+    var uploadPanel = document.getElementById('upload-panel');
+    if (uploadPanel && !uploadPanel.classList.contains('hidden')) {
+      uploadPanel.style.bottom = (toast.offsetHeight + 24) + 'px';
+    }
+  }
+
+  function updateDownloadToast(downloaded, total, filename) {
+    var pctEl = document.getElementById('download-toast-percent');
+    var barEl = document.getElementById('download-toast-bar');
+    var statusEl = document.getElementById('download-toast-status');
+    var pct = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+    if (pctEl) pctEl.textContent = pct + '%';
+    if (barEl) barEl.style.width = pct + '%';
+    if (statusEl) statusEl.textContent = 'Chunk ' + downloaded + ' of ' + total;
+  }
+
+  function finishDownloadToast(success, message) {
+    var barEl = document.getElementById('download-toast-bar');
+    var statusEl = document.getElementById('download-toast-status');
+    var pctEl = document.getElementById('download-toast-percent');
+    var closeBtn = document.getElementById('download-toast-close');
+    if (success) {
+      if (barEl) { barEl.style.width = '100%'; barEl.style.backgroundColor = '#22c55e'; }
+      if (statusEl) statusEl.textContent = message || 'Complete';
+      if (pctEl) pctEl.textContent = '100%';
+    } else {
+      if (barEl) barEl.style.backgroundColor = '#ef4444';
+      if (statusEl) { statusEl.textContent = message || 'Failed'; statusEl.style.color = '#ef4444'; }
+    }
+    if (closeBtn) closeBtn.classList.remove('hidden');
+    // Auto-hide on success after 3s
+    if (success) {
+      setTimeout(hideDownloadToast, 3000);
+    }
+  }
+
+  function hideDownloadToast() {
+    var toast = document.getElementById('download-toast');
+    if (toast) toast.classList.add('hidden');
+    var barEl = document.getElementById('download-toast-bar');
+    if (barEl) { barEl.style.backgroundColor = ''; barEl.classList.remove('animate-pulse'); }
+    var statusEl = document.getElementById('download-toast-status');
+    if (statusEl) statusEl.style.color = '';
+    var uploadPanel = document.getElementById('upload-panel');
+    if (uploadPanel) uploadPanel.style.bottom = '';
+  }
+
+  // Close button for toast
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('#download-toast-close')) hideDownloadToast();
+  });
+
   function downloadViaChunked(path) {
+    var filename = (path || '').split('/').pop() || 'download';
+    showDownloadToast(filename);
+
     return jsonFetch('/files/chunked/download/init?path=' + encodeURIComponent(path))
       .then(function (initPayload) {
         var totalChunks = initPayload.total_chunks || 0;
         var token = initPayload.token;
-        var filename = initPayload.filename || 'download.bin';
+        filename = initPayload.filename || filename;
+        var nameEl = document.getElementById('download-toast-filename');
+        if (nameEl) nameEl.textContent = filename;
+        updateDownloadToast(0, totalChunks, filename);
+
         var parts = [];
         var chain = Promise.resolve();
 
@@ -97,6 +174,7 @@
               return arrayBufferFetch('/files/chunked/download/chunk?token=' + encodeURIComponent(token) + '&index=' + idx)
                 .then(function (ab) {
                   parts.push(new Uint8Array(ab));
+                  updateDownloadToast(idx + 1, totalChunks, filename);
                 });
             });
           })(i);
@@ -105,24 +183,104 @@
         return chain.then(function () {
           var blob = new Blob(parts, { type: initPayload.mime_type || 'application/octet-stream' });
           triggerBlobDownload(blob, filename);
+          finishDownloadToast(true, 'Complete — saved');
         });
+      })
+      .catch(function (err) {
+        finishDownloadToast(false, err && err.message ? err.message : 'Download failed');
+        throw err;
       });
   }
 
   function downloadViaSingle(path) {
-    var a = document.createElement('a');
-    a.href = '/files/download?path=' + encodeURIComponent(path);
-    a.download = '';
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    var filename = (path || '').split('/').pop() || 'download';
+    showDownloadToast(filename);
+    var statusEl = document.getElementById('download-toast-status');
+    if (statusEl) statusEl.textContent = 'Downloading...';
+    var barEl = document.getElementById('download-toast-bar');
+
+    return fetch('/files/download?path=' + encodeURIComponent(path), {
+      headers: { 'X-CSRF-Token': getCsrfToken() }
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return resp.text().then(function (txt) {
+          var payload = {};
+          try { payload = txt ? JSON.parse(txt) : {}; } catch (_) { payload = {}; }
+          throw new Error(parseErrorMessage(payload, 'Download failed'));
+        });
+      }
+      // Server redirects on error (Flash<Redirect>). fetch follows redirects
+      // silently, returning a 200 HTML page. Detect via Content-Disposition.
+      var cd = resp.headers.get('Content-Disposition') || '';
+      if (!cd) {
+        throw new Error('Download failed — server returned no file');
+      }
+      var contentLength = parseInt(resp.headers.get('Content-Length') || '0', 10);
+      var contentType = resp.headers.get('Content-Type') || 'application/octet-stream';
+      // Try to get filename from Content-Disposition header
+      var fnMatch = cd.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i);
+      if (fnMatch) filename = decodeURIComponent(fnMatch[1].replace(/"/g, ''));
+      var nameEl = document.getElementById('download-toast-filename');
+      if (nameEl) nameEl.textContent = filename;
+
+      // If the browser supports ReadableStream, track byte progress
+      if (resp.body && typeof resp.body.getReader === 'function' && contentLength > 0) {
+        var reader = resp.body.getReader();
+        var received = 0;
+        var chunks = [];
+        return (function readLoop() {
+          return reader.read().then(function (result) {
+            if (result.done) return chunks;
+            chunks.push(result.value);
+            received += result.value.length;
+            var pct = Math.round((received / contentLength) * 100);
+            if (barEl) barEl.style.width = pct + '%';
+            var pctEl = document.getElementById('download-toast-percent');
+            if (pctEl) pctEl.textContent = pct + '%';
+            if (statusEl) statusEl.textContent = formatBytes(received) + ' / ' + formatBytes(contentLength);
+            return readLoop();
+          });
+        })().then(function (chunks) {
+          var blob = new Blob(chunks, { type: contentType });
+          triggerBlobDownload(blob, filename);
+          finishDownloadToast(true, 'Complete — saved');
+        });
+      }
+      // Fallback: no stream support or unknown length — show indeterminate bar
+      if (barEl) { barEl.style.width = '100%'; barEl.classList.add('animate-pulse'); }
+      var pctEl2 = document.getElementById('download-toast-percent');
+      if (pctEl2) pctEl2.textContent = '';
+      if (statusEl) statusEl.textContent = 'Downloading...';
+      return resp.blob().then(function (blob) {
+        if (barEl) barEl.classList.remove('animate-pulse');
+        triggerBlobDownload(blob, filename);
+        finishDownloadToast(true, 'Complete — saved');
+      });
+    }).catch(function (err) {
+      finishDownloadToast(false, err && err.message ? err.message : 'Download failed');
+    });
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+    return (bytes / 1073741824).toFixed(1) + ' GB';
   }
 
   function shouldUseChunkedDownload(path, fileSize) {
     if (!path) return false;
     if (!Number.isFinite(fileSize) || fileSize <= 0) return false;
     return fileSize > getChunkSizeBytes();
+  }
+
+  function downloadFile(path, fileSize) {
+    if (shouldUseChunkedDownload(path, fileSize)) {
+      return downloadViaChunked(path).catch(function () {
+        return downloadViaSingle(path);
+      });
+    }
+    return downloadViaSingle(path);
   }
 
   // -----------------------------------------------------------------------
@@ -648,13 +806,7 @@
       if (!isDir) {
         var size = parseInt(row.getAttribute('data-size') || '0', 10);
         chain = chain.then(function () {
-          if (shouldUseChunkedDownload(p, size)) {
-            return downloadViaChunked(p).catch(function () {
-              downloadViaSingle(p);
-            });
-          }
-          downloadViaSingle(p);
-          return Promise.resolve();
+          return downloadFile(p, size);
         });
       }
     });
@@ -668,7 +820,7 @@
     openMoveModal('bulk', { paths: paths });
   });
 
-  // Intercept file download links for large files and switch to chunked download.
+  // Intercept ALL file download links so we can show the progress toast.
   document.addEventListener('click', function (e) {
     var link = e.target.closest('a[href^="/files/download?path="]');
     if (!link) return;
@@ -677,14 +829,11 @@
     if (!row) return;
     if (row.getAttribute('data-is-dir') === 'true') return;
 
+    e.preventDefault();
+
     var path = row.getAttribute('data-path') || '';
     var size = parseInt(row.getAttribute('data-size') || '0', 10);
-    if (!shouldUseChunkedDownload(path, size)) return;
-
-    e.preventDefault();
-    downloadViaChunked(path).catch(function () {
-      downloadViaSingle(path);
-    });
+    downloadFile(path, size);
   });
 
   // Bulk delete — open confirm modal

@@ -14,6 +14,29 @@
 {% include "partials/confirm_modal" %}
 {% include "partials/upload_panel" %}
 
+<!-- Download progress toast — fixed bottom-right, above upload panel -->
+<div id="download-toast" class="hidden fixed bottom-4 right-4 z-50 w-80 max-w-[calc(100vw-2rem)] bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-700/60 rounded-xl shadow-elevated overflow-hidden backdrop-blur-xl" role="status" aria-live="polite">
+  <div class="flex items-center justify-between px-4 py-3 bg-gray-50/80 dark:bg-gray-900/80 border-b border-gray-200/60 dark:border-gray-700/60">
+    <div class="flex items-center gap-2">
+      <svg class="w-4 h-4 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+      <span class="text-sm font-semibold text-gray-700 dark:text-gray-200">Downloading</span>
+    </div>
+    <button id="download-toast-close" type="button" class="hidden p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors" aria-label="Dismiss">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="px-4 py-3">
+    <div class="flex items-center justify-between mb-2">
+      <span id="download-toast-filename" class="text-sm text-gray-700 dark:text-gray-200 truncate max-w-[70%]"></span>
+      <span id="download-toast-percent" class="text-xs font-medium text-gray-500 dark:text-gray-400">0%</span>
+    </div>
+    <div class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+      <div id="download-toast-bar" class="h-full bg-blue-600 dark:bg-blue-500 rounded-full transition-all duration-200" style="width: 0%"></div>
+    </div>
+    <p id="download-toast-status" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">Preparing...</p>
+  </div>
+</div>
+
 <!-- Mkdir modal -->
 <div id="mkdir-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="mkdir-modal-title">
   <div class="card max-w-sm w-full mx-4 p-6 shadow-modal">
@@ -98,5 +121,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/upload.js?v=0.2.7" defer></script>
+<script src="/static/js/upload.js?v=0.2.8" defer></script>
 {% endblock %}
