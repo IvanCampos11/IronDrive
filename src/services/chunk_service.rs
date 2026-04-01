@@ -6,6 +6,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::io::AsyncWriteExt;
+use tracing;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -86,6 +87,14 @@ struct DownloadTokenPayload {
     path: String,
     exp: i64,
     nonce: String,
+}
+
+/// Validate that an upload_id is a well-formed UUID.  Defence-in-depth:
+/// even though we always query the DB first, rejecting non-UUID strings
+/// here prevents any filesystem path-traversal via crafted upload IDs.
+fn validate_upload_id(upload_id: &str) -> Result<(), AppError> {
+    Uuid::parse_str(upload_id).map_err(|_| AppError::NotFound)?;
+    Ok(())
 }
 
 fn staging_dir(config: &AppConfig, upload_id: &str) -> PathBuf {
@@ -355,6 +364,7 @@ pub async fn receive_chunk(
     chunk_index: u32,
     data: &[u8],
 ) -> Result<ReceiveChunkResult, AppError> {
+    validate_upload_id(upload_id)?;
     let row = load_upload_row(pool, upload_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -414,6 +424,9 @@ pub async fn receive_chunk(
     file.flush()
         .await
         .map_err(|e| AppError::Internal(format!("Failed to flush chunk: {e}")))?;
+    file.sync_data()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to sync chunk to disk: {e}")))?;
 
     let received_chunks = count_uploaded_chunks(config, upload_id).await?;
     sqlx::query("UPDATE chunked_uploads SET received_chunks = ? WHERE id = ?")
@@ -439,6 +452,7 @@ pub async fn complete_upload(
     upload_id: &str,
     write_verify: bool,
 ) -> Result<UploadResult, AppError> {
+    validate_upload_id(upload_id)?;
     let row = load_upload_row(pool, upload_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -507,6 +521,7 @@ pub async fn cancel_upload(
     library_id: &str,
     upload_id: &str,
 ) -> Result<(), AppError> {
+    validate_upload_id(upload_id)?;
     let row = load_upload_row(pool, upload_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -589,4 +604,37 @@ pub async fn serve_chunk(
         total_chunks,
         total_bytes,
     })
+}
+
+/// Remove expired chunked upload sessions and their staging directories.
+///
+/// Call this during server startup and periodically to reclaim disk space
+/// from abandoned uploads.
+pub async fn cleanup_expired_uploads(pool: &DbPool, config: &AppConfig) -> Result<u64, AppError> {
+    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM chunked_uploads WHERE expires_at < ?")
+            .bind(&now)
+            .fetch_all(pool)
+            .await?;
+
+    let mut cleaned = 0u64;
+    for (upload_id,) in &rows {
+        let dir = staging_dir(config, upload_id);
+        if tokio::fs::try_exists(&dir).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
+        let _ = sqlx::query("DELETE FROM chunked_uploads WHERE id = ?")
+            .bind(upload_id)
+            .execute(pool)
+            .await;
+        cleaned += 1;
+    }
+
+    if cleaned > 0 {
+        tracing::info!(count = cleaned, "Cleaned up expired chunked upload sessions");
+    }
+
+    Ok(cleaned)
 }

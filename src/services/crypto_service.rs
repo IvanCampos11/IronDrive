@@ -439,6 +439,9 @@ pub async fn encrypt_and_write_file_owned(
     file.flush()
         .await
         .map_err(|e| AppError::Internal(format!("Failed to flush encrypted file: {e}")))?;
+    file.sync_data()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to sync encrypted file to disk: {e}")))?;
 
     if write_verify {
         let readback = tokio::fs::read(dest).await.map_err(|e| {
@@ -556,6 +559,9 @@ pub async fn stream_encrypt_chunks_to_file(
     out.flush()
         .await
         .map_err(|e| AppError::Internal(format!("Failed to flush encrypted file: {e}")))?;
+    out.sync_data()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to sync encrypted file to disk: {e}")))?;
     drop(out);
 
     if write_verify {
@@ -588,14 +594,88 @@ pub async fn stream_decrypt_file(
 }
 
 /// Verify a V2 STREAM file's integrity without materialising the full plaintext.
+///
+/// Decrypts each segment, feeds it into a SHA-256 hasher, and immediately
+/// drops the plaintext — so peak RAM is bounded to one segment buffer.
 /// Returns the computed checksum so callers can compare it if needed.
 pub async fn stream_decrypt_file_checksum_only(
     data_key: &DataKey,
     path: &Path,
 ) -> Result<[u8; CHECKSUM_LEN], AppError> {
-    let (plaintext, stored_checksum) = stream_decrypt_file_inner(data_key, path).await?;
+    use tokio::io::AsyncReadExt;
 
-    let computed = sha256_bytes(&plaintext);
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to open STREAM file for verify: {e}")))?;
+
+    let header_len = STREAM_MAGIC.len() + STREAM_NONCE_LEN + CHECKSUM_LEN;
+    let mut header_buf = vec![0u8; header_len];
+    file.read_exact(&mut header_buf)
+        .await
+        .map_err(|_| AppError::Internal("STREAM file too small to contain header".into()))?;
+
+    if header_buf[..3] != STREAM_MAGIC {
+        return Err(AppError::Internal("STREAM file has wrong magic bytes".into()));
+    }
+
+    let stream_nonce = &header_buf[3..3 + STREAM_NONCE_LEN];
+    let stored_checksum: [u8; CHECKSUM_LEN] = header_buf[3 + STREAM_NONCE_LEN..header_len]
+        .try_into()
+        .expect("slice length guaranteed by header_len check");
+
+    let key = Key::<Aes256Gcm>::from_slice(data_key.as_bytes());
+    let nonce_ga = aes_gcm::aead::generic_array::GenericArray::from_slice(stream_nonce);
+    let mut decryptor = DecryptorBE32::<Aes256Gcm>::new(key, nonce_ga);
+
+    let mut hasher = Sha256::new();
+    let mut pending: Option<Vec<u8>> = None;
+    let mut seg_len_buf = [0u8; 4];
+
+    loop {
+        // Try to read the next segment header (4 bytes).
+        match file.read_exact(&mut seg_len_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // End of file — flush pending segment as last.
+                if let Some(mut seg) = pending.take() {
+                    decryptor
+                        .decrypt_last_in_place(b"", &mut seg)
+                        .map_err(|_| AppError::Internal(
+                            "STREAM verify: decrypt last segment failed".into(),
+                        ))?;
+                    hasher.update(&seg);
+                }
+                break;
+            }
+            Err(e) => {
+                return Err(AppError::Internal(format!(
+                    "STREAM verify: failed to read segment header: {e}"
+                )));
+            }
+        }
+
+        let seg_len = u32::from_le_bytes(seg_len_buf) as usize;
+        let mut seg_data = vec![0u8; seg_len];
+        file.read_exact(&mut seg_data)
+            .await
+            .map_err(|e| AppError::Internal(format!(
+                "STREAM verify: truncated segment body: {e}"
+            )))?;
+
+        // Decrypt the previously pending segment as a non-last segment.
+        if let Some(mut prev) = pending.take() {
+            decryptor
+                .decrypt_next_in_place(b"", &mut prev)
+                .map_err(|_| AppError::Internal(
+                    "STREAM verify: decrypt segment failed".into(),
+                ))?;
+            hasher.update(&prev);
+        }
+
+        pending = Some(seg_data);
+    }
+
+    let computed: [u8; CHECKSUM_LEN] = hasher.finalize().into();
     if computed != stored_checksum {
         return Err(AppError::Internal(
             "STREAM file checksum mismatch — data corrupted".to_string(),

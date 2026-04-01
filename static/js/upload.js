@@ -292,6 +292,9 @@
     });
   }
 
+  var CHUNK_MAX_RETRIES = 3;
+  var CHUNK_RETRY_BASE_MS = 1000;
+
   function uploadChunkXhr(uploadId, chunkIndex, chunkBlob, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
@@ -322,6 +325,23 @@
 
       xhr.send(chunkBlob);
     });
+  }
+
+  function uploadChunkWithRetry(uploadId, chunkIndex, chunkBlob, onProgress) {
+    var attempt = 0;
+    function tryOnce() {
+      attempt++;
+      return uploadChunkXhr(uploadId, chunkIndex, chunkBlob, onProgress).catch(function (err) {
+        // Only retry transient errors (network / 5xx), not client errors (4xx).
+        var isTransient = /network error/i.test(err.message) || /5\d\d/.test(err.message);
+        if (isTransient && attempt < CHUNK_MAX_RETRIES) {
+          var delay = CHUNK_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+          return new Promise(function (res) { setTimeout(res, delay); }).then(tryOnce);
+        }
+        throw err;
+      });
+    }
+    return tryOnce();
   }
 
   function uploadFileChunked(id, file, fullPath) {
@@ -358,7 +378,7 @@
         var key = String(chunkIndex);
         inflightBytes[key] = 0;
 
-        return uploadChunkXhr(uploadId, chunkIndex, chunk, function (loaded) {
+        return uploadChunkWithRetry(uploadId, chunkIndex, chunk, function (loaded) {
           inflightBytes[key] = loaded;
           reportProgress();
         }).then(function () {
