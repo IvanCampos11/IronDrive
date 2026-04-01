@@ -288,15 +288,11 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 
 ### M5.6 — Data Integrity
 
-#### Commits
-
 - [x] `verify_file_hash()` utility — key-free streaming integrity check + in-memory `verify_file_hash_bytes()`. Constants: `SINGLE_MAGIC`, `STREAM_MAGIC`, `FILE_HASH_LEN`, `MIN_SINGLE_FILE_LEN`, `MIN_STREAM_FILE_LEN`. 9 new tests. Pure addition, nothing broken.
 - [ ] Single-shot encrypt + decrypt — rewrite `encrypt_file_bytes()`, `encrypt_and_write_file_owned()`, `decrypt_file_bytes_inner()` for new format. Rename `ChecksumMismatch` → `FileHashMismatch`. Update `verify_file_integrity()`. Drop `CHECKSUM_LEN`, `MIN_ENCRYPTED_FILE_LEN`.
 - [ ] STREAM encrypt + decrypt — rewrite `stream_encrypt_chunks_to_file()` (remove `sha256_chunks()` pre-pass and `expected_checksum` param), `stream_decrypt_file_inner()`, `stream_decrypt_file_checksum_only()`. Update `verify_file_integrity_async()` to accept `Option<&DataKey>` (key-free tier 1 + optional key tier 2). Update `is_stream_format()`, `read_and_decrypt_file()`.
 - [ ] Update callers — `fs_service.rs` (drop plaintext pre-hash on upload, compute on-the-fly for download header), `chunk_service.rs` (remove `expected_checksum` forwarding), `routes/library.rs` (keep `X-IronDrive-Integrity` header, compute on-the-fly).
 - [ ] Tests — update all roundtrip/tamper tests for new formats, add key-free `verify_file_hash` tests on real encrypted files, add `verify_file_integrity_async(None, ...)` tests, remove old `ChecksumMismatch` assertions.
-
-#### Integrity service (after format changes land)
 
 - [ ] `src/services/integrity_service.rs`:
   - [ ] `verify_file()` — call `verify_file_hash()` (key-free), then optionally decrypt (GCM tag check)
