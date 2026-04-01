@@ -50,6 +50,40 @@ const STREAM_NONCE_LEN: usize = 7;
 /// Fixed overhead per segment on disk: 4-byte length prefix.
 const STREAM_SEGMENT_HEADER_LEN: usize = 4;
 
+// ---------------------------------------------------------------------------
+// V3 / V4 format constants (replaces V1 + V2 in upcoming commits)
+// ---------------------------------------------------------------------------
+//
+// New on-disk formats — both append a SHA-256 hash of all preceding bytes
+// so we can detect corruption without needing the encryption key.
+//
+// Single-shot layout:
+//   [SINGLE_MAGIC 3B] [nonce 12B] [ciphertext+tag (N+16)B] [file_hash 32B]
+//
+// Stream layout:
+//   [STREAM_MAGIC 3B] [stream_nonce 7B]
+//   per segment: [seg_len 4B LE] [ciphertext+tag]
+//   [file_hash 32B]
+//
+// file_hash = SHA-256(everything before the last 32 bytes)
+
+/// Identifies a single-shot encrypted file on disk.
+const SINGLE_MAGIC: [u8; 3] = [0x49, 0x44, 0x01]; // "ID\x01"
+
+// STREAM_MAGIC is already defined above as [0x49, 0x44, 0x02].
+
+/// Trailing SHA-256 hash length (same as CHECKSUM_LEN, but semantically different).
+const FILE_HASH_LEN: usize = 32;
+
+/// All magic prefixes are 3 bytes.
+const MAGIC_LEN: usize = 3;
+
+/// Smallest valid single-shot file: magic(3) + nonce(12) + tag(16) + file_hash(32) = 63.
+const MIN_SINGLE_FILE_LEN: usize = MAGIC_LEN + NONCE_LEN + TAG_LEN + FILE_HASH_LEN;
+
+/// Smallest valid stream file: magic(3) + stream_nonce(7) + file_hash(32) = 42.
+const MIN_STREAM_FILE_LEN: usize = MAGIC_LEN + STREAM_NONCE_LEN + FILE_HASH_LEN;
+
 /// Decrypted master key, held in Rocket managed state for the server's lifetime.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey {
@@ -386,6 +420,94 @@ pub async fn sha256_file(path: &Path) -> Result<[u8; CHECKSUM_LEN], AppError> {
     }
 
     Ok(hasher.finalize().into())
+}
+
+// ---------------------------------------------------------------------------
+// Key-free file integrity verification
+// ---------------------------------------------------------------------------
+
+/// Check the trailing SHA-256 hash of an in-memory encrypted blob.
+/// Hashes `blob[0..len-32]` and compares to the last 32 bytes.
+/// No encryption key needed.
+pub fn verify_file_hash_bytes(blob: &[u8]) -> Result<(), AppError> {
+    if blob.len() < MAGIC_LEN + FILE_HASH_LEN {
+        return Err(AppError::Internal(format!(
+            "File too small for integrity check ({} bytes, need at least {})",
+            blob.len(),
+            MAGIC_LEN + FILE_HASH_LEN,
+        )));
+    }
+
+    let content = &blob[..blob.len() - FILE_HASH_LEN];
+    let stored_hash = &blob[blob.len() - FILE_HASH_LEN..];
+
+    let computed: [u8; 32] = Sha256::digest(content).into();
+    if computed.as_slice() != stored_hash {
+        return Err(AppError::Internal(
+            "File hash mismatch — data on disk may be corrupted".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Same as `verify_file_hash_bytes` but streams from disk so we don't
+/// load the whole file into memory. Reads everything except the last 32
+/// bytes through a SHA-256 hasher, then compares to the stored hash.
+pub async fn verify_file_hash(path: &Path) -> Result<(), AppError> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to stat file for integrity check: {e}")))?;
+
+    let file_len = meta.len() as usize;
+    if file_len < MAGIC_LEN + FILE_HASH_LEN {
+        return Err(AppError::Internal(format!(
+            "File too small for integrity check ({file_len} bytes, need at least {})",
+            MAGIC_LEN + FILE_HASH_LEN,
+        )));
+    }
+
+    let content_len = file_len - FILE_HASH_LEN;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to open file for integrity check: {e}")))?;
+
+    // Stream-hash everything except the trailing FILE_HASH_LEN bytes.
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; HASH_BUF_SIZE];
+    let mut remaining = content_len;
+
+    while remaining > 0 {
+        let to_read = remaining.min(HASH_BUF_SIZE);
+        let n = file
+            .read(&mut buf[..to_read])
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to read file for integrity check: {e}")))?;
+        if n == 0 {
+            return Err(AppError::Internal(
+                "Unexpected EOF during integrity check".to_string(),
+            ));
+        }
+        hasher.update(&buf[..n]);
+        remaining -= n;
+    }
+
+    let computed: [u8; 32] = hasher.finalize().into();
+
+    // Read the stored hash from the tail of the file.
+    let mut stored_hash = [0u8; FILE_HASH_LEN];
+    file.read_exact(&mut stored_hash)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read file hash tail: {e}")))?;
+
+    if computed != stored_hash {
+        return Err(AppError::Internal(
+            "File hash mismatch — data on disk may be corrupted".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Encrypt plaintext and write to disk with an optional write-verify pass.
@@ -1271,6 +1393,108 @@ mod tests {
 
         let file_hash = sha256_file(tmp.path()).await.unwrap();
         assert_eq!(file_hash, expected);
+    }
+
+    // -- verify_file_hash (key-free integrity) --
+
+    /// Helper: build a blob with a valid trailing file hash.
+    fn make_hashed_blob(content: &[u8]) -> Vec<u8> {
+        let hash: [u8; 32] = Sha256::digest(content).into();
+        let mut blob = Vec::with_capacity(content.len() + FILE_HASH_LEN);
+        blob.extend_from_slice(content);
+        blob.extend_from_slice(&hash);
+        blob
+    }
+
+    #[test]
+    fn verify_file_hash_bytes_valid() {
+        // 3-byte magic + some payload → meets minimum size with hash appended
+        let content = b"IDX_some_encrypted_payload_here_";
+        let blob = make_hashed_blob(content);
+        assert!(verify_file_hash_bytes(&blob).is_ok());
+    }
+
+    #[test]
+    fn verify_file_hash_bytes_tampered_body() {
+        let content = b"IDX_some_encrypted_payload_here_";
+        let mut blob = make_hashed_blob(content);
+        // Flip a byte in the body
+        blob[5] ^= 0xFF;
+        assert!(verify_file_hash_bytes(&blob).is_err());
+    }
+
+    #[test]
+    fn verify_file_hash_bytes_tampered_hash() {
+        let content = b"IDX_some_encrypted_payload_here_";
+        let mut blob = make_hashed_blob(content);
+        // Flip a byte in the trailing hash
+        let last = blob.len() - 1;
+        blob[last] ^= 0xFF;
+        assert!(verify_file_hash_bytes(&blob).is_err());
+    }
+
+    #[test]
+    fn verify_file_hash_bytes_truncated() {
+        // Too small to contain magic + file_hash
+        let tiny = vec![0u8; MAGIC_LEN + FILE_HASH_LEN - 1];
+        assert!(verify_file_hash_bytes(&tiny).is_err());
+    }
+
+    #[test]
+    fn verify_file_hash_bytes_minimum_size() {
+        // Exactly MAGIC_LEN content bytes + FILE_HASH_LEN = valid
+        let content = &[0x49u8, 0x44, 0x03]; // 3-byte "content" (the magic)
+        let blob = make_hashed_blob(content);
+        assert!(verify_file_hash_bytes(&blob).is_ok());
+    }
+
+    #[tokio::test]
+    async fn verify_file_hash_valid_on_disk() {
+        let content = b"IDX_streaming_verification_test_";
+        let blob = make_hashed_blob(content);
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&blob).unwrap();
+        tmp.flush().unwrap();
+
+        assert!(verify_file_hash(tmp.path()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn verify_file_hash_tampered_on_disk() {
+        let content = b"IDX_streaming_verification_test_";
+        let mut blob = make_hashed_blob(content);
+        blob[10] ^= 0xFF;
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&blob).unwrap();
+        tmp.flush().unwrap();
+
+        assert!(verify_file_hash(tmp.path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn verify_file_hash_large_file() {
+        // Larger-than-buffer file to exercise the streaming loop
+        let mut content = vec![0u8; HASH_BUF_SIZE * 2 + 77];
+        OsRng.fill_bytes(&mut content);
+        let blob = make_hashed_blob(&content);
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&blob).unwrap();
+        tmp.flush().unwrap();
+
+        assert!(verify_file_hash(tmp.path()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn verify_file_hash_truncated_on_disk() {
+        let tiny = vec![0u8; MAGIC_LEN + FILE_HASH_LEN - 1];
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&tiny).unwrap();
+        tmp.flush().unwrap();
+
+        assert!(verify_file_hash(tmp.path()).await.is_err());
     }
 
     // -- File encrypt/decrypt via disk --
