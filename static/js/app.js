@@ -83,87 +83,97 @@
   }
 
   // -----------------------------------------------------------------------
-  // Download progress toast helpers
+  // Download progress — rows in the unified transfer panel
   // -----------------------------------------------------------------------
-  function showDownloadToast(filename) {
-    var toast = document.getElementById('download-toast');
-    if (!toast) return;
-    toast.classList.remove('hidden');
-    var nameEl = document.getElementById('download-toast-filename');
-    var pctEl = document.getElementById('download-toast-percent');
-    var barEl = document.getElementById('download-toast-bar');
-    var statusEl = document.getElementById('download-toast-status');
-    var closeBtn = document.getElementById('download-toast-close');
-    if (nameEl) nameEl.textContent = filename || 'download';
-    if (pctEl) pctEl.textContent = '0%';
-    if (barEl) barEl.style.width = '0%';
-    if (statusEl) statusEl.textContent = 'Preparing...';
-    if (closeBtn) closeBtn.classList.add('hidden');
-    // Shift upload panel when both visible
-    var uploadPanel = document.getElementById('upload-panel');
-    if (uploadPanel && !uploadPanel.classList.contains('hidden')) {
-      uploadPanel.style.bottom = (toast.offsetHeight + 24) + 'px';
-    }
+  var nextDownloadId = 1;
+
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
   }
 
-  function updateDownloadToast(downloaded, total, filename) {
-    var pctEl = document.getElementById('download-toast-percent');
-    var barEl = document.getElementById('download-toast-bar');
-    var statusEl = document.getElementById('download-toast-status');
-    var pct = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-    if (pctEl) pctEl.textContent = pct + '%';
-    if (barEl) barEl.style.width = pct + '%';
-    if (statusEl) statusEl.textContent = 'Chunk ' + downloaded + ' of ' + total;
+  function showTransferPanel() {
+    var panel = document.getElementById('transfer-panel');
+    if (panel) panel.classList.remove('hidden');
   }
 
-  function finishDownloadToast(success, message) {
-    var barEl = document.getElementById('download-toast-bar');
-    var statusEl = document.getElementById('download-toast-status');
-    var pctEl = document.getElementById('download-toast-percent');
-    var closeBtn = document.getElementById('download-toast-close');
+  function updateClearButton() {
+    var panelList = document.getElementById('transfer-panel-list');
+    var clearBtn = document.getElementById('transfer-panel-clear');
+    if (!panelList || !clearBtn) return;
+    var hasDone = panelList.querySelector('.transfer-done') !== null;
+    if (hasDone) clearBtn.classList.remove('hidden');
+    else clearBtn.classList.add('hidden');
+  }
+
+  function createDownloadRow(filename) {
+    var id = nextDownloadId++;
+    var div = document.createElement('div');
+    div.id = 'download-item-' + id;
+    div.className = 'px-3 py-2 border-b border-gray-100 dark:border-gray-700 last:border-0';
+    div.innerHTML =
+      '<div class="flex items-center justify-between mb-1">' +
+        '<span class="flex min-w-0 items-center text-sm text-gray-700 dark:text-gray-300 truncate max-w-[300px]" title="' + escapeHtml(filename) + '">' +
+          '<span class="download-name truncate">' + escapeHtml(filename) + '</span>' +
+          '<span class="ml-1 text-xs text-gray-400 dark:text-gray-500">\u00b7 download</span>' +
+        '</span>' +
+        '<span class="download-status text-xs text-gray-400">0%</span>' +
+      '</div>' +
+      '<div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">' +
+        '<div class="download-bar h-full bg-blue-600 rounded-full transition-all duration-150" style="width: 0%"></div>' +
+      '</div>';
+
+    var panelList = document.getElementById('transfer-panel-list');
+    if (panelList) panelList.appendChild(div);
+    showTransferPanel();
+    return id;
+  }
+
+  function updateDownloadRow(id, pct, statusText) {
+    var row = document.getElementById('download-item-' + id);
+    if (!row) return;
+    var bar = row.querySelector('.download-bar');
+    var status = row.querySelector('.download-status');
+    if (bar) bar.style.width = Math.min(pct, 100) + '%';
+    if (status) status.textContent = statusText || (pct + '%');
+  }
+
+  function setDownloadFilename(id, filename) {
+    var row = document.getElementById('download-item-' + id);
+    if (!row) return;
+    var nameEl = row.querySelector('.download-name');
+    if (nameEl) { nameEl.textContent = filename; nameEl.parentElement.title = filename; }
+  }
+
+  function finishDownloadRow(id, success, message) {
+    var row = document.getElementById('download-item-' + id);
+    if (!row) return;
+    row.classList.add('transfer-done');
+    var bar = row.querySelector('.download-bar');
+    var status = row.querySelector('.download-status');
     if (success) {
-      if (barEl) { barEl.style.width = '100%'; barEl.style.backgroundColor = '#22c55e'; }
-      if (statusEl) statusEl.textContent = message || 'Complete';
-      if (pctEl) pctEl.textContent = '100%';
+      if (bar) { bar.style.width = '100%'; bar.classList.remove('animate-pulse'); bar.classList.replace('bg-blue-600', 'bg-green-500'); }
+      if (status) { status.textContent = 'Done'; status.classList.replace('text-gray-400', 'text-green-600'); }
     } else {
-      if (barEl) barEl.style.backgroundColor = '#ef4444';
-      if (statusEl) { statusEl.textContent = message || 'Failed'; statusEl.style.color = '#ef4444'; }
+      if (bar) { bar.classList.remove('animate-pulse'); bar.classList.replace('bg-blue-600', 'bg-red-500'); }
+      if (status) { status.textContent = message || 'Failed'; status.classList.replace('text-gray-400', 'text-red-600'); }
     }
-    if (closeBtn) closeBtn.classList.remove('hidden');
-    // Auto-hide on success after 3s
-    if (success) {
-      setTimeout(hideDownloadToast, 3000);
-    }
+    updateClearButton();
   }
-
-  function hideDownloadToast() {
-    var toast = document.getElementById('download-toast');
-    if (toast) toast.classList.add('hidden');
-    var barEl = document.getElementById('download-toast-bar');
-    if (barEl) { barEl.style.backgroundColor = ''; barEl.classList.remove('animate-pulse'); }
-    var statusEl = document.getElementById('download-toast-status');
-    if (statusEl) statusEl.style.color = '';
-    var uploadPanel = document.getElementById('upload-panel');
-    if (uploadPanel) uploadPanel.style.bottom = '';
-  }
-
-  // Close button for toast
-  document.addEventListener('click', function (e) {
-    if (e.target.closest('#download-toast-close')) hideDownloadToast();
-  });
 
   function downloadViaChunked(path) {
     var filename = (path || '').split('/').pop() || 'download';
-    showDownloadToast(filename);
+    var dlId = createDownloadRow(filename);
+    updateDownloadRow(dlId, 0, 'Preparing\u2026');
 
     return jsonFetch('/files/chunked/download/init?path=' + encodeURIComponent(path))
       .then(function (initPayload) {
         var totalChunks = initPayload.total_chunks || 0;
         var token = initPayload.token;
         filename = initPayload.filename || filename;
-        var nameEl = document.getElementById('download-toast-filename');
-        if (nameEl) nameEl.textContent = filename;
-        updateDownloadToast(0, totalChunks, filename);
+        setDownloadFilename(dlId, filename);
+        updateDownloadRow(dlId, 0, 'Chunk 0 of ' + totalChunks);
 
         var parts = [];
         var chain = Promise.resolve();
@@ -174,7 +184,8 @@
               return arrayBufferFetch('/files/chunked/download/chunk?token=' + encodeURIComponent(token) + '&index=' + idx)
                 .then(function (ab) {
                   parts.push(new Uint8Array(ab));
-                  updateDownloadToast(idx + 1, totalChunks, filename);
+                  var pct = Math.round(((idx + 1) / totalChunks) * 100);
+                  updateDownloadRow(dlId, pct, 'Chunk ' + (idx + 1) + ' of ' + totalChunks);
                 });
             });
           })(i);
@@ -183,21 +194,19 @@
         return chain.then(function () {
           var blob = new Blob(parts, { type: initPayload.mime_type || 'application/octet-stream' });
           triggerBlobDownload(blob, filename);
-          finishDownloadToast(true, 'Complete — saved');
+          finishDownloadRow(dlId, true);
         });
       })
       .catch(function (err) {
-        finishDownloadToast(false, err && err.message ? err.message : 'Download failed');
+        finishDownloadRow(dlId, false, err && err.message ? err.message : 'Download failed');
         throw err;
       });
   }
 
   function downloadViaSingle(path) {
     var filename = (path || '').split('/').pop() || 'download';
-    showDownloadToast(filename);
-    var statusEl = document.getElementById('download-toast-status');
-    if (statusEl) statusEl.textContent = 'Downloading...';
-    var barEl = document.getElementById('download-toast-bar');
+    var dlId = createDownloadRow(filename);
+    updateDownloadRow(dlId, 0, 'Downloading\u2026');
 
     return fetch('/files/download?path=' + encodeURIComponent(path), {
       headers: { 'X-CSRF-Token': getCsrfToken() }
@@ -209,21 +218,18 @@
           throw new Error(parseErrorMessage(payload, 'Download failed'));
         });
       }
-      // Server redirects on error (Flash<Redirect>). fetch follows redirects
-      // silently, returning a 200 HTML page. Detect via Content-Disposition.
       var cd = resp.headers.get('Content-Disposition') || '';
       if (!cd) {
-        throw new Error('Download failed — server returned no file');
+        throw new Error('Download failed \u2014 server returned no file');
       }
       var contentLength = parseInt(resp.headers.get('Content-Length') || '0', 10);
       var contentType = resp.headers.get('Content-Type') || 'application/octet-stream';
-      // Try to get filename from Content-Disposition header
       var fnMatch = cd.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i);
-      if (fnMatch) filename = decodeURIComponent(fnMatch[1].replace(/"/g, ''));
-      var nameEl = document.getElementById('download-toast-filename');
-      if (nameEl) nameEl.textContent = filename;
+      if (fnMatch) {
+        filename = decodeURIComponent(fnMatch[1].replace(/"/g, ''));
+        setDownloadFilename(dlId, filename);
+      }
 
-      // If the browser supports ReadableStream, track byte progress
       if (resp.body && typeof resp.body.getReader === 'function' && contentLength > 0) {
         var reader = resp.body.getReader();
         var received = 0;
@@ -234,30 +240,28 @@
             chunks.push(result.value);
             received += result.value.length;
             var pct = Math.round((received / contentLength) * 100);
-            if (barEl) barEl.style.width = pct + '%';
-            var pctEl = document.getElementById('download-toast-percent');
-            if (pctEl) pctEl.textContent = pct + '%';
-            if (statusEl) statusEl.textContent = formatBytes(received) + ' / ' + formatBytes(contentLength);
+            updateDownloadRow(dlId, pct, formatBytes(received) + ' / ' + formatBytes(contentLength));
             return readLoop();
           });
         })().then(function (chunks) {
           var blob = new Blob(chunks, { type: contentType });
           triggerBlobDownload(blob, filename);
-          finishDownloadToast(true, 'Complete — saved');
+          finishDownloadRow(dlId, true);
         });
       }
       // Fallback: no stream support or unknown length — show indeterminate bar
-      if (barEl) { barEl.style.width = '100%'; barEl.classList.add('animate-pulse'); }
-      var pctEl2 = document.getElementById('download-toast-percent');
-      if (pctEl2) pctEl2.textContent = '';
-      if (statusEl) statusEl.textContent = 'Downloading...';
+      var row = document.getElementById('download-item-' + dlId);
+      if (row) {
+        var bar = row.querySelector('.download-bar');
+        if (bar) { bar.style.width = '100%'; bar.classList.add('animate-pulse'); }
+      }
+      updateDownloadRow(dlId, 100, 'Downloading\u2026');
       return resp.blob().then(function (blob) {
-        if (barEl) barEl.classList.remove('animate-pulse');
         triggerBlobDownload(blob, filename);
-        finishDownloadToast(true, 'Complete — saved');
+        finishDownloadRow(dlId, true);
       });
     }).catch(function (err) {
-      finishDownloadToast(false, err && err.message ? err.message : 'Download failed');
+      finishDownloadRow(dlId, false, err && err.message ? err.message : 'Download failed');
     });
   }
 

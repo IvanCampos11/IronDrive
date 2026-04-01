@@ -13,8 +13,8 @@
   }
 
   // DOM references (lazy, resolved after each HTMX swap)
-  function getPanel() { return document.getElementById('upload-panel'); }
-  function getPanelList() { return document.getElementById('upload-panel-list'); }
+  function getPanel() { return document.getElementById('transfer-panel'); }
+  function getPanelList() { return document.getElementById('transfer-panel-list'); }
   function getTbody() { return document.getElementById('file-tbody'); }
   function getFileInput() { return document.getElementById('file-upload-input'); }
   function getFolderInput() { return document.getElementById('folder-upload-input'); }
@@ -159,19 +159,23 @@
   function markUploadComplete(id) {
     var row = document.getElementById('upload-item-' + id);
     if (!row) return;
+    row.classList.add('transfer-done');
     var bar = row.querySelector('.upload-bar');
     var status = row.querySelector('.upload-status');
     if (bar) { bar.style.width = '100%'; bar.classList.remove('animate-pulse'); bar.classList.replace('bg-blue-600', 'bg-green-500'); }
     if (status) { status.textContent = 'Done'; status.classList.replace('text-gray-400', 'text-green-600'); }
+    updateClearButton();
   }
 
   function markUploadFailed(id, msg) {
     var row = document.getElementById('upload-item-' + id);
     if (!row) return;
+    row.classList.add('transfer-done');
     var bar = row.querySelector('.upload-bar');
     var status = row.querySelector('.upload-status');
     if (bar) { bar.classList.remove('animate-pulse'); bar.classList.replace('bg-blue-600', 'bg-red-500'); }
     if (status) { status.textContent = msg || 'Failed'; status.classList.replace('text-gray-400', 'text-red-600'); }
+    updateClearButton();
   }
 
   // -----------------------------------------------------------------------
@@ -579,14 +583,17 @@
       closeUploadMenu();
     }
 
-    if (e.target.closest('#upload-panel-toggle')) {
+    if (e.target.closest('#transfer-panel-toggle')) {
       toggleMinimise();
     }
-    if (e.target.closest('#upload-panel-clear')) {
+    if (e.target.closest('#transfer-panel-clear')) {
       var panelList = getPanelList();
-      if (panelList) panelList.innerHTML = '';
-      // Hide panel if no active uploads
-      if (uploads.length === 0) hidePanel();
+      if (panelList) {
+        var doneItems = panelList.querySelectorAll('.transfer-done');
+        for (var i = 0; i < doneItems.length; i++) doneItems[i].remove();
+        if (panelList.children.length === 0) hidePanel();
+      }
+      updateClearButton();
     }
   });
 
@@ -599,6 +606,15 @@
   // -----------------------------------------------------------------------
   // Utility
   // -----------------------------------------------------------------------
+  function updateClearButton() {
+    var panelList = document.getElementById('transfer-panel-list');
+    var clearBtn = document.getElementById('transfer-panel-clear');
+    if (!panelList || !clearBtn) return;
+    var hasDone = panelList.querySelector('.transfer-done') !== null;
+    if (hasDone) clearBtn.classList.remove('hidden');
+    else clearBtn.classList.add('hidden');
+  }
+
   function escapeHtml(str) {
     var div = document.createElement('div');
     div.appendChild(document.createTextNode(str));
