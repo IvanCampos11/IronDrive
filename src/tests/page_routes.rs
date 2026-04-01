@@ -127,7 +127,11 @@ async fn unauthenticated_index_redirects_to_login() {
     let response = client.get("/").dispatch().await;
     assert_eq!(response.status(), Status::SeeOther);
     let location = response.headers().get_one("Location").unwrap_or("");
-    assert!(location.contains("/login"), "Expected redirect to /login, got {}", location);
+    assert!(
+        location.contains("/login"),
+        "Expected redirect to /login, got {}",
+        location
+    );
 }
 
 #[tokio::test]
@@ -138,8 +142,7 @@ async fn unauthenticated_files_redirects() {
     let response = client.get("/files").dispatch().await;
     // SessionSetupComplete guard should redirect unauthenticated users
     assert!(
-        [Status::SeeOther, Status::Unauthorized, Status::NotFound]
-            .contains(&response.status()),
+        [Status::SeeOther, Status::Unauthorized, Status::NotFound].contains(&response.status()),
         "Expected redirect or auth error for /files, got {}",
         response.status()
     );
@@ -153,8 +156,14 @@ async fn login_page_renders() {
     let response = client.get("/login").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
     let body = response.into_string().await.unwrap_or_default();
-    assert!(body.contains("Sign in"), "Login page should contain 'Sign in'");
-    assert!(body.contains("username"), "Login page should have username field");
+    assert!(
+        body.contains("Sign in"),
+        "Login page should contain 'Sign in'"
+    );
+    assert!(
+        body.contains("username"),
+        "Login page should have username field"
+    );
 }
 
 #[tokio::test]
@@ -165,8 +174,14 @@ async fn register_page_renders() {
     let response = client.get("/register").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
     let body = response.into_string().await.unwrap_or_default();
-    assert!(body.contains("Create account"), "Register page should contain 'Create account'");
-    assert!(body.contains("password_confirm"), "Register page should have confirm password field");
+    assert!(
+        body.contains("Create account"),
+        "Register page should contain 'Create account'"
+    );
+    assert!(
+        body.contains("password_confirm"),
+        "Register page should have confirm password field"
+    );
 }
 
 #[tokio::test]
@@ -187,7 +202,10 @@ async fn security_headers_present() {
         "Missing X-Frame-Options header"
     );
     assert!(
-        response.headers().get_one("Content-Security-Policy").is_some(),
+        response
+            .headers()
+            .get_one("Content-Security-Policy")
+            .is_some(),
         "Missing Content-Security-Policy header"
     );
     assert!(
@@ -206,14 +224,20 @@ async fn invalid_login_shows_error() {
     let response = client
         .post("/login")
         .header(rocket::http::ContentType::Form)
-        .body(format!("username=nonexistent&password=wrongpassword&csrf_token={}", csrf))
+        .body(format!(
+            "username=nonexistent&password=wrongpassword&csrf_token={}",
+            csrf
+        ))
         .dispatch()
         .await;
 
     // Should redirect back to login with flash error
     assert_eq!(response.status(), Status::SeeOther);
     let location = response.headers().get_one("Location").unwrap_or("");
-    assert!(location.contains("/login"), "Should redirect to /login on failure");
+    assert!(
+        location.contains("/login"),
+        "Should redirect to /login on failure"
+    );
 }
 
 #[tokio::test]
@@ -232,7 +256,10 @@ async fn register_password_mismatch_error() {
 
     assert_eq!(response.status(), Status::SeeOther);
     let location = response.headers().get_one("Location").unwrap_or("");
-    assert!(location.contains("/register"), "Should redirect to /register on mismatch");
+    assert!(
+        location.contains("/register"),
+        "Should redirect to /register on mismatch"
+    );
 }
 
 #[tokio::test]
@@ -262,7 +289,10 @@ async fn full_page_auth_flow() {
     let response = client
         .post("/login")
         .header(rocket::http::ContentType::Form)
-        .body(format!("username=alice&password={}&csrf_token={}", pw, csrf))
+        .body(format!(
+            "username=alice&password={}&csrf_token={}",
+            pw, csrf
+        ))
         .dispatch()
         .await;
 
@@ -286,12 +316,18 @@ async fn csrf_token_set_on_login_page() {
 
     let cookies = client.cookies();
     let csrf_cookie = cookies.get("csrf_token");
-    assert!(csrf_cookie.is_some(), "CSRF cookie should be set on login page");
+    assert!(
+        csrf_cookie.is_some(),
+        "CSRF cookie should be set on login page"
+    );
     let token = csrf_cookie.unwrap().value().to_string();
     assert_eq!(token.len(), 64, "CSRF token should be 64 characters");
 
     let body = response.into_string().await.unwrap_or_default();
-    assert!(body.contains(&token), "CSRF token should appear in the HTML form");
+    assert!(
+        body.contains(&token),
+        "CSRF token should appear in the HTML form"
+    );
 }
 
 #[tokio::test]
@@ -318,5 +354,9 @@ async fn cache_control_static_assets() {
 
     let response = client.get("/login").dispatch().await;
     let cache = response.headers().get_one("Cache-Control").unwrap_or("");
-    assert!(cache.contains("no-cache"), "HTML pages should have no-cache, got: {}", cache);
+    assert!(
+        cache.contains("no-cache"),
+        "HTML pages should have no-cache, got: {}",
+        cache
+    );
 }

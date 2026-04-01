@@ -60,7 +60,9 @@ async fn init_database(db_url: &str) -> SqlitePool {
 
 #[rocket::launch]
 async fn rocket() -> _ {
-    let _ = dotenvy::dotenv();
+    // dotenv_override so .env always wins over stale shell env vars.
+    // Log the outcome so misconfigured working directories are immediately visible.
+    let dotenv_result = dotenvy::dotenv_override();
 
     fmt()
         .with_env_filter(
@@ -68,10 +70,17 @@ async fn rocket() -> _ {
         )
         .init();
 
+    match dotenv_result {
+        Ok(path) => tracing::info!(path = %path.display(), "Loaded .env file"),
+        Err(e) => tracing::warn!("No .env file loaded ({e}); using environment variables / defaults"),
+    }
+
     let app_config = config::AppConfig::from_env();
     tracing::info!(
         data_dir = %app_config.data_dir,
         db_dir = %app_config.db_dir,
+        max_upload_bytes = app_config.max_upload_bytes,
+        default_quota_bytes = app_config.default_quota_bytes,
         "IronDrive starting up"
     );
 
@@ -93,7 +102,7 @@ async fn rocket() -> _ {
 /// Build the Rocket Figment, merging `Rocket.toml` defaults with our
 /// `IRONDRIVE_SECRET_KEY` so Rocket has a `secret_key` in release mode.
 fn rocket_figment(app_config: &config::AppConfig) -> rocket::figment::Figment {
-    use rocket::figment::providers::{Serialized, Format, Toml, Env};
+    use rocket::figment::providers::{Env, Format, Serialized, Toml};
     rocket::figment::Figment::from(rocket::Config::default())
         .merge(Toml::file("Rocket.toml").nested())
         .merge(Env::prefixed("ROCKET_").global())
@@ -107,8 +116,14 @@ pub fn security_headers_fairing() -> AdHoc {
             use rocket::http::Header;
             res.set_header(Header::new("X-Content-Type-Options", "nosniff"));
             res.set_header(Header::new("X-Frame-Options", "DENY"));
-            res.set_header(Header::new("Referrer-Policy", "strict-origin-when-cross-origin"));
-            res.set_header(Header::new("Permissions-Policy", "camera=(), microphone=(), geolocation=()"));
+            res.set_header(Header::new(
+                "Referrer-Policy",
+                "strict-origin-when-cross-origin",
+            ));
+            res.set_header(Header::new(
+                "Permissions-Policy",
+                "camera=(), microphone=(), geolocation=()",
+            ));
             res.set_header(Header::new(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
@@ -193,9 +208,7 @@ impl<'r> Responder<'r, 'static> for CatcherJsonBody {
                 _ => "errors/500",
             };
             if let Ok(template) = Template::render(template_name, context! {}).respond_to(request) {
-                return Response::build_from(template)
-                    .status(self.status)
-                    .ok();
+                return Response::build_from(template).status(self.status).ok();
             }
         }
 
@@ -282,6 +295,11 @@ async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket
         count = loaded,
         "Server-mode library keys loaded into UnlockState"
     );
+
+    // Clean up expired chunked upload sessions from previous runs.
+    if let Err(e) = services::chunk_service::cleanup_expired_uploads(&pool, cfg).await {
+        tracing::warn!(error = %e, "Failed to clean up expired chunked uploads on startup");
+    }
 
     rocket.manage(pool).manage(master_key).manage(unlock_state)
 }

@@ -1,12 +1,13 @@
 use std::path::Path;
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, OsRng};
+use aes_gcm::aead::stream::{EncryptorBE32, DecryptorBE32};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::Engine;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::db::DbPool;
@@ -24,6 +25,30 @@ const MIN_ENCRYPTED_FILE_LEN: usize = NONCE_LEN + TAG_LEN + CHECKSUM_LEN;
 
 /// Buffer size for streaming SHA-256 reads.
 const HASH_BUF_SIZE: usize = 64 * 1024;
+
+// ---------------------------------------------------------------------------
+// V2 STREAM format constants
+// ---------------------------------------------------------------------------
+//
+// On-disk layout for chunk-assembled (large) files:
+//
+//  [magic: 3 bytes 0x49 0x44 0x02] [stream_nonce: 7 bytes]
+//  [plaintext_sha256: 32 bytes]
+//  repeated per segment:
+//    [seg_payload_len: 4 bytes LE]  -- length of ciphertext+tag = plaintext_chunk_len + 16
+//    [ciphertext+tag: seg_payload_len bytes]
+//
+// The STREAM construction is STREAM-BE32 over AES-256-GCM.
+// Each segment is independently authenticated; replay/reorder attacks are
+// prevented by the BE32 counter embedded in each per-segment nonce.
+// The external nonce is 7 bytes (AES-GCM 12-byte nonce minus 5 bytes of BE32 overhead).
+
+/// Magic prefix that identifies a V2 STREAM-encrypted file.
+const STREAM_MAGIC: [u8; 3] = [0x49, 0x44, 0x02]; // "ID\x02"
+/// External nonce length for STREAM-BE32 over AES-256-GCM (12 - 5 = 7).
+const STREAM_NONCE_LEN: usize = 7;
+/// Fixed overhead per segment on disk: 4-byte length prefix.
+const STREAM_SEGMENT_HEADER_LEN: usize = 4;
 
 /// Decrypted master key, held in Rocket managed state for the server's lifetime.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -370,20 +395,66 @@ pub async fn encrypt_and_write_file(
     dest: &Path,
     write_verify: bool,
 ) -> Result<(), AppError> {
-    let blob = encrypt_file_bytes(data_key, plaintext)?;
+    encrypt_and_write_file_owned(data_key, plaintext.to_vec(), dest, write_verify).await
+}
 
-    tokio::fs::write(dest, &blob)
+/// Encrypt owned plaintext in place and write the encrypted payload to disk.
+///
+/// This avoids allocating a second full-size buffer for ciphertext, which is
+/// critical for large chunk-assembled uploads.
+pub async fn encrypt_and_write_file_owned(
+    data_key: &DataKey,
+    mut plaintext: Vec<u8>,
+    dest: &Path,
+    write_verify: bool,
+) -> Result<(), AppError> {
+    let checksum = sha256_bytes(&plaintext);
+
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(data_key.as_bytes()));
+
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let tag = cipher
+        .encrypt_in_place_detached(nonce, b"", &mut plaintext)
+        .map_err(|e| AppError::Internal(format!("File encryption failed: {e}")))?;
+
+    let mut file = tokio::fs::File::create(dest)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write encrypted file: {e}")))?;
+
+    file.write_all(&nonce_bytes)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write encrypted file nonce: {e}")))?;
+    file.write_all(&plaintext)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write encrypted file body: {e}")))?;
+    file.write_all(tag.as_slice())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write encrypted file tag: {e}")))?;
+    file.write_all(&checksum)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write encrypted file checksum: {e}")))?;
+    file.flush()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to flush encrypted file: {e}")))?;
+    file.sync_data()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to sync encrypted file to disk: {e}")))?;
 
     if write_verify {
         let readback = tokio::fs::read(dest).await.map_err(|e| {
             AppError::Internal(format!("Write-verify: failed to read back file: {e}"))
         })?;
 
-        if readback != blob {
+        // Validate by decrypting and comparing checksums instead of allocating
+        // a second expected encrypted blob of the same size.
+        let decrypted = decrypt_file_bytes(data_key, &readback)?;
+        let readback_checksum = sha256_bytes(&decrypted);
+        if readback_checksum != checksum {
             return Err(AppError::Internal(
-                "Write-verify failed: file on disk does not match what was written".to_string(),
+                "Write-verify failed: decrypted checksum mismatch after write".to_string(),
             ));
         }
     }
@@ -391,13 +462,401 @@ pub async fn encrypt_and_write_file(
     Ok(())
 }
 
-/// Read an encrypted file from disk and decrypt it, verifying the checksum.
-pub async fn read_and_decrypt_file(data_key: &DataKey, path: &Path) -> Result<Vec<u8>, AppError> {
-    let blob = tokio::fs::read(path)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to read encrypted file: {e}")))?;
+// ---------------------------------------------------------------------------
+// V2 STREAM encrypt / decrypt (chunk-file streaming, O(segment) RAM)
+// ---------------------------------------------------------------------------
 
-    decrypt_file_bytes(data_key, &blob)
+/// Encrypt a sequence of on-disk chunk files into a single V2 STREAM file.
+///
+/// Each chunk file is read one at a time, encrypted with a fresh STREAM segment,
+/// and written to `dest` before the next chunk is loaded. Peak RAM usage is
+/// bounded by a single chunk buffer plus one segment's tag overhead.
+///
+/// `total_plaintext_bytes` is the expected total across all chunks and is used
+/// only for a size sanity check.
+///
+/// `write_verify` causes a full streaming re-decrypt of the written file and
+/// compares the SHA-256 against `expected_checksum`.
+pub async fn stream_encrypt_chunks_to_file(
+    data_key: &DataKey,
+    chunk_paths: &[std::path::PathBuf],
+    total_plaintext_bytes: u64,
+    expected_checksum: Option<&[u8; CHECKSUM_LEN]>,
+    dest: &Path,
+    write_verify: bool,
+) -> Result<[u8; CHECKSUM_LEN], AppError> {
+    // Generate a random 7-byte external stream nonce.
+    let mut stream_nonce = [0u8; STREAM_NONCE_LEN];
+    OsRng.fill_bytes(&mut stream_nonce);
+
+    // We need the plaintext SHA-256 before we begin writing (it goes in the
+    // header). We compute it by streaming through the chunk files once first.
+    // This costs one extra sequential disk I/O pass but no extra RAM.
+    let plaintext_checksum = sha256_chunks(chunk_paths, total_plaintext_bytes).await?;
+
+    if let Some(expected) = expected_checksum {
+        if &plaintext_checksum != expected {
+            return Err(AppError::Validation(
+                "Assembled file checksum mismatch; upload rejected.".into(),
+            ));
+        }
+    }
+
+    // Open the output file.
+    let mut out = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to create encrypted file: {e}")))?;
+
+    // Write header: magic (3) + stream nonce (7) + plaintext SHA-256 (32).
+    out.write_all(&STREAM_MAGIC)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write STREAM magic: {e}")))?;
+    out.write_all(&stream_nonce)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write STREAM nonce: {e}")))?;
+    out.write_all(&plaintext_checksum)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write STREAM checksum: {e}")))?;
+
+    // Build the STREAM encryptor.
+    let key = Key::<Aes256Gcm>::from_slice(data_key.as_bytes());
+    let nonce_ga = aes_gcm::aead::generic_array::GenericArray::from_slice(&stream_nonce);
+    // Wrap in Option so we can move out of it for encrypt_last_in_place (which takes self).
+    let mut encryptor: Option<EncryptorBE32<Aes256Gcm>> =
+        Some(EncryptorBE32::<Aes256Gcm>::new(key, nonce_ga));
+
+    let total = chunk_paths.len();
+    for (i, path) in chunk_paths.iter().enumerate() {
+        let mut buf = tokio::fs::read(path)
+            .await
+            .map_err(|_| AppError::Validation(format!("Missing chunk {}.", i)))?;
+
+        let is_last = i + 1 == total;
+        if is_last {
+            encryptor
+                .take()
+                .expect("encryptor consumed before last chunk")
+                .encrypt_last_in_place(b"", &mut buf)
+                .map_err(|e| AppError::Internal(format!("STREAM encrypt last segment failed: {e}")))?;
+        } else {
+            encryptor
+                .as_mut()
+                .expect("encryptor already consumed")
+                .encrypt_next_in_place(b"", &mut buf)
+                .map_err(|e| AppError::Internal(format!("STREAM encrypt segment {i} failed: {e}")))?;
+        }
+
+        // Write 4-byte LE segment length then the ciphertext+tag.
+        let seg_len = buf.len() as u32;
+        out.write_all(&seg_len.to_le_bytes())
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to write segment header: {e}")))?;
+        out.write_all(&buf)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to write segment body: {e}")))?;
+    }
+
+    out.flush()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to flush encrypted file: {e}")))?;
+    out.sync_data()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to sync encrypted file to disk: {e}")))?;
+    drop(out);
+
+    if write_verify {
+        let verified_checksum = stream_decrypt_file_checksum_only(data_key, dest).await?;
+        if verified_checksum != plaintext_checksum {
+            return Err(AppError::Internal(
+                "Write-verify failed: decrypted checksum mismatch after STREAM write".to_string(),
+            ));
+        }
+    }
+
+    Ok(plaintext_checksum)
+}
+
+/// Read and decrypt a V2 STREAM-encrypted file, returning all plaintext.
+pub async fn stream_decrypt_file(
+    data_key: &DataKey,
+    path: &Path,
+) -> Result<Vec<u8>, AppError> {
+    let (plaintext, stored_checksum) = stream_decrypt_file_inner(data_key, path).await?;
+
+    let computed = sha256_bytes(&plaintext);
+    if computed != stored_checksum {
+        return Err(AppError::Internal(
+            "STREAM file checksum mismatch after decryption — data corrupted".to_string(),
+        ));
+    }
+
+    Ok(plaintext)
+}
+
+/// Verify a V2 STREAM file's integrity without materialising the full plaintext.
+///
+/// Decrypts each segment, feeds it into a SHA-256 hasher, and immediately
+/// drops the plaintext — so peak RAM is bounded to one segment buffer.
+/// Returns the computed checksum so callers can compare it if needed.
+pub async fn stream_decrypt_file_checksum_only(
+    data_key: &DataKey,
+    path: &Path,
+) -> Result<[u8; CHECKSUM_LEN], AppError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to open STREAM file for verify: {e}")))?;
+
+    let header_len = STREAM_MAGIC.len() + STREAM_NONCE_LEN + CHECKSUM_LEN;
+    let mut header_buf = vec![0u8; header_len];
+    file.read_exact(&mut header_buf)
+        .await
+        .map_err(|_| AppError::Internal("STREAM file too small to contain header".into()))?;
+
+    if header_buf[..3] != STREAM_MAGIC {
+        return Err(AppError::Internal("STREAM file has wrong magic bytes".into()));
+    }
+
+    let stream_nonce = &header_buf[3..3 + STREAM_NONCE_LEN];
+    let stored_checksum: [u8; CHECKSUM_LEN] = header_buf[3 + STREAM_NONCE_LEN..header_len]
+        .try_into()
+        .expect("slice length guaranteed by header_len check");
+
+    let key = Key::<Aes256Gcm>::from_slice(data_key.as_bytes());
+    let nonce_ga = aes_gcm::aead::generic_array::GenericArray::from_slice(stream_nonce);
+    let mut decryptor = DecryptorBE32::<Aes256Gcm>::new(key, nonce_ga);
+
+    let mut hasher = Sha256::new();
+    let mut pending: Option<Vec<u8>> = None;
+    let mut seg_len_buf = [0u8; 4];
+
+    loop {
+        // Try to read the next segment header (4 bytes).
+        match file.read_exact(&mut seg_len_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // End of file — flush pending segment as last.
+                if let Some(mut seg) = pending.take() {
+                    decryptor
+                        .decrypt_last_in_place(b"", &mut seg)
+                        .map_err(|_| AppError::Internal(
+                            "STREAM verify: decrypt last segment failed".into(),
+                        ))?;
+                    hasher.update(&seg);
+                }
+                break;
+            }
+            Err(e) => {
+                return Err(AppError::Internal(format!(
+                    "STREAM verify: failed to read segment header: {e}"
+                )));
+            }
+        }
+
+        let seg_len = u32::from_le_bytes(seg_len_buf) as usize;
+        let mut seg_data = vec![0u8; seg_len];
+        file.read_exact(&mut seg_data)
+            .await
+            .map_err(|e| AppError::Internal(format!(
+                "STREAM verify: truncated segment body: {e}"
+            )))?;
+
+        // Decrypt the previously pending segment as a non-last segment.
+        if let Some(mut prev) = pending.take() {
+            decryptor
+                .decrypt_next_in_place(b"", &mut prev)
+                .map_err(|_| AppError::Internal(
+                    "STREAM verify: decrypt segment failed".into(),
+                ))?;
+            hasher.update(&prev);
+        }
+
+        pending = Some(seg_data);
+    }
+
+    let computed: [u8; CHECKSUM_LEN] = hasher.finalize().into();
+    if computed != stored_checksum {
+        return Err(AppError::Internal(
+            "STREAM file checksum mismatch — data corrupted".to_string(),
+        ));
+    }
+
+    Ok(computed)
+}
+
+/// Internal: parse and decrypt a V2 STREAM file, returning `(plaintext, stored_checksum)`.
+async fn stream_decrypt_file_inner(
+    data_key: &DataKey,
+    path: &Path,
+) -> Result<(Vec<u8>, [u8; CHECKSUM_LEN]), AppError> {
+    let raw = tokio::fs::read(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read STREAM encrypted file: {e}")))?;
+
+    let header_len = STREAM_MAGIC.len() + STREAM_NONCE_LEN + CHECKSUM_LEN;
+    if raw.len() < header_len {
+        return Err(AppError::Internal(
+            "STREAM file too small to contain header".into(),
+        ));
+    }
+
+    if raw[..3] != STREAM_MAGIC {
+        return Err(AppError::Internal(
+            "STREAM file has wrong magic bytes".into(),
+        ));
+    }
+
+    let stream_nonce = &raw[3..3 + STREAM_NONCE_LEN];
+    let stored_checksum: [u8; CHECKSUM_LEN] = raw
+        [3 + STREAM_NONCE_LEN..header_len]
+        .try_into()
+        .expect("slice length guaranteed by header_len check");
+
+    let key = Key::<Aes256Gcm>::from_slice(data_key.as_bytes());
+    let nonce_ga = aes_gcm::aead::generic_array::GenericArray::from_slice(stream_nonce);
+    let mut decryptor = DecryptorBE32::<Aes256Gcm>::new(key, nonce_ga);
+
+    // Walk the segment list and accumulate plaintext.
+    let mut plaintext = Vec::new();
+    let mut pos = header_len;
+
+    // We track whether we've seen any segment at all so we can call
+    // decrypt_last on the final one.
+    let mut pending: Option<Vec<u8>> = None;
+    let mut is_first_iter = true;
+
+    loop {
+        if pos == raw.len() {
+            // End of file — flush the pending segment as the last.
+            if let Some(mut seg) = pending.take() {
+                decryptor
+                    .decrypt_last_in_place(b"", &mut seg)
+                    .map_err(|_| AppError::Internal(
+                        "STREAM decrypt last segment failed — wrong key or tampered data".into(),
+                    ))?;
+                plaintext.extend_from_slice(&seg);
+            } else if is_first_iter {
+                // Zero-segment file — unusual but valid (empty upload).
+            }
+            break;
+        }
+        is_first_iter = false;
+
+        if pos + STREAM_SEGMENT_HEADER_LEN > raw.len() {
+            return Err(AppError::Internal(
+                "STREAM file truncated inside segment header".into(),
+            ));
+        }
+        let seg_len = u32::from_le_bytes(
+            raw[pos..pos + 4].try_into().expect("slice is 4 bytes"),
+        ) as usize;
+        pos += STREAM_SEGMENT_HEADER_LEN;
+
+        if pos + seg_len > raw.len() {
+            return Err(AppError::Internal(
+                "STREAM file truncated inside segment body".into(),
+            ));
+        }
+        let seg_data = raw[pos..pos + seg_len].to_vec();
+        pos += seg_len;
+
+        // Decrypt the previously pending segment as a non-last segment.
+        if let Some(mut prev) = pending.take() {
+            decryptor
+                .decrypt_next_in_place(b"", &mut prev)
+                .map_err(|_| AppError::Internal(
+                    "STREAM decrypt segment failed — wrong key or tampered data".into(),
+                ))?;
+            plaintext.extend_from_slice(&prev);
+        }
+
+        pending = Some(seg_data);
+    }
+
+    Ok((plaintext, stored_checksum))
+}
+
+/// Check whether a file on disk uses the V2 STREAM format.
+pub async fn is_stream_format(path: &Path) -> bool {
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 3];
+    matches!(file.read_exact(&mut magic).await, Ok(_)) && magic == STREAM_MAGIC
+}
+
+/// Compute SHA-256 over a sequence of chunk files without loading them all at once.
+async fn sha256_chunks(
+    paths: &[std::path::PathBuf],
+    total_plaintext_bytes: u64,
+) -> Result<[u8; CHECKSUM_LEN], AppError> {
+    let mut hasher = Sha256::new();
+    let mut total_read: u64 = 0;
+
+    for path in paths {
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to open chunk for hashing: {e}")))?;
+
+        let mut buf = vec![0u8; HASH_BUF_SIZE];
+        loop {
+            let n = file.read(&mut buf).await.map_err(|e| {
+                AppError::Internal(format!("Failed to read chunk for hashing: {e}"))
+            })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total_read += n as u64;
+        }
+    }
+
+    if total_read != total_plaintext_bytes {
+        return Err(AppError::Internal(format!(
+            "Checksum pass size mismatch: expected {total_plaintext_bytes} bytes, read {total_read}"
+        )));
+    }
+
+    Ok(hasher.finalize().into())
+}
+
+/// Verify integrity of any encrypted file (V1 or V2 STREAM) without returning plaintext.
+pub async fn verify_file_integrity_async(
+    data_key: &DataKey,
+    path: &Path,
+) -> IntegrityStatus {
+    if is_stream_format(path).await {
+        match stream_decrypt_file_checksum_only(data_key, path).await {
+            Ok(_) => IntegrityStatus::Ok,
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("checksum mismatch") {
+                    IntegrityStatus::ChecksumMismatch
+                } else {
+                    IntegrityStatus::DecryptionFailed(msg)
+                }
+            }
+        }
+    } else {
+        match tokio::fs::read(path).await {
+            Ok(blob) => verify_file_integrity(data_key, &blob),
+            Err(e) => IntegrityStatus::DecryptionFailed(format!("read error: {e}")),
+        }
+    }
+}
+
+/// Read and decrypt any encrypted file (V1 monolithic or V2 STREAM).
+pub async fn read_and_decrypt_file(data_key: &DataKey, path: &Path) -> Result<Vec<u8>, AppError> {
+    if is_stream_format(path).await {
+        stream_decrypt_file(data_key, path).await
+    } else {
+        let blob = tokio::fs::read(path)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to read encrypted file: {e}")))?;
+        decrypt_file_bytes(data_key, &blob)
+    }
 }
 
 // ---------------------------------------------------------------------------

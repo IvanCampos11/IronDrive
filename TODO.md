@@ -24,7 +24,7 @@
 | **M4** | Setup Wizard + Library | `POST /auth/setup-library`, personal library creation (server mode), `SetupGuard` | ✅ Complete |
 | **M5** | Filesystem Service | `fs_service` + library routes — browse, upload, download, mkdir, rename, delete (all encrypted + checksummed) | ✅ Complete |
 | **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings, sidebar nav | ✅ Complete |
-| **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ⬜ Not started |
+| **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | 🔨 In progress |
 | **M5.6** | Data Integrity | `integrity_service`, integrity events table, corruption detection + notifications | ⬜ Not started |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ⬜ Not started |
 | **M6** | Groups | Group CRUD + membership | ⬜ Not started |
@@ -268,23 +268,23 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 
 ### M5.5 — Chunked Transfers
 
-- [ ] Create `data/.chunks/` staging dir on startup
-- [ ] `src/services/chunk_service.rs`:
-  - [ ] `init_upload()` — create `chunked_uploads` row + staging dir, return `upload_id`
-  - [ ] `receive_chunk()` — validate index + size, encrypt chunk, write to staging
-  - [ ] `complete_upload()` — assemble chunks → single encrypted file with checksum, verify, move to target, clean up staging
-  - [ ] `cancel_upload()` — nuke staging dir + DB row
-  - [ ] `init_download()` — stat file, compute chunk boundaries, generate short-lived token
-  - [ ] `serve_chunk()` — read chunk range from encrypted file, decrypt, stream
-- [ ] `006_create_chunked_uploads.sql` migration
-- [ ] Chunked upload/download routes in `src/routes/library.rs`
+- [x] Create `data/.chunks/` staging dir on startup
+- [x] `src/services/chunk_service.rs`:
+  - [x] `init_upload()` — create `chunked_uploads` row + staging dir, return `upload_id`
+  - [x] `receive_chunk()` — validate index + size, write to staging
+  - [x] `complete_upload()` — assemble chunks, verify checksum, persist encrypted file, clean up staging
+  - [x] `cancel_upload()` — nuke staging dir + DB row
+  - [x] `init_download()` — resolve file/chunks and generate short-lived token
+  - [x] `serve_chunk()` — token-validated chunk serving from decrypted payload
+- [x] `006_create_chunked_uploads.sql` migration
+- [x] Chunked upload/download routes in `src/routes/library.rs`
 - [ ] Chunked upload/download routes in `src/routes/spaces.rs`
-- [ ] Tests:
-  - [ ] Chunked upload → download roundtrip
-  - [ ] Parallel chunk upload ordering
-  - [ ] Incomplete upload → cancel → verify cleanup happened
-  - [ ] Checksum mismatch on assembly → reject
-  - [ ] Small file falls through to single-request path
+- [x] Tests:
+  - [x] Chunked upload → download roundtrip
+  - [x] Parallel chunk upload ordering
+  - [x] Incomplete upload → cancel → verify cleanup happened
+  - [x] Checksum mismatch on assembly → reject
+  - [x] Small file falls through to single-request path
 
 ### M5.6 — Data Integrity
 

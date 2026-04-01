@@ -2,9 +2,9 @@ use rocket::form::Form;
 use rocket::http::{Cookie, CookieJar, SameSite, Status};
 use rocket::request::FlashMessage;
 use rocket::response::{Flash, Redirect};
+use rocket::serde::json::serde_json;
 use rocket::Route;
 use rocket::State;
-use rocket::serde::json::serde_json;
 use rocket_dyn_templates::{context, Template};
 
 use crate::config::AppConfig;
@@ -13,10 +13,10 @@ use crate::errors::AppError;
 use crate::guards::csrf_guard::{ensure_csrf_token, validate_csrf, CsrfXhr};
 use crate::guards::session_guard::{SessionSetupComplete, SessionUser, COOKIE_NAME};
 use crate::models::library::PersonalLibrary;
-use crate::services::{auth_service, fs_service, library_service};
 use crate::services::crypto_service::MasterKey;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
+use crate::services::{auth_service, chunk_service, fs_service, library_service};
 
 // ---------------------------------------------------------------------------
 // Form structs
@@ -58,6 +58,14 @@ pub struct RenameForm {
 }
 
 #[derive(FromForm)]
+pub struct MoveForm {
+    pub old_path: String,
+    pub target_dir: String,
+    pub return_path: Option<String>,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
 pub struct DeleteForm {
     pub path: String,
     pub csrf_token: String,
@@ -66,6 +74,26 @@ pub struct DeleteForm {
 #[derive(serde::Deserialize)]
 pub struct BulkDeleteRequest {
     pub paths: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BulkMoveRequest {
+    pub paths: Vec<String>,
+    pub target_dir: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChunkedInitRequest {
+    pub path: String,
+    pub total_chunks: u32,
+    pub total_bytes: u64,
+    pub checksum_sha256: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChunkedCompleteRequest {
+    pub upload_id: String,
+    pub verify: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,8 +186,12 @@ pub async fn login_submit(
     client_ip: ClientIp,
     form: Form<LoginForm>,
 ) -> Result<Redirect, Flash<Redirect>> {
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(uri!(login_page)), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(login_page)),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     if !rate_limiter.check(&format!("login:{}", client_ip.0), 10, 900) {
         return Err(Flash::error(
@@ -168,14 +200,16 @@ pub async fn login_submit(
         ));
     }
 
-    let result = auth_service::login(pool.inner(), config.inner(), &form.username, &form.password)
-        .await;
+    let result =
+        auth_service::login(pool.inner(), config.inner(), &form.username, &form.password).await;
 
     match result {
         Ok(login_result) => {
             set_session_cookie(cookies, &login_result.token);
             if login_result.setup_complete {
-                Ok(Redirect::to(uri!(files_page(path = Option::<String>::None))))
+                Ok(Redirect::to(uri!(files_page(
+                    path = Option::<String>::None
+                ))))
             } else {
                 Ok(Redirect::to(uri!(setup_page)))
             }
@@ -218,8 +252,12 @@ pub async fn register_submit(
     client_ip: ClientIp,
     form: Form<RegisterForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(uri!(register_page)), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(register_page)),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     if !rate_limiter.check(&format!("register:{}", client_ip.0), 5, 900) {
         return Err(Flash::error(
@@ -248,12 +286,8 @@ pub async fn register_submit(
             Redirect::to(uri!(login_page)),
             "Account created! Please log in.",
         )),
-        Err(AppError::Conflict(msg)) => {
-            Err(Flash::error(Redirect::to(uri!(register_page)), msg))
-        }
-        Err(AppError::Validation(msg)) => {
-            Err(Flash::error(Redirect::to(uri!(register_page)), msg))
-        }
+        Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(uri!(register_page)), msg)),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(uri!(register_page)), msg)),
         Err(_) => Err(Flash::error(
             Redirect::to(uri!(register_page)),
             "Registration failed. Please try again.",
@@ -294,7 +328,9 @@ pub async fn setup_page(
     flash: Option<FlashMessage<'_>>,
 ) -> Result<Template, Redirect> {
     if user.0.setup_complete {
-        return Err(Redirect::to(uri!(files_page(path = Option::<String>::None))));
+        return Err(Redirect::to(uri!(files_page(
+            path = Option::<String>::None
+        ))));
     }
     let csrf_token = ensure_csrf_token(cookies);
     Ok(Template::render(
@@ -319,11 +355,17 @@ pub async fn setup_submit(
     user: SessionUser,
     form: Form<CsrfOnlyForm>,
 ) -> Result<Redirect, Flash<Redirect>> {
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(uri!(setup_page)), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(setup_page)),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     if user.0.setup_complete {
-        return Ok(Redirect::to(uri!(files_page(path = Option::<String>::None))));
+        return Ok(Redirect::to(uri!(files_page(
+            path = Option::<String>::None
+        ))));
     }
 
     match library_service::setup_library(
@@ -335,7 +377,9 @@ pub async fn setup_submit(
     )
     .await
     {
-        Ok(_) => Ok(Redirect::to(uri!(files_page(path = Option::<String>::None)))),
+        Ok(_) => Ok(Redirect::to(uri!(files_page(
+            path = Option::<String>::None
+        )))),
         Err(_) => Err(Flash::error(
             Redirect::to(uri!(setup_page)),
             "Library setup failed. Please try again.",
@@ -365,13 +409,18 @@ pub async fn files_page(
 
     let user_path = path.as_deref().unwrap_or("");
 
-    let entries =
-        match fs_service::list_directory(config.inner(), unlock_state.inner(), &lib.id, user_path, false)
-            .await
-        {
-            Ok(e) => e,
-            Err(_) => Vec::new(),
-        };
+    let entries = match fs_service::list_directory(
+        config.inner(),
+        unlock_state.inner(),
+        &lib.id,
+        user_path,
+        false,
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(_) => Vec::new(),
+    };
 
     // Build breadcrumb segments
     let breadcrumbs = build_breadcrumbs(user_path);
@@ -402,6 +451,8 @@ pub async fn files_page(
         context! {
             user: &user.0.username,
             csrf_token: csrf_token,
+            chunk_size_bytes: config.chunk_size_bytes,
+            max_parallel_chunks: config.max_parallel_chunks,
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
@@ -427,10 +478,15 @@ pub async fn files_partial(
 
     let user_path = path.as_deref().unwrap_or("");
 
-    let entries =
-        fs_service::list_directory(config.inner(), unlock_state.inner(), &lib.id, user_path, false)
-            .await
-            .unwrap_or_default();
+    let entries = fs_service::list_directory(
+        config.inner(),
+        unlock_state.inner(),
+        &lib.id,
+        user_path,
+        false,
+    )
+    .await
+    .unwrap_or_default();
 
     let breadcrumbs = build_breadcrumbs(user_path);
 
@@ -463,6 +519,58 @@ pub async fn files_partial(
     ))
 }
 
+/// GET /files/folders?<path> — session-auth folder listing for move modal
+#[get("/files/folders?<path>")]
+pub async fn files_folders(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: Option<String>,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    let user_path = path.as_deref().unwrap_or("");
+
+    let entries = fs_service::list_directory(
+        config.inner(),
+        unlock_state.inner(),
+        &lib.id,
+        user_path,
+        false,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let folders: Vec<serde_json::Value> = entries
+        .into_iter()
+        .filter(|e| e.is_dir)
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+            })
+        })
+        .collect();
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "path": user_path,
+        "entries": folders,
+    })))
+}
+
 // ---------------------------------------------------------------------------
 // File operations (form-based for HTMX)
 // ---------------------------------------------------------------------------
@@ -476,12 +584,21 @@ pub async fn mkdir_submit(
     user: SessionSetupComplete,
     form: Form<MkdirForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Some(form.path.clone())))), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(files_page(path = Some(form.path.clone())))),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Some(form.path.clone())))), "Library not found."))?;
+        .map_err(|_| {
+            Flash::error(
+                Redirect::to(uri!(files_page(path = Some(form.path.clone())))),
+                "Library not found.",
+            )
+        })?;
 
     let full_path = if form.path.is_empty() {
         form.name.clone()
@@ -518,12 +635,21 @@ pub async fn rename_submit(
     user: SessionSetupComplete,
     form: Form<RenameForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
+        .map_err(|_| {
+            Flash::error(
+                Redirect::to(uri!(files_page(path = Option::<String>::None))),
+                "Library not found.",
+            )
+        })?;
 
     // Compute parent dir and new full path
     let parent = parent_path(&form.old_path);
@@ -535,16 +661,97 @@ pub async fn rename_submit(
 
     match fs_service::rename_entry(config.inner(), &lib.id, &form.old_path, &new_path).await {
         Ok(_) => Ok(Flash::success(
-            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            Redirect::to(uri!(files_page(
+                path = if parent.is_empty() {
+                    None
+                } else {
+                    Some(parent)
+                }
+            ))),
             format!("Renamed to \"{}\".", form.new_name),
         )),
         Err(AppError::Validation(msg)) => Err(Flash::error(
-            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            Redirect::to(uri!(files_page(
+                path = if parent.is_empty() {
+                    None
+                } else {
+                    Some(parent)
+                }
+            ))),
             msg,
         )),
         Err(_) => Err(Flash::error(
-            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            Redirect::to(uri!(files_page(
+                path = if parent.is_empty() {
+                    None
+                } else {
+                    Some(parent)
+                }
+            ))),
             "Rename failed.",
+        )),
+    }
+}
+
+/// POST /files/move
+#[post("/files/move", data = "<form>")]
+pub async fn move_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    form: Form<MoveForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Invalid request. Please try again.",
+        )
+    })?;
+
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            Flash::error(
+                Redirect::to(uri!(files_page(path = Option::<String>::None))),
+                "Library not found.",
+            )
+        })?;
+
+    let name = file_name_from_path(&form.old_path);
+    if name.is_empty() {
+        return Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Invalid source path.",
+        ));
+    }
+
+    let target_dir = normalize_dir_path(&form.target_dir);
+    let new_path = join_dir_and_name(&target_dir, &name);
+
+    let return_dir = normalize_dir_path(form.return_path.as_deref().unwrap_or(""));
+    let redirect_path = if return_dir.is_empty() {
+        None
+    } else {
+        Some(return_dir)
+    };
+
+    match fs_service::rename_entry(config.inner(), &lib.id, &form.old_path, &new_path).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(uri!(files_page(path = redirect_path))),
+            "Moved successfully.",
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            msg,
+        )),
+        Err(AppError::Conflict(msg)) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            msg,
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Move failed.",
         )),
     }
 }
@@ -558,22 +765,43 @@ pub async fn delete_submit(
     user: SessionSetupComplete,
     form: Form<DeleteForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(files_page(path = Option::<String>::None))),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
+        .map_err(|_| {
+            Flash::error(
+                Redirect::to(uri!(files_page(path = Option::<String>::None))),
+                "Library not found.",
+            )
+        })?;
 
     let parent = parent_path(&form.path);
 
     match fs_service::delete_entry(config.inner(), &lib.id, &form.path).await {
         Ok(_) => Ok(Flash::success(
-            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            Redirect::to(uri!(files_page(
+                path = if parent.is_empty() {
+                    None
+                } else {
+                    Some(parent)
+                }
+            ))),
             "Deleted successfully.",
         )),
         Err(_) => Err(Flash::error(
-            Redirect::to(uri!(files_page(path = if parent.is_empty() { None } else { Some(parent) }))),
+            Redirect::to(uri!(files_page(
+                path = if parent.is_empty() {
+                    None
+                } else {
+                    Some(parent)
+                }
+            ))),
             "Delete failed.",
         )),
     }
@@ -590,11 +818,17 @@ pub async fn bulk_delete(
 ) -> rocket::serde::json::Json<serde_json::Value> {
     let lib = match require_library(pool.inner(), &user.0.id).await {
         Ok(l) => l,
-        Err(_) => return rocket::serde::json::Json(serde_json::json!({"deleted": 0, "errors": ["Library not found."]})),
+        Err(_) => {
+            return rocket::serde::json::Json(
+                serde_json::json!({"deleted": 0, "errors": ["Library not found."]}),
+            )
+        }
     };
 
     if data.paths.is_empty() || data.paths.len() > 500 {
-        return rocket::serde::json::Json(serde_json::json!({"deleted": 0, "errors": ["Invalid number of paths (1–500)."]}));
+        return rocket::serde::json::Json(
+            serde_json::json!({"deleted": 0, "errors": ["Invalid number of paths (1–500)."]}),
+        );
     }
 
     let mut deleted = 0u32;
@@ -613,6 +847,54 @@ pub async fn bulk_delete(
     }))
 }
 
+/// POST /files/bulk-move — XHR JSON endpoint for multi-file/folder move
+#[post("/files/bulk-move", data = "<data>")]
+pub async fn bulk_move(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    data: rocket::serde::json::Json<BulkMoveRequest>,
+) -> rocket::serde::json::Json<serde_json::Value> {
+    let lib = match require_library(pool.inner(), &user.0.id).await {
+        Ok(l) => l,
+        Err(_) => {
+            return rocket::serde::json::Json(
+                serde_json::json!({"moved": 0, "errors": ["Library not found."]}),
+            )
+        }
+    };
+
+    if data.paths.is_empty() || data.paths.len() > 500 {
+        return rocket::serde::json::Json(
+            serde_json::json!({"moved": 0, "errors": ["Invalid number of paths (1–500)."]}),
+        );
+    }
+
+    let target_dir = normalize_dir_path(&data.target_dir);
+    let mut moved = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    for old_path in &data.paths {
+        let name = file_name_from_path(old_path);
+        if name.is_empty() {
+            errors.push(format!("{}: Invalid source path.", old_path));
+            continue;
+        }
+
+        let new_path = join_dir_and_name(&target_dir, &name);
+        match fs_service::rename_entry(config.inner(), &lib.id, old_path, &new_path).await {
+            Ok(_) => moved += 1,
+            Err(e) => errors.push(format!("{}: {}", old_path, e)),
+        }
+    }
+
+    rocket::serde::json::Json(serde_json::json!({
+        "moved": moved,
+        "errors": errors,
+    }))
+}
+
 /// POST /files/upload?<path> — receives raw file data from XHR
 #[post("/files/upload?<path>", data = "<data>")]
 pub async fn upload_file(
@@ -623,32 +905,52 @@ pub async fn upload_file(
     user: SessionSetupComplete,
     path: String,
     data: rocket::data::Data<'_>,
-) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
     use rocket::data::ToByteUnit;
 
     let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map_err(|_| (Status::NotFound, rocket::serde::json::Json(serde_json::json!({"error": "Library not found."}))))?;
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
 
     let max_bytes = config.max_upload_bytes;
     let hard_cap: u64 = 50 * 1024 * 1024;
     let allowed = std::cmp::min(max_bytes, hard_cap);
-    let stream = data
-        .open(allowed.bytes())
-        .into_bytes()
-        .await
-        .map_err(|e| (Status::InternalServerError, rocket::serde::json::Json(serde_json::json!({"error": format!("Read failed: {e}")}))))?;
+    let stream = data.open(allowed.bytes()).into_bytes().await.map_err(|e| {
+        (
+            Status::InternalServerError,
+            rocket::serde::json::Json(serde_json::json!({"error": format!("Read failed: {e}")})),
+        )
+    })?;
 
     if !stream.is_complete() {
         return Err((
             Status::PayloadTooLarge,
-            rocket::serde::json::Json(serde_json::json!({"error": format!("File exceeds maximum size of {} bytes.", allowed)})),
+            rocket::serde::json::Json(
+                serde_json::json!({"error": format!("File exceeds maximum size of {} bytes.", allowed)}),
+            ),
         ));
     }
 
     let bytes = stream.into_inner();
 
-    match fs_service::upload_file(config.inner(), unlock_state.inner(), &lib.id, &path, &bytes, false).await {
+    match fs_service::upload_file(
+        config.inner(),
+        unlock_state.inner(),
+        &lib.id,
+        &path,
+        &bytes,
+        false,
+    )
+    .await
+    {
         Ok(result) => Ok(rocket::serde::json::Json(serde_json::json!({
             "success": true,
             "path": result.path,
@@ -664,6 +966,326 @@ pub async fn upload_file(
     }
 }
 
+/// POST /files/chunked/init — starts a chunked upload session for the browser UI.
+#[post("/files/chunked/init", data = "<body>")]
+pub async fn chunked_init_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<ChunkedInitRequest>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    let result = chunk_service::init_upload(
+        pool.inner(),
+        config.inner(),
+        chunk_service::InitUploadParams {
+            user_id: user.0.id.clone(),
+            library_id: lib.id,
+            target_path: body.path.clone(),
+            total_chunks: body.total_chunks,
+            total_bytes: body.total_bytes,
+            checksum_sha256: body.checksum_sha256.clone(),
+        },
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(
+            user = %user.0.id,
+            path = %body.path,
+            total_bytes = body.total_bytes,
+            total_chunks = body.total_chunks,
+            chunk_size_bytes = config.chunk_size_bytes,
+            max_upload_bytes = config.max_upload_bytes,
+            error = %e,
+            "chunked init rejected"
+        );
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "upload_id": result.upload_id,
+        "chunk_size_bytes": result.chunk_size_bytes,
+        "total_chunks": result.total_chunks,
+        "total_bytes": result.total_bytes,
+        "expires_at": result.expires_at,
+    })))
+}
+
+/// PUT /files/chunked/upload/<upload_id>/<chunk_index> — receives one chunk.
+#[put("/files/chunked/upload/<upload_id>/<chunk_index>", data = "<data>")]
+pub async fn chunked_receive_chunk(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    upload_id: &str,
+    chunk_index: u32,
+    data: rocket::data::Data<'_>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    use rocket::data::ToByteUnit;
+
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    let allowed = (config.chunk_size_bytes + 1).bytes();
+    let stream = data.open(allowed).into_bytes().await.map_err(|e| {
+        (
+            Status::InternalServerError,
+            rocket::serde::json::Json(
+                serde_json::json!({"error": format!("Failed to read chunk data: {e}")}),
+            ),
+        )
+    })?;
+
+    if !stream.is_complete() {
+        return Err((
+            Status::PayloadTooLarge,
+            rocket::serde::json::Json(serde_json::json!({
+                "error": format!("Chunk exceeds the maximum chunk size of {} bytes.", config.chunk_size_bytes)
+            })),
+        ));
+    }
+
+    let result = chunk_service::receive_chunk(
+        pool.inner(),
+        config.inner(),
+        &user.0.id,
+        &lib.id,
+        upload_id,
+        chunk_index,
+        &stream.into_inner(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "upload_id": result.upload_id,
+        "chunk_index": result.chunk_index,
+        "received_chunks": result.received_chunks,
+        "total_chunks": result.total_chunks,
+    })))
+}
+
+/// POST /files/chunked/complete — assembles and persists a chunked upload.
+#[post("/files/chunked/complete", data = "<body>")]
+pub async fn chunked_complete_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<ChunkedCompleteRequest>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    let result = chunk_service::complete_upload(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &lib.id,
+        &body.upload_id,
+        body.verify.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "success": true,
+        "path": result.path,
+        "size": result.size,
+        "disk_size": result.disk_size,
+        "checksum_sha256": result.checksum_sha256,
+        "mime_type": result.mime_type,
+    })))
+}
+
+/// DELETE /files/chunked/cancel?upload_id=<id> — cancels a chunked upload.
+#[delete("/files/chunked/cancel?<upload_id>")]
+pub async fn chunked_cancel_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    upload_id: String,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    chunk_service::cancel_upload(
+        pool.inner(),
+        config.inner(),
+        &user.0.id,
+        &lib.id,
+        &upload_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "success": true,
+        "upload_id": upload_id,
+    })))
+}
+
+/// GET /files/chunked/download/init?<path> — initialize chunked browser download.
+#[get("/files/chunked/download/init?<path>")]
+pub async fn chunked_init_download(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    path: String,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
+    let result = chunk_service::init_download(
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &lib.id,
+        &path,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "token": result.token,
+        "filename": result.filename,
+        "mime_type": result.mime_type,
+        "chunk_size_bytes": result.chunk_size_bytes,
+        "total_chunks": result.total_chunks,
+        "total_bytes": result.total_bytes,
+        "expires_at": result.expires_at,
+    })))
+}
+
+/// GET /files/chunked/download/chunk?<token>&<index> — stream one chunk for browser download.
+#[get("/files/chunked/download/chunk?<token>&<index>")]
+pub async fn chunked_download_chunk(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SessionSetupComplete,
+    token: String,
+    index: u32,
+) -> Result<
+    crate::routes::library::FileChunkDownload,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let result = chunk_service::serve_chunk(
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &token,
+        index,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let content_type = result
+        .mime_type
+        .as_deref()
+        .and_then(|m| {
+            let parts: Vec<&str> = m.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                Some(rocket::http::ContentType::new(
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(rocket::http::ContentType::Binary);
+
+    Ok(crate::routes::library::FileChunkDownload {
+        data: result.data,
+        content_type,
+        checksum_sha256: result.checksum_sha256,
+        chunk_index: result.chunk_index,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+    })
+}
+
 /// GET /files/download?<path> — browser download
 #[get("/files/download?<path>")]
 pub async fn download_file(
@@ -675,11 +1297,21 @@ pub async fn download_file(
 ) -> Result<crate::routes::library::FileDownload, Flash<Redirect>> {
     let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Library not found."))?;
+        .map_err(|_| {
+            Flash::error(
+                Redirect::to(uri!(files_page(path = Option::<String>::None))),
+                "Library not found.",
+            )
+        })?;
 
     let result = fs_service::download_file(config.inner(), unlock_state.inner(), &lib.id, &path)
         .await
-        .map_err(|_| Flash::error(Redirect::to(uri!(files_page(path = Option::<String>::None))), "Download failed."))?;
+        .map_err(|_| {
+            Flash::error(
+                Redirect::to(uri!(files_page(path = Option::<String>::None))),
+                "Download failed.",
+            )
+        })?;
 
     let content_type = result
         .mime_type
@@ -687,7 +1319,10 @@ pub async fn download_file(
         .and_then(|m| {
             let parts: Vec<&str> = m.splitn(2, '/').collect();
             if parts.len() == 2 {
-                Some(rocket::http::ContentType::new(parts[0].to_string(), parts[1].to_string()))
+                Some(rocket::http::ContentType::new(
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                ))
             } else {
                 None
             }
@@ -846,16 +1481,30 @@ fn parent_path(path: &str) -> String {
     }
 }
 
+fn normalize_dir_path(path: &str) -> String {
+    path.trim().trim_matches('/').to_string()
+}
+
+fn file_name_from_path(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or("").to_string()
+}
+
+fn join_dir_and_name(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", dir, name)
+    }
+}
+
 fn format_timestamp(ts: &str) -> String {
     // ISO-8601 → "Mar 19, 2026 14:30"
     match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
         Ok(dt) => dt.format("%b %d, %Y %H:%M").to_string(),
-        Err(_) => {
-            match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
-                Ok(dt) => dt.format("%b %d, %Y %H:%M").to_string(),
-                Err(_) => ts.to_string(),
-            }
-        }
+        Err(_) => match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+            Ok(dt) => dt.format("%b %d, %Y %H:%M").to_string(),
+            Err(_) => ts.to_string(),
+        },
     }
 }
 
@@ -878,7 +1527,8 @@ fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
                 "xls" | "xlsx" | "ods" | "csv" => "spreadsheet",
                 "ppt" | "pptx" | "odp" => "presentation",
                 "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => "archive",
-                "rs" | "py" | "js" | "ts" | "go" | "c" | "cpp" | "h" | "java" | "rb" | "php" | "sh" | "toml" | "yaml" | "yml" | "json" | "xml" | "html" | "css" => "code",
+                "rs" | "py" | "js" | "ts" | "go" | "c" | "cpp" | "h" | "java" | "rb" | "php"
+                | "sh" | "toml" | "yaml" | "yml" | "json" | "xml" | "html" | "css" => "code",
                 _ => "file",
             }
         }
@@ -901,11 +1551,20 @@ pub fn routes() -> Vec<Route> {
         setup_submit,
         files_page,
         files_partial,
+        files_folders,
         mkdir_submit,
         rename_submit,
+        move_submit,
         delete_submit,
         bulk_delete,
+        bulk_move,
         upload_file,
+        chunked_init_upload,
+        chunked_receive_chunk,
+        chunked_complete_upload,
+        chunked_cancel_upload,
+        chunked_init_download,
+        chunked_download_chunk,
         download_file,
         usage_sidebar,
         usage_page,

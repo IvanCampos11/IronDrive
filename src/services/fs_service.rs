@@ -6,8 +6,8 @@ use tokio::fs;
 use crate::config::AppConfig;
 use crate::errors::AppError;
 use crate::services::crypto_service::{
-    self, encrypt_and_write_file, read_and_decrypt_file, verify_file_integrity, DataKey,
-    IntegrityStatus,
+    self, encrypt_and_write_file_owned, read_and_decrypt_file, stream_encrypt_chunks_to_file,
+    verify_file_integrity_async, DataKey, IntegrityStatus,
 };
 use crate::services::unlock_state::UnlockState;
 use crate::utils::mime::mime_from_filename;
@@ -272,13 +272,8 @@ pub async fn list_directory(
 
         let integrity = if check_integrity && !is_dir {
             if let Some(ref dk) = data_key {
-                match fs::read(&entry_path).await {
-                    Ok(blob) => {
-                        let status = verify_file_integrity(dk, &blob);
-                        Some(format_integrity_status(&status))
-                    }
-                    Err(e) => Some(format!("error: {e}")),
-                }
+                let status = verify_file_integrity_async(dk, &entry_path).await;
+                Some(format_integrity_status(&status))
             } else {
                 None
             }
@@ -361,6 +356,29 @@ pub async fn upload_file(
     data: &[u8],
     write_verify: bool,
 ) -> Result<UploadResult, AppError> {
+    upload_file_owned(
+        config,
+        unlock_state,
+        library_id,
+        user_path,
+        data.to_vec(),
+        write_verify,
+    )
+    .await
+}
+
+/// Upload (encrypt and write) a file into a library using owned plaintext.
+///
+/// This variant allows callers which already own large buffers (e.g. chunked
+/// upload assembly) to avoid creating an additional full-size copy.
+pub async fn upload_file_owned(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    library_id: &str,
+    user_path: &str,
+    data: Vec<u8>,
+    write_verify: bool,
+) -> Result<UploadResult, AppError> {
     if user_path.is_empty() {
         return Err(AppError::Validation("File path must not be empty.".into()));
     }
@@ -377,12 +395,13 @@ pub async fn upload_file(
     }
 
     // Compute checksum before encryption.
-    let checksum = crypto_service::sha256_bytes(data);
+    let checksum = crypto_service::sha256_bytes(&data);
     let checksum_hex = hex::encode(checksum);
+    let plaintext_size = data.len() as u64;
 
     // Encrypt and write. If target is a directory, tokio::fs::write will fail
     // with an appropriate error.
-    match encrypt_and_write_file(&data_key, data, &target, write_verify).await {
+    match encrypt_and_write_file_owned(&data_key, data, &target, write_verify).await {
         Ok(()) => {}
         Err(e) => {
             // Check if the target is a directory — that's a user-facing conflict.
@@ -409,9 +428,73 @@ pub async fn upload_file(
 
     Ok(UploadResult {
         path: user_path.to_string(),
-        size: data.len() as u64,
+        size: plaintext_size,
         disk_size: disk_meta.len(),
         checksum_sha256: checksum_hex,
+        mime_type: mime_from_filename(&filename),
+    })
+}
+
+/// Upload (encrypt and write) a file into a library directly from chunk staging files.
+///
+/// This is the streaming path for large chunked uploads: chunk files are
+/// read, encrypted, and written segment-by-segment without assembling the
+/// full plaintext into memory. RAM usage is bounded to O(chunk_size).
+///
+/// `chunk_paths` are the ordered staging paths for each chunk.
+/// `total_plaintext_bytes` is the sum of all plaintext chunk sizes.
+/// `expected_checksum` is an optional pre-computed SHA-256 of the assembled
+/// plaintext (from the upload manifest); if provided it is verified before
+/// writing.
+pub async fn upload_file_streaming(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    library_id: &str,
+    user_path: &str,
+    chunk_paths: &[std::path::PathBuf],
+    total_plaintext_bytes: u64,
+    expected_checksum: Option<[u8; 32]>,
+    write_verify: bool,
+) -> Result<UploadResult, AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation("File path must not be empty.".into()));
+    }
+
+    let data_key = require_data_key(unlock_state, library_id)?;
+    let root = library_root(config, library_id);
+    let target = safe_join_async(root, user_path.to_string()).await?;
+
+    // Ensure parent directory exists.
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
+    }
+
+    let plaintext_checksum = stream_encrypt_chunks_to_file(
+        &data_key,
+        chunk_paths,
+        total_plaintext_bytes,
+        expected_checksum.as_ref(),
+        &target,
+        write_verify,
+    )
+    .await?;
+
+    let disk_meta = fs::metadata(&target)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to stat written file: {e}")))?;
+
+    let filename = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    Ok(UploadResult {
+        path: user_path.to_string(),
+        size: total_plaintext_bytes,
+        disk_size: disk_meta.len(),
+        checksum_sha256: hex::encode(plaintext_checksum),
         mime_type: mime_from_filename(&filename),
     })
 }
@@ -632,13 +715,8 @@ pub async fn get_entry_info(
 
     let integrity = if check_integrity && !is_dir {
         let dk = require_data_key(unlock_state, library_id)?;
-        match fs::read(&target).await {
-            Ok(blob) => {
-                let status = verify_file_integrity(&dk, &blob);
-                Some(format_integrity_status(&status))
-            }
-            Err(e) => Some(format!("error: {e}")),
-        }
+        let status = verify_file_integrity_async(&dk, &target).await;
+        Some(format_integrity_status(&status))
     } else {
         None
     };

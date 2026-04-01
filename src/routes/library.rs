@@ -12,6 +12,8 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
+use crate::services::chunk_service;
+use crate::utils::format_bytes;
 use crate::services::fs_service::{self, FsEntry};
 use crate::services::unlock_state::UnlockState;
 
@@ -75,6 +77,89 @@ pub struct UsageResponse {
     pub disk_bytes: u64,
     pub file_count: u64,
     pub dir_count: u64,
+}
+
+#[derive(Deserialize)]
+pub struct InitChunkUploadRequest {
+    pub path: String,
+    pub total_chunks: u32,
+    pub total_bytes: u64,
+    pub checksum_sha256: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct InitChunkUploadResponse {
+    pub upload_id: String,
+    pub chunk_size_bytes: u64,
+    pub total_chunks: u32,
+    pub total_bytes: u64,
+    pub expires_at: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct ChunkUploadResponse {
+    pub upload_id: String,
+    pub chunk_index: u32,
+    pub received_chunks: u32,
+    pub total_chunks: u32,
+    pub message: String,
+}
+
+#[derive(Deserialize)]
+pub struct CompleteChunkUploadRequest {
+    pub upload_id: String,
+    pub verify: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct CancelChunkUploadResponse {
+    pub upload_id: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct InitChunkDownloadResponse {
+    pub token: String,
+    pub filename: String,
+    pub mime_type: Option<String>,
+    pub chunk_size_bytes: u64,
+    pub total_chunks: u32,
+    pub total_bytes: u64,
+    pub expires_at: String,
+}
+
+pub struct FileChunkDownload {
+    pub data: Vec<u8>,
+    pub content_type: ContentType,
+    pub checksum_sha256: String,
+    pub chunk_index: u32,
+    pub total_chunks: u32,
+    pub total_bytes: u64,
+}
+
+impl<'r> Responder<'r, 'static> for FileChunkDownload {
+    fn respond_to(self, _request: &'r Request<'_>) -> response::Result<'static> {
+        let len = self.data.len();
+
+        Response::build()
+            .header(self.content_type)
+            .header(Header::new("X-IronDrive-Integrity", self.checksum_sha256))
+            .header(Header::new(
+                "X-IronDrive-Chunk-Index",
+                self.chunk_index.to_string(),
+            ))
+            .header(Header::new(
+                "X-IronDrive-Chunk-Total",
+                self.total_chunks.to_string(),
+            ))
+            .header(Header::new(
+                "X-IronDrive-Total-Bytes",
+                self.total_bytes.to_string(),
+            ))
+            .sized_body(len, std::io::Cursor::new(self.data))
+            .ok()
+    }
 }
 
 /// Custom responder for file downloads. Sends the decrypted body with
@@ -218,8 +303,8 @@ pub async fn upload(
 
     if !stream.is_complete() {
         return Err(AppError::Validation(format!(
-            "Upload exceeds the maximum allowed size of {} bytes.",
-            allowed_bytes
+            "Upload exceeds the maximum allowed size of {}.",
+            format_bytes(allowed_bytes.into())
         )));
     }
 
@@ -366,10 +451,239 @@ pub async fn usage(
     }))
 }
 
+/// POST /api/v1/library/chunked/init
+///
+/// Start a chunked upload session for a large file.
+#[post("/api/v1/library/chunked/init", format = "json", data = "<body>")]
+pub async fn chunked_init_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SetupComplete,
+    body: Json<InitChunkUploadRequest>,
+) -> Result<Json<InitChunkUploadResponse>, AppError> {
+    let lib = require_library(pool.inner(), &user.0.id).await?;
+
+    let result = chunk_service::init_upload(
+        pool.inner(),
+        config.inner(),
+        chunk_service::InitUploadParams {
+            user_id: user.0.id.clone(),
+            library_id: lib.id,
+            target_path: body.path.clone(),
+            total_chunks: body.total_chunks,
+            total_bytes: body.total_bytes,
+            checksum_sha256: body.checksum_sha256.clone(),
+        },
+    )
+    .await?;
+
+    Ok(Json(InitChunkUploadResponse {
+        upload_id: result.upload_id,
+        chunk_size_bytes: result.chunk_size_bytes,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+        expires_at: result.expires_at,
+        message: "Chunked upload initialized.".into(),
+    }))
+}
+
+/// PUT /api/v1/library/chunked/upload/<upload_id>/<chunk_index>
+///
+/// Receive one chunk for an in-progress upload session.
+#[put(
+    "/api/v1/library/chunked/upload/<upload_id>/<chunk_index>",
+    data = "<data>"
+)]
+pub async fn chunked_receive_chunk(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SetupComplete,
+    upload_id: &str,
+    chunk_index: u32,
+    data: Data<'_>,
+) -> Result<Json<ChunkUploadResponse>, AppError> {
+    let lib = require_library(pool.inner(), &user.0.id).await?;
+
+    let allowed_bytes = (config.chunk_size_bytes + 1).bytes();
+    let stream = data
+        .open(allowed_bytes)
+        .into_bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read chunk data: {e}")))?;
+
+    if !stream.is_complete() {
+        return Err(AppError::Validation(format!(
+            "Chunk exceeds the maximum chunk size of {} bytes.",
+            config.chunk_size_bytes
+        )));
+    }
+
+    let result = chunk_service::receive_chunk(
+        pool.inner(),
+        config.inner(),
+        &user.0.id,
+        &lib.id,
+        upload_id,
+        chunk_index,
+        &stream.into_inner(),
+    )
+    .await?;
+
+    Ok(Json(ChunkUploadResponse {
+        upload_id: result.upload_id,
+        chunk_index: result.chunk_index,
+        received_chunks: result.received_chunks,
+        total_chunks: result.total_chunks,
+        message: "Chunk received.".into(),
+    }))
+}
+
+/// POST /api/v1/library/chunked/complete
+///
+/// Assemble all uploaded chunks and persist the final encrypted file.
+#[post("/api/v1/library/chunked/complete", format = "json", data = "<body>")]
+pub async fn chunked_complete_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SetupComplete,
+    body: Json<CompleteChunkUploadRequest>,
+) -> Result<Json<UploadResponse>, AppError> {
+    let lib = require_library(pool.inner(), &user.0.id).await?;
+    let write_verify = body.verify.unwrap_or(false);
+
+    let result = chunk_service::complete_upload(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &lib.id,
+        &body.upload_id,
+        write_verify,
+    )
+    .await?;
+
+    Ok(Json(UploadResponse {
+        path: result.path,
+        size: result.size,
+        disk_size: result.disk_size,
+        checksum_sha256: result.checksum_sha256,
+        mime_type: result.mime_type,
+        message: "Chunked upload completed successfully.".into(),
+    }))
+}
+
+/// DELETE /api/v1/library/chunked/cancel?upload_id=<upload_id>
+///
+/// Cancel a chunked upload and remove all staging artifacts.
+#[delete("/api/v1/library/chunked/cancel?<upload_id>")]
+pub async fn chunked_cancel_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    user: SetupComplete,
+    upload_id: String,
+) -> Result<Json<CancelChunkUploadResponse>, AppError> {
+    let lib = require_library(pool.inner(), &user.0.id).await?;
+
+    chunk_service::cancel_upload(
+        pool.inner(),
+        config.inner(),
+        &user.0.id,
+        &lib.id,
+        &upload_id,
+    )
+    .await?;
+
+    Ok(Json(CancelChunkUploadResponse {
+        upload_id,
+        message: "Chunked upload canceled and cleaned up.".into(),
+    }))
+}
+
+/// GET /api/v1/library/chunked/download/init?path=<path>
+///
+/// Initialize a chunked download and return a short-lived token.
+#[get("/api/v1/library/chunked/download/init?<path>")]
+pub async fn chunked_init_download(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SetupComplete,
+    path: String,
+) -> Result<Json<InitChunkDownloadResponse>, AppError> {
+    let lib = require_library(pool.inner(), &user.0.id).await?;
+
+    let result = chunk_service::init_download(
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &lib.id,
+        &path,
+    )
+    .await?;
+
+    Ok(Json(InitChunkDownloadResponse {
+        token: result.token,
+        filename: result.filename,
+        mime_type: result.mime_type,
+        chunk_size_bytes: result.chunk_size_bytes,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+        expires_at: result.expires_at,
+    }))
+}
+
+/// GET /api/v1/library/chunked/download/chunk?token=<token>&index=<n>
+///
+/// Download one plaintext chunk from a token-authorized file.
+#[get("/api/v1/library/chunked/download/chunk?<token>&<index>")]
+pub async fn chunked_download_chunk(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    user: SetupComplete,
+    token: String,
+    index: u32,
+) -> Result<FileChunkDownload, AppError> {
+    let result = chunk_service::serve_chunk(
+        config.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &token,
+        index,
+    )
+    .await?;
+
+    let content_type = parse_content_type(result.mime_type.as_deref());
+
+    Ok(FileChunkDownload {
+        data: result.data,
+        content_type,
+        checksum_sha256: result.checksum_sha256,
+        chunk_index: result.chunk_index,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Route collection
 // ---------------------------------------------------------------------------
 
 pub fn routes() -> Vec<Route> {
-    routes![list, mkdir, upload, download, delete, rename, info, usage]
+    routes![
+        list,
+        mkdir,
+        upload,
+        download,
+        delete,
+        rename,
+        info,
+        usage,
+        chunked_init_upload,
+        chunked_receive_chunk,
+        chunked_complete_upload,
+        chunked_cancel_upload,
+        chunked_init_download,
+        chunked_download_chunk,
+    ]
 }
