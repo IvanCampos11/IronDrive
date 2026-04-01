@@ -17,11 +17,11 @@ const MASTER_KEY_DB_KEY: &str = "master_key_encrypted";
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const TAG_LEN: usize = 16;
-const CHECKSUM_LEN: usize = 32;
 const WRAPPED_KEY_LEN: usize = NONCE_LEN + KEY_LEN + TAG_LEN;
 
-/// Minimum valid encrypted file: nonce (12) + tag (16) + checksum (32) = 60 bytes.
-const MIN_ENCRYPTED_FILE_LEN: usize = NONCE_LEN + TAG_LEN + CHECKSUM_LEN;
+// Legacy alias — STREAM functions still reference this for the V2 plaintext-checksum
+// header. Will be removed when STREAM format is rewritten in commit 3.
+const CHECKSUM_LEN: usize = 32;
 
 /// Buffer size for streaming SHA-256 reads.
 const HASH_BUF_SIZE: usize = 64 * 1024;
@@ -72,7 +72,7 @@ const SINGLE_MAGIC: [u8; 3] = [0x49, 0x44, 0x01]; // "ID\x01"
 
 // STREAM_MAGIC is already defined above as [0x49, 0x44, 0x02].
 
-/// Trailing SHA-256 hash length (same as CHECKSUM_LEN, but semantically different).
+/// Trailing SHA-256 hash length appended to every encrypted file.
 const FILE_HASH_LEN: usize = 32;
 
 /// All magic prefixes are 3 bytes.
@@ -295,10 +295,11 @@ async fn store_encrypted_master_key(pool: &DbPool, blob: &[u8]) -> Result<(), Ap
 // ---------------------------------------------------------------------------
 
 /// Encrypt plaintext and return the on-disk format:
-/// `nonce (12) ‖ ciphertext+tag (N+16) ‖ SHA-256(plaintext) (32)`.
+/// `SINGLE_MAGIC (3) ‖ nonce (12) ‖ ciphertext+tag (N+16) ‖ file_hash (32)`.
+///
+/// file_hash = SHA-256(magic ‖ nonce ‖ ciphertext+tag).
+/// No plaintext hash stored — AES-GCM tag already authenticates plaintext.
 pub fn encrypt_file_bytes(data_key: &DataKey, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
-    let checksum = sha256_bytes(plaintext);
-
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(data_key.as_bytes()));
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -309,36 +310,61 @@ pub fn encrypt_file_bytes(data_key: &DataKey, plaintext: &[u8]) -> Result<Vec<u8
         .encrypt(nonce, plaintext)
         .map_err(|e| AppError::Internal(format!("File encryption failed: {e}")))?;
 
-    let total_len = NONCE_LEN + ciphertext_and_tag.len() + CHECKSUM_LEN;
-    let mut blob = Vec::with_capacity(total_len);
+    // Build blob without the trailing hash first.
+    let content_len = MAGIC_LEN + NONCE_LEN + ciphertext_and_tag.len();
+    let mut blob = Vec::with_capacity(content_len + FILE_HASH_LEN);
+    blob.extend_from_slice(&SINGLE_MAGIC);
     blob.extend_from_slice(&nonce_bytes);
     blob.extend_from_slice(&ciphertext_and_tag);
-    blob.extend_from_slice(&checksum);
+
+    // Hash everything so far, append as trailer.
+    let file_hash = sha256_bytes(&blob);
+    blob.extend_from_slice(&file_hash);
 
     Ok(blob)
 }
 
-/// Outcome of `decrypt_file_bytes_inner` — used by `verify_file_integrity`
-/// to distinguish checksum failures from decryption failures without string matching.
+/// Outcome of `decrypt_file_bytes_inner` — lets `verify_file_integrity`
+/// tell apart file-hash failures from GCM failures without string matching.
 enum DecryptOutcome {
     Ok(Vec<u8>),
     DecryptionFailed(String),
-    ChecksumMismatch,
+    FileHashMismatch,
 }
 
-/// Core decrypt logic returning a typed outcome for precise error discrimination.
+/// Core decrypt logic for single-shot files (SINGLE_MAGIC format).
+///
+/// Layout: `SINGLE_MAGIC(3) | nonce(12) | ciphertext+tag(N+16) | file_hash(32)`
+///
+/// 1. Check file_hash (key-free — catches disk corruption).
+/// 2. AES-GCM decrypt (key-required — GCM tag authenticates plaintext).
 fn decrypt_file_bytes_inner(data_key: &DataKey, blob: &[u8]) -> DecryptOutcome {
-    if blob.len() < MIN_ENCRYPTED_FILE_LEN {
+    if blob.len() < MIN_SINGLE_FILE_LEN {
         return DecryptOutcome::DecryptionFailed(format!(
-            "Encrypted file too small ({} bytes, minimum {MIN_ENCRYPTED_FILE_LEN})",
+            "Encrypted file too small ({} bytes, minimum {MIN_SINGLE_FILE_LEN})",
             blob.len(),
         ));
     }
 
-    let checksum_start = blob.len() - CHECKSUM_LEN;
-    let nonce_bytes = &blob[..NONCE_LEN];
-    let ciphertext_and_tag = &blob[NONCE_LEN..checksum_start];
-    let stored_checksum = &blob[checksum_start..];
+    // Verify magic prefix.
+    if blob[..MAGIC_LEN] != SINGLE_MAGIC {
+        return DecryptOutcome::DecryptionFailed(
+            "Not a single-shot encrypted file (bad magic bytes)".to_string(),
+        );
+    }
+
+    // Key-free check: hash everything before the trailing 32 bytes.
+    let content = &blob[..blob.len() - FILE_HASH_LEN];
+    let stored_hash = &blob[blob.len() - FILE_HASH_LEN..];
+
+    let computed_hash = sha256_bytes(content);
+    if computed_hash.as_slice() != stored_hash {
+        return DecryptOutcome::FileHashMismatch;
+    }
+
+    // Parse nonce and ciphertext from the content (after magic).
+    let nonce_bytes = &content[MAGIC_LEN..MAGIC_LEN + NONCE_LEN];
+    let ciphertext_and_tag = &content[MAGIC_LEN + NONCE_LEN..];
 
     let nonce = Nonce::from_slice(nonce_bytes);
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(data_key.as_bytes()));
@@ -352,20 +378,16 @@ fn decrypt_file_bytes_inner(data_key: &DataKey, blob: &[u8]) -> DecryptOutcome {
         }
     };
 
-    let computed_checksum = sha256_bytes(&plaintext);
-    if computed_checksum != stored_checksum {
-        return DecryptOutcome::ChecksumMismatch;
-    }
-
     DecryptOutcome::Ok(plaintext)
 }
 
-/// Decrypt an on-disk encrypted file blob and verify its SHA-256 checksum.
+/// Decrypt a single-shot encrypted file blob. Checks file hash first (key-free),
+/// then AES-GCM decrypts.
 pub fn decrypt_file_bytes(data_key: &DataKey, blob: &[u8]) -> Result<Vec<u8>, AppError> {
     match decrypt_file_bytes_inner(data_key, blob) {
         DecryptOutcome::Ok(plaintext) => Ok(plaintext),
-        DecryptOutcome::ChecksumMismatch => Err(AppError::Internal(
-            "File checksum mismatch after decryption — data corrupted".to_string(),
+        DecryptOutcome::FileHashMismatch => Err(AppError::Internal(
+            "File hash mismatch — data on disk may be corrupted".to_string(),
         )),
         DecryptOutcome::DecryptionFailed(msg) => Err(AppError::Internal(msg)),
     }
@@ -375,16 +397,15 @@ pub fn decrypt_file_bytes(data_key: &DataKey, blob: &[u8]) -> Result<Vec<u8>, Ap
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrityStatus {
     Ok,
-    ChecksumMismatch,
+    FileHashMismatch,
     DecryptionFailed(String),
 }
 
-/// Verify the integrity of an encrypted file without returning the plaintext.
-/// Used by the background integrity scanner.
+/// Verify the integrity of a single-shot encrypted file without returning plaintext.
 pub fn verify_file_integrity(data_key: &DataKey, blob: &[u8]) -> IntegrityStatus {
     match decrypt_file_bytes_inner(data_key, blob) {
         DecryptOutcome::Ok(_) => IntegrityStatus::Ok,
-        DecryptOutcome::ChecksumMismatch => IntegrityStatus::ChecksumMismatch,
+        DecryptOutcome::FileHashMismatch => IntegrityStatus::FileHashMismatch,
         DecryptOutcome::DecryptionFailed(msg) => IntegrityStatus::DecryptionFailed(msg),
     }
 }
@@ -394,13 +415,13 @@ pub fn verify_file_integrity(data_key: &DataKey, blob: &[u8]) -> IntegrityStatus
 // ---------------------------------------------------------------------------
 
 /// SHA-256 of an in-memory byte slice.
-pub fn sha256_bytes(data: &[u8]) -> [u8; CHECKSUM_LEN] {
+pub fn sha256_bytes(data: &[u8]) -> [u8; FILE_HASH_LEN] {
     Sha256::digest(data).into()
 }
 
 /// SHA-256 of a file on disk via streaming reads. Avoids loading the entire
 /// file into memory.
-pub async fn sha256_file(path: &Path) -> Result<[u8; CHECKSUM_LEN], AppError> {
+pub async fn sha256_file(path: &Path) -> Result<[u8; FILE_HASH_LEN], AppError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to open file for hashing: {e}")))?;
@@ -522,16 +543,15 @@ pub async fn encrypt_and_write_file(
 
 /// Encrypt owned plaintext in place and write the encrypted payload to disk.
 ///
-/// This avoids allocating a second full-size buffer for ciphertext, which is
-/// critical for large chunk-assembled uploads.
+/// Uses in-place encryption to avoid allocating a second full-size buffer.
+/// On-disk: `SINGLE_MAGIC(3) | nonce(12) | ciphertext+tag(N+16) | file_hash(32)`.
+/// Feeds all bytes through a SHA-256 hasher while writing, then appends the hash.
 pub async fn encrypt_and_write_file_owned(
     data_key: &DataKey,
     mut plaintext: Vec<u8>,
     dest: &Path,
     write_verify: bool,
 ) -> Result<(), AppError> {
-    let checksum = sha256_bytes(&plaintext);
-
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(data_key.as_bytes()));
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -542,22 +562,43 @@ pub async fn encrypt_and_write_file_owned(
         .encrypt_in_place_detached(nonce, b"", &mut plaintext)
         .map_err(|e| AppError::Internal(format!("File encryption failed: {e}")))?;
 
+    // Build a hasher that covers magic + nonce + ciphertext + tag.
+    let mut hasher = Sha256::new();
+
     let mut file = tokio::fs::File::create(dest)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write encrypted file: {e}")))?;
 
+    // Write magic.
+    file.write_all(&SINGLE_MAGIC)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write encrypted file magic: {e}")))?;
+    hasher.update(&SINGLE_MAGIC);
+
+    // Write nonce.
     file.write_all(&nonce_bytes)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write encrypted file nonce: {e}")))?;
+    hasher.update(&nonce_bytes);
+
+    // Write ciphertext (plaintext buffer is now encrypted in-place).
     file.write_all(&plaintext)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write encrypted file body: {e}")))?;
+    hasher.update(&plaintext);
+
+    // Write GCM tag.
     file.write_all(tag.as_slice())
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write encrypted file tag: {e}")))?;
-    file.write_all(&checksum)
+    hasher.update(tag.as_slice());
+
+    // Write file hash (SHA-256 of everything above).
+    let file_hash: [u8; 32] = hasher.finalize().into();
+    file.write_all(&file_hash)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to write encrypted file checksum: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("Failed to write encrypted file hash: {e}")))?;
+
     file.flush()
         .await
         .map_err(|e| AppError::Internal(format!("Failed to flush encrypted file: {e}")))?;
@@ -566,19 +607,16 @@ pub async fn encrypt_and_write_file_owned(
         .map_err(|e| AppError::Internal(format!("Failed to sync encrypted file to disk: {e}")))?;
 
     if write_verify {
+        // Key-free check: re-read and verify the file hash.
+        verify_file_hash(dest).await.map_err(|e| {
+            AppError::Internal(format!("Write-verify failed: {e}"))
+        })?;
+
+        // Key check: decrypt to confirm GCM tag passes.
         let readback = tokio::fs::read(dest).await.map_err(|e| {
             AppError::Internal(format!("Write-verify: failed to read back file: {e}"))
         })?;
-
-        // Validate by decrypting and comparing checksums instead of allocating
-        // a second expected encrypted blob of the same size.
-        let decrypted = decrypt_file_bytes(data_key, &readback)?;
-        let readback_checksum = sha256_bytes(&decrypted);
-        if readback_checksum != checksum {
-            return Err(AppError::Internal(
-                "Write-verify failed: decrypted checksum mismatch after write".to_string(),
-            ));
-        }
+        decrypt_file_bytes(data_key, &readback)?;
     }
 
     Ok(())
@@ -944,7 +982,7 @@ async fn sha256_chunks(
     Ok(hasher.finalize().into())
 }
 
-/// Verify integrity of any encrypted file (V1 or V2 STREAM) without returning plaintext.
+/// Verify integrity of any encrypted file (single-shot or STREAM) without returning plaintext.
 pub async fn verify_file_integrity_async(
     data_key: &DataKey,
     path: &Path,
@@ -954,8 +992,8 @@ pub async fn verify_file_integrity_async(
             Ok(_) => IntegrityStatus::Ok,
             Err(e) => {
                 let msg = format!("{e}");
-                if msg.contains("checksum mismatch") {
-                    IntegrityStatus::ChecksumMismatch
+                if msg.contains("checksum mismatch") || msg.contains("hash mismatch") {
+                    IntegrityStatus::FileHashMismatch
                 } else {
                     IntegrityStatus::DecryptionFailed(msg)
                 }
@@ -969,7 +1007,7 @@ pub async fn verify_file_integrity_async(
     }
 }
 
-/// Read and decrypt any encrypted file (V1 monolithic or V2 STREAM).
+/// Read and decrypt any encrypted file (single-shot or STREAM).
 pub async fn read_and_decrypt_file(data_key: &DataKey, path: &Path) -> Result<Vec<u8>, AppError> {
     if is_stream_format(path).await {
         stream_decrypt_file(data_key, path).await
@@ -1208,7 +1246,9 @@ mod tests {
         let plaintext = b"";
 
         let blob = encrypt_file_bytes(&key, plaintext).unwrap();
-        assert_eq!(blob.len(), MIN_ENCRYPTED_FILE_LEN);
+        // magic(3) + nonce(12) + tag(16) + file_hash(32) = 63
+        assert_eq!(blob.len(), MIN_SINGLE_FILE_LEN);
+        assert_eq!(&blob[..MAGIC_LEN], &SINGLE_MAGIC);
 
         let recovered = decrypt_file_bytes(&key, &blob).unwrap();
         assert_eq!(recovered, plaintext);
@@ -1222,8 +1262,9 @@ mod tests {
         let blob = encrypt_file_bytes(&key, plaintext).unwrap();
         assert_eq!(
             blob.len(),
-            NONCE_LEN + plaintext.len() + TAG_LEN + CHECKSUM_LEN
+            MAGIC_LEN + NONCE_LEN + plaintext.len() + TAG_LEN + FILE_HASH_LEN
         );
+        assert_eq!(&blob[..MAGIC_LEN], &SINGLE_MAGIC);
 
         let recovered = decrypt_file_bytes(&key, &blob).unwrap();
         assert_eq!(recovered, plaintext);
@@ -1256,18 +1297,20 @@ mod tests {
         let plaintext = b"secret data";
 
         let mut blob = encrypt_file_bytes(&key, plaintext).unwrap();
-        blob[NONCE_LEN + 3] ^= 0xFF;
+        // Tamper with a byte in the ciphertext area (after magic + nonce).
+        blob[MAGIC_LEN + NONCE_LEN + 3] ^= 0xFF;
 
         let err = decrypt_file_bytes(&key, &blob).unwrap_err();
         let msg = format!("{err}");
+        // File hash check catches this before GCM even runs.
         assert!(
-            msg.contains("decryption failed") || msg.contains("tampered"),
-            "Expected decryption failure, got: {msg}"
+            msg.contains("hash mismatch") || msg.contains("decryption failed") || msg.contains("tampered"),
+            "Expected integrity failure, got: {msg}"
         );
     }
 
     #[test]
-    fn file_decrypt_tampered_checksum_detected() {
+    fn file_decrypt_tampered_file_hash_detected() {
         let key = generate_data_key();
         let plaintext = b"secret data";
 
@@ -1275,21 +1318,20 @@ mod tests {
         let last = blob.len() - 1;
         blob[last] ^= 0xFF;
 
-        // Checksum is outside the GCM-authenticated envelope, so GCM decryption
-        // succeeds but the SHA-256 comparison catches the tampering.
+        // Tampered file hash → caught by key-free check.
         let err = decrypt_file_bytes(&key, &blob);
-        assert!(err.is_err(), "Should have detected tampered checksum");
+        assert!(err.is_err(), "Should have detected tampered file hash");
         let msg = format!("{}", err.unwrap_err());
         assert!(
-            msg.contains("checksum mismatch"),
-            "Expected checksum mismatch, got: {msg}"
+            msg.contains("hash mismatch"),
+            "Expected file hash mismatch, got: {msg}"
         );
     }
 
     #[test]
     fn file_decrypt_truncated_blob_rejected() {
         let key = generate_data_key();
-        let tiny = vec![0u8; MIN_ENCRYPTED_FILE_LEN - 1];
+        let tiny = vec![0u8; MIN_SINGLE_FILE_LEN - 1];
         assert!(decrypt_file_bytes(&key, &tiny).is_err());
     }
 
@@ -1318,14 +1360,14 @@ mod tests {
     }
 
     #[test]
-    fn verify_integrity_tampered_checksum() {
+    fn verify_integrity_tampered_file_hash() {
         let key = generate_data_key();
         let mut blob = encrypt_file_bytes(&key, b"valid").unwrap();
         let last = blob.len() - 1;
         blob[last] ^= 0xFF;
         assert_eq!(
             verify_file_integrity(&key, &blob),
-            IntegrityStatus::ChecksumMismatch
+            IntegrityStatus::FileHashMismatch
         );
     }
 
@@ -1333,11 +1375,13 @@ mod tests {
     fn verify_integrity_tampered_ciphertext() {
         let key = generate_data_key();
         let mut blob = encrypt_file_bytes(&key, b"valid").unwrap();
-        blob[NONCE_LEN + 2] ^= 0xFF;
-        match verify_file_integrity(&key, &blob) {
-            IntegrityStatus::DecryptionFailed(_) => {}
-            other => panic!("Expected DecryptionFailed, got {other:?}"),
-        }
+        // Tamper ciphertext body (after magic + nonce).
+        blob[MAGIC_LEN + NONCE_LEN + 2] ^= 0xFF;
+        // File hash check catches this before GCM.
+        assert_eq!(
+            verify_file_integrity(&key, &blob),
+            IntegrityStatus::FileHashMismatch
+        );
     }
 
     // -- SHA-256 helpers --

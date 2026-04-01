@@ -150,10 +150,10 @@ fn is_internal_file(name: &str) -> bool {
     name == INTERNAL_META_FILENAME
 }
 
-/// Compute the plaintext size from an encrypted blob length.
-/// Encrypted format: nonce(12) + ciphertext+tag(N+16) + sha256(32) = N + 60
-/// So plaintext = encrypted_len - 60, clamped to 0 for safety.
-const ENCRYPTION_OVERHEAD: u64 = 12 + 16 + 32; // 60 bytes
+/// Compute the plaintext size from an encrypted single-shot blob length.
+/// Format: SINGLE_MAGIC(3) + nonce(12) + ciphertext+tag(N+16) + file_hash(32) = N + 63
+/// So plaintext = encrypted_len - 63, clamped to 0 for safety.
+const ENCRYPTION_OVERHEAD: u64 = 3 + 12 + 16 + 32; // 63 bytes
 
 fn plaintext_size_from_disk(disk_size: u64) -> u64 {
     disk_size.saturating_sub(ENCRYPTION_OVERHEAD)
@@ -835,7 +835,7 @@ pub async fn calculate_usage(
 fn format_integrity_status(status: &IntegrityStatus) -> String {
     match status {
         IntegrityStatus::Ok => "ok".to_string(),
-        IntegrityStatus::ChecksumMismatch => "checksum_mismatch".to_string(),
+        IntegrityStatus::FileHashMismatch => "file_hash_mismatch".to_string(),
         IntegrityStatus::DecryptionFailed(msg) => format!("decryption_failed: {msg}"),
     }
 }
@@ -918,8 +918,8 @@ mod tests {
 
     #[test]
     fn plaintext_size_normal() {
-        assert_eq!(plaintext_size_from_disk(160), 100);
-        assert_eq!(plaintext_size_from_disk(60), 0); // minimum encrypted file
+        assert_eq!(plaintext_size_from_disk(163), 100);
+        assert_eq!(plaintext_size_from_disk(63), 0); // minimum encrypted file (empty plaintext)
     }
 
     #[test]
@@ -1684,9 +1684,9 @@ mod tests {
             .join(&lib_id)
             .join("tampered.txt");
         let mut blob = fs::read(&file_path).await.unwrap();
-        // Flip a byte in the ciphertext area (after the 12-byte nonce).
+        // Flip a byte in the ciphertext area (after magic + nonce).
         if blob.len() > 20 {
-            blob[15] ^= 0xFF;
+            blob[16] ^= 0xFF;
         }
         fs::write(&file_path, &blob).await.unwrap();
 
@@ -1696,9 +1696,10 @@ mod tests {
 
         assert!(info.integrity.is_some());
         let status = info.integrity.unwrap();
-        // Could be decryption_failed or checksum_mismatch depending on where the bit flip lands.
+        // File hash check catches the tamper before decryption is even attempted.
         assert!(
-            status.contains("decryption_failed") || status.contains("checksum_mismatch"),
+            status.contains("file_hash_mismatch")
+                || status.contains("decryption_failed"),
             "expected failure status, got: {status}"
         );
     }
@@ -2099,10 +2100,10 @@ mod tests {
     }
 
     #[test]
-    fn format_integrity_checksum_mismatch() {
+    fn format_integrity_file_hash_mismatch() {
         assert_eq!(
-            format_integrity_status(&IntegrityStatus::ChecksumMismatch),
-            "checksum_mismatch"
+            format_integrity_status(&IntegrityStatus::FileHashMismatch),
+            "file_hash_mismatch"
         );
     }
 
