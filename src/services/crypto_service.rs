@@ -963,6 +963,7 @@ pub async fn read_and_decrypt_file(data_key: &DataKey, path: &Path) -> Result<Ve
 mod tests {
     use super::*;
     use std::io::Write as _;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     async fn test_pool() -> DbPool {
@@ -1513,5 +1514,327 @@ mod tests {
         let result =
             read_and_decrypt_file(&key, Path::new("/tmp/nonexistent_irondrive_test_file")).await;
         assert!(result.is_err());
+    }
+
+    // -- Key-free integrity on real encrypted blobs --
+
+    #[test]
+    fn verify_file_hash_passes_on_real_encrypted_blob() {
+        let key = generate_data_key();
+        let blob = encrypt_file_bytes(&key, b"real encrypted content").unwrap();
+        // The blob has a valid trailing file hash — key-free check should pass.
+        assert!(verify_file_hash_bytes(&blob).is_ok());
+    }
+
+    #[test]
+    fn verify_file_hash_catches_tampered_encrypted_blob_without_key() {
+        let key = generate_data_key();
+        let mut blob = encrypt_file_bytes(&key, b"real encrypted content").unwrap();
+        // Tamper ciphertext — the file hash (last 32 bytes) is now wrong.
+        blob[MAGIC_LEN + NONCE_LEN + 2] ^= 0xFF;
+        assert!(verify_file_hash_bytes(&blob).is_err());
+    }
+
+    // -- verify_file_integrity_async (two-tier) --
+
+    #[tokio::test]
+    async fn integrity_async_key_free_valid_single_shot() {
+        let key = generate_data_key();
+        let blob = encrypt_file_bytes(&key, b"async check").unwrap();
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&blob).unwrap();
+        tmp.flush().unwrap();
+
+        // No key provided — only file hash check runs.
+        let status = verify_file_integrity_async(None, tmp.path()).await;
+        assert_eq!(status, IntegrityStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn integrity_async_key_free_corrupted_single_shot() {
+        let key = generate_data_key();
+        let mut blob = encrypt_file_bytes(&key, b"async check").unwrap();
+        blob[MAGIC_LEN + NONCE_LEN + 1] ^= 0xFF; // tamper ciphertext
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&blob).unwrap();
+        tmp.flush().unwrap();
+
+        let status = verify_file_integrity_async(None, tmp.path()).await;
+        assert_eq!(status, IntegrityStatus::FileHashMismatch);
+    }
+
+    #[tokio::test]
+    async fn integrity_async_wrong_key_single_shot() {
+        let key1 = generate_data_key();
+        let key2 = generate_data_key();
+        let blob = encrypt_file_bytes(&key1, b"wrong key test").unwrap();
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&blob).unwrap();
+        tmp.flush().unwrap();
+
+        // File hash passes (blob is intact), but GCM decrypt fails.
+        let status = verify_file_integrity_async(Some(&key2), tmp.path()).await;
+        assert!(
+            matches!(status, IntegrityStatus::DecryptionFailed(_)),
+            "Expected DecryptionFailed, got: {:?}",
+            status
+        );
+    }
+
+    #[tokio::test]
+    async fn integrity_async_correct_key_single_shot() {
+        let key = generate_data_key();
+        let blob = encrypt_file_bytes(&key, b"correct key test").unwrap();
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&blob).unwrap();
+        tmp.flush().unwrap();
+
+        let status = verify_file_integrity_async(Some(&key), tmp.path()).await;
+        assert_eq!(status, IntegrityStatus::Ok);
+    }
+
+    // -- STREAM format unit tests --
+
+    /// Helper: write chunk data to temp files and return paths.
+    fn write_chunk_files(chunks: &[&[u8]]) -> (tempfile::TempDir, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let path = dir.path().join(format!("{i:08}.chunk"));
+            std::fs::write(&path, chunk).unwrap();
+            paths.push(path);
+        }
+        (dir, paths)
+    }
+
+    #[tokio::test]
+    async fn stream_encrypt_decrypt_roundtrip() {
+        let key = generate_data_key();
+        let data = b"hello stream encryption";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Should be identified as STREAM format.
+        assert!(is_stream_format(dest.path()).await);
+
+        // Decrypt and verify content.
+        let recovered = stream_decrypt_file(&key, dest.path()).await.unwrap();
+        assert_eq!(recovered, data);
+    }
+
+    #[tokio::test]
+    async fn stream_encrypt_decrypt_multi_chunk_roundtrip() {
+        let key = generate_data_key();
+        let chunk1 = vec![0xAAu8; 1024];
+        let chunk2 = vec![0xBBu8; 512];
+        let total = (chunk1.len() + chunk2.len()) as u64;
+        let (_chunk_dir, chunk_paths) =
+            write_chunk_files(&[&chunk1, &chunk2]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(&key, &chunk_paths, total, dest.path(), false)
+            .await
+            .unwrap();
+
+        let recovered = stream_decrypt_file(&key, dest.path()).await.unwrap();
+        let mut expected = chunk1.clone();
+        expected.extend_from_slice(&chunk2);
+        assert_eq!(recovered, expected);
+    }
+
+    #[tokio::test]
+    async fn stream_encrypt_with_write_verify() {
+        let key = generate_data_key();
+        let data = b"verified stream write";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            true, // write-verify enabled
+        )
+        .await
+        .unwrap();
+
+        let recovered = stream_decrypt_file(&key, dest.path()).await.unwrap();
+        assert_eq!(recovered, data);
+    }
+
+    #[tokio::test]
+    async fn stream_file_hash_valid_without_key() {
+        let key = generate_data_key();
+        let data = b"key-free stream check";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Key-free file hash check should pass.
+        assert!(verify_file_hash(dest.path()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stream_file_hash_catches_corruption_without_key() {
+        let key = generate_data_key();
+        let data = b"corrupt stream check";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Tamper a byte in the encrypted segment area.
+        let mut raw = std::fs::read(dest.path()).unwrap();
+        raw[MAGIC_LEN + STREAM_NONCE_LEN + 6] ^= 0xFF;
+        std::fs::write(dest.path(), &raw).unwrap();
+
+        assert!(verify_file_hash(dest.path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_decrypt_wrong_key_fails() {
+        let key1 = generate_data_key();
+        let key2 = generate_data_key();
+        let data = b"stream wrong key";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key1,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(stream_decrypt_file(&key2, dest.path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn integrity_async_key_free_valid_stream() {
+        let key = generate_data_key();
+        let data = b"stream integrity async";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let status = verify_file_integrity_async(None, dest.path()).await;
+        assert_eq!(status, IntegrityStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn integrity_async_key_free_corrupted_stream() {
+        let key = generate_data_key();
+        let data = b"stream tamper async";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let mut raw = std::fs::read(dest.path()).unwrap();
+        raw[MAGIC_LEN + STREAM_NONCE_LEN + 4] ^= 0xFF;
+        std::fs::write(dest.path(), &raw).unwrap();
+
+        let status = verify_file_integrity_async(None, dest.path()).await;
+        assert_eq!(status, IntegrityStatus::FileHashMismatch);
+    }
+
+    #[tokio::test]
+    async fn integrity_async_wrong_key_stream() {
+        let key1 = generate_data_key();
+        let key2 = generate_data_key();
+        let data = b"stream wrong key async";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key1,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        // File hash passes, GCM tags fail.
+        let status = verify_file_integrity_async(Some(&key2), dest.path()).await;
+        assert!(
+            matches!(status, IntegrityStatus::DecryptionFailed(_)),
+            "Expected DecryptionFailed, got: {:?}",
+            status
+        );
+    }
+
+    #[tokio::test]
+    async fn integrity_async_correct_key_stream() {
+        let key = generate_data_key();
+        let data = b"stream correct key async";
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
+
+        let dest = NamedTempFile::new().unwrap();
+        stream_encrypt_chunks_to_file(
+            &key,
+            &chunk_paths,
+            data.len() as u64,
+            dest.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let status = verify_file_integrity_async(Some(&key), dest.path()).await;
+        assert_eq!(status, IntegrityStatus::Ok);
     }
 }
