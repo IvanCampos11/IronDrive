@@ -370,7 +370,9 @@ async fn incomplete_upload_cancel_cleans_staging() {
 }
 
 #[tokio::test]
-async fn checksum_mismatch_on_complete_is_rejected() {
+async fn checksum_field_is_advisory_only() {
+    // The checksum_sha256 field in init is accepted but not enforced
+    // server-side. Integrity is handled by the on-disk file hash instead.
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let token = create_ready_user(&client, "dave", "dave@example.com", "test-password-4").await;
@@ -414,6 +416,7 @@ async fn checksum_mismatch_on_complete_is_rejected() {
         assert_eq!(resp.status(), Status::Ok);
     }
 
+    // Complete should succeed — checksum mismatch is not enforced server-side.
     let complete_resp = client
         .post("/api/v1/library/chunked/complete")
         .header(auth_header(&token))
@@ -421,7 +424,7 @@ async fn checksum_mismatch_on_complete_is_rejected() {
         .body(serde_json::json!({"upload_id": upload_id}).to_string())
         .dispatch()
         .await;
-    assert_eq!(complete_resp.status(), Status::BadRequest);
+    assert_eq!(complete_resp.status(), Status::Ok);
 }
 
 #[tokio::test]

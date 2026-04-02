@@ -49,6 +49,8 @@ pub struct UploadResult {
     pub path: String,
     pub size: u64,
     pub disk_size: u64,
+    /// Plaintext SHA-256 hex digest, computed on the fly for API responses.
+    /// Empty for streaming uploads (computing it would defeat the point).
     pub checksum_sha256: String,
     pub mime_type: Option<String>,
 }
@@ -98,6 +100,13 @@ fn require_data_key(unlock_state: &UnlockState, library_id: &str) -> Result<Data
     unlock_state
         .get_library_key(library_id)
         .ok_or(AppError::Locked)
+}
+
+/// Like `require_data_key` but returns `None` instead of erroring when
+/// the library is locked. Used for integrity checks that can fall back
+/// to key-free mode.
+fn try_data_key(unlock_state: &UnlockState, library_id: &str) -> Option<DataKey> {
+    unlock_state.get_library_key(library_id)
 }
 
 /// Turn a canonical on-disk path back into a user-facing relative path
@@ -150,10 +159,10 @@ fn is_internal_file(name: &str) -> bool {
     name == INTERNAL_META_FILENAME
 }
 
-/// Compute the plaintext size from an encrypted blob length.
-/// Encrypted format: nonce(12) + ciphertext+tag(N+16) + sha256(32) = N + 60
-/// So plaintext = encrypted_len - 60, clamped to 0 for safety.
-const ENCRYPTION_OVERHEAD: u64 = 12 + 16 + 32; // 60 bytes
+/// Compute the plaintext size from an encrypted single-shot blob length.
+/// Format: SINGLE_MAGIC(3) + nonce(12) + ciphertext+tag(N+16) + file_hash(32) = N + 63
+/// So plaintext = encrypted_len - 63, clamped to 0 for safety.
+const ENCRYPTION_OVERHEAD: u64 = 3 + 12 + 16 + 32; // 63 bytes
 
 fn plaintext_size_from_disk(disk_size: u64) -> u64 {
     disk_size.saturating_sub(ENCRYPTION_OVERHEAD)
@@ -193,8 +202,10 @@ pub async fn list_directory(
     user_path: &str,
     check_integrity: bool,
 ) -> Result<Vec<FsEntry>, AppError> {
+    // Try to get the data key. If locked, integrity checks fall back to
+    // key-free file hash only (instead of erroring).
     let data_key = if check_integrity {
-        Some(require_data_key(unlock_state, library_id)?)
+        try_data_key(unlock_state, library_id)
     } else {
         None
     };
@@ -271,12 +282,8 @@ pub async fn list_directory(
         let rel_path = relative_display_path(&canonical_root, &entry_path);
 
         let integrity = if check_integrity && !is_dir {
-            if let Some(ref dk) = data_key {
-                let status = verify_file_integrity_async(dk, &entry_path).await;
-                Some(format_integrity_status(&status))
-            } else {
-                None
-            }
+            let status = verify_file_integrity_async(data_key.as_ref(), &entry_path).await;
+            Some(format_integrity_status(&status))
         } else {
             None
         };
@@ -394,7 +401,7 @@ pub async fn upload_file_owned(
             .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
     }
 
-    // Compute checksum before encryption.
+    // Compute plaintext SHA-256 for the API response (not stored on disk).
     let checksum = crypto_service::sha256_bytes(&data);
     let checksum_hex = hex::encode(checksum);
     let plaintext_size = data.len() as u64;
@@ -437,15 +444,9 @@ pub async fn upload_file_owned(
 
 /// Upload (encrypt and write) a file into a library directly from chunk staging files.
 ///
-/// This is the streaming path for large chunked uploads: chunk files are
-/// read, encrypted, and written segment-by-segment without assembling the
-/// full plaintext into memory. RAM usage is bounded to O(chunk_size).
-///
-/// `chunk_paths` are the ordered staging paths for each chunk.
-/// `total_plaintext_bytes` is the sum of all plaintext chunk sizes.
-/// `expected_checksum` is an optional pre-computed SHA-256 of the assembled
-/// plaintext (from the upload manifest); if provided it is verified before
-/// writing.
+/// Streaming path for large chunked uploads: chunk files are read, encrypted,
+/// and written segment-by-segment without assembling the full plaintext into
+/// memory. RAM usage is bounded to O(chunk_size).
 pub async fn upload_file_streaming(
     config: &AppConfig,
     unlock_state: &UnlockState,
@@ -453,7 +454,6 @@ pub async fn upload_file_streaming(
     user_path: &str,
     chunk_paths: &[std::path::PathBuf],
     total_plaintext_bytes: u64,
-    expected_checksum: Option<[u8; 32]>,
     write_verify: bool,
 ) -> Result<UploadResult, AppError> {
     if user_path.is_empty() {
@@ -471,11 +471,10 @@ pub async fn upload_file_streaming(
             .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
     }
 
-    let plaintext_checksum = stream_encrypt_chunks_to_file(
+    stream_encrypt_chunks_to_file(
         &data_key,
         chunk_paths,
         total_plaintext_bytes,
-        expected_checksum.as_ref(),
         &target,
         write_verify,
     )
@@ -494,7 +493,7 @@ pub async fn upload_file_streaming(
         path: user_path.to_string(),
         size: total_plaintext_bytes,
         disk_size: disk_meta.len(),
-        checksum_sha256: hex::encode(plaintext_checksum),
+        checksum_sha256: String::new(),
         mime_type: mime_from_filename(&filename),
     })
 }
@@ -714,8 +713,8 @@ pub async fn get_entry_info(
     let rel_path = relative_display_path(&canonical_root, &target);
 
     let integrity = if check_integrity && !is_dir {
-        let dk = require_data_key(unlock_state, library_id)?;
-        let status = verify_file_integrity_async(&dk, &target).await;
+        let dk = try_data_key(unlock_state, library_id);
+        let status = verify_file_integrity_async(dk.as_ref(), &target).await;
         Some(format_integrity_status(&status))
     } else {
         None
@@ -835,7 +834,7 @@ pub async fn calculate_usage(
 fn format_integrity_status(status: &IntegrityStatus) -> String {
     match status {
         IntegrityStatus::Ok => "ok".to_string(),
-        IntegrityStatus::ChecksumMismatch => "checksum_mismatch".to_string(),
+        IntegrityStatus::FileHashMismatch => "file_hash_mismatch".to_string(),
         IntegrityStatus::DecryptionFailed(msg) => format!("decryption_failed: {msg}"),
     }
 }
@@ -918,8 +917,8 @@ mod tests {
 
     #[test]
     fn plaintext_size_normal() {
-        assert_eq!(plaintext_size_from_disk(160), 100);
-        assert_eq!(plaintext_size_from_disk(60), 0); // minimum encrypted file
+        assert_eq!(plaintext_size_from_disk(163), 100);
+        assert_eq!(plaintext_size_from_disk(63), 0); // minimum encrypted file (empty plaintext)
     }
 
     #[test]
@@ -1088,7 +1087,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(upload.size, 0);
-        assert!(upload.disk_size > 0); // nonce + tag + checksum
+        assert!(upload.disk_size > 0); // magic + nonce + tag + file_hash
 
         let download = download_file(&config, &unlock_state, &lib_id, "empty.bin")
             .await
@@ -1684,9 +1683,9 @@ mod tests {
             .join(&lib_id)
             .join("tampered.txt");
         let mut blob = fs::read(&file_path).await.unwrap();
-        // Flip a byte in the ciphertext area (after the 12-byte nonce).
+        // Flip a byte in the ciphertext area (after magic + nonce).
         if blob.len() > 20 {
-            blob[15] ^= 0xFF;
+            blob[16] ^= 0xFF;
         }
         fs::write(&file_path, &blob).await.unwrap();
 
@@ -1696,9 +1695,10 @@ mod tests {
 
         assert!(info.integrity.is_some());
         let status = info.integrity.unwrap();
-        // Could be decryption_failed or checksum_mismatch depending on where the bit flip lands.
+        // File hash check catches the tamper before decryption is even attempted.
         assert!(
-            status.contains("decryption_failed") || status.contains("checksum_mismatch"),
+            status.contains("file_hash_mismatch")
+                || status.contains("decryption_failed"),
             "expected failure status, got: {status}"
         );
     }
@@ -2099,10 +2099,10 @@ mod tests {
     }
 
     #[test]
-    fn format_integrity_checksum_mismatch() {
+    fn format_integrity_file_hash_mismatch() {
         assert_eq!(
-            format_integrity_status(&IntegrityStatus::ChecksumMismatch),
-            "checksum_mismatch"
+            format_integrity_status(&IntegrityStatus::FileHashMismatch),
+            "file_hash_mismatch"
         );
     }
 
