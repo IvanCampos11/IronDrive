@@ -122,7 +122,7 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          if [[ "$tag" == *"-"* ]] || [[ "$tag" == v0.* ]]; then
+          if [[ "$tag" == *"-"* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
