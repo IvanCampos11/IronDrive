@@ -201,12 +201,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download release artifacts
+      - name: Download x86_64 linux artifact
         uses: actions/download-artifact@v4
         with:
-          pattern: |
-            *
-            !*.dockerbuild
+          name: x86_64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Download aarch64 linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aarch64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Download x86_64 macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: x86_64-apple-darwin
+          path: artifacts
+
+      - name: Download aarch64 macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aarch64-apple-darwin
+          path: artifacts
+
+      - name: Download x86_64 windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: x86_64-pc-windows-msvc
           path: artifacts
 
       - name: Determine if prerelease
