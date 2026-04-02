@@ -78,7 +78,6 @@ struct ChunkedUploadRow {
     target_path: String,
     total_chunks: i64,
     total_bytes: i64,
-    checksum: Option<String>,
     expires_at: String,
 }
 
@@ -112,7 +111,7 @@ fn expected_total_chunks(total_bytes: u64, chunk_size_bytes: u64) -> u32 {
     if total_bytes == 0 {
         return 1;
     }
-    ((total_bytes + chunk_size_bytes - 1) / chunk_size_bytes) as u32
+    total_bytes.div_ceil(chunk_size_bytes) as u32
 }
 
 fn expected_chunk_len(
@@ -142,8 +141,8 @@ async fn load_upload_row(
     pool: &DbPool,
     upload_id: &str,
 ) -> Result<Option<ChunkedUploadRow>, AppError> {
-    let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, Option<String>, String)>(
-        "SELECT id, user_id, target_id, target_path, total_chunks, received_chunks, total_bytes, checksum, expires_at
+    let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, String)>(
+        "SELECT id, user_id, target_id, target_path, total_chunks, received_chunks, total_bytes, expires_at
          FROM chunked_uploads
          WHERE id = ? AND target_type = 'library'",
     )
@@ -157,8 +156,7 @@ async fn load_upload_row(
         target_path: r.3,
         total_chunks: r.4,
         total_bytes: r.6,
-        checksum: r.7,
-        expires_at: r.8,
+        expires_at: r.7,
     }))
 }
 

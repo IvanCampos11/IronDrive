@@ -8,6 +8,7 @@ use crate::services::crypto_service::DataKey;
 /// **Server-mode** keys stay in memory for the server's lifetime.
 /// **User-mode** keys are loaded on `/unlock` and removed on `/lock` or session expiry.
 /// All keys are zeroized on removal or drop.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct UnlockState {
     libraries: DashMap<String, ZeroVec>,
     spaces: DashMap<String, ZeroVec>,
@@ -22,6 +23,7 @@ impl Drop for ZeroVec {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl UnlockState {
     pub fn new() -> Self {
         Self {

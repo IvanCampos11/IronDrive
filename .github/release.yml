@@ -9,17 +9,20 @@ changelog:
       labels:
         - breaking
         - semver-major
+        - major
     - title: Features
       labels:
         - feature
         - enhancement
         - semver-minor
+        - minor
     - title: Fixes
       labels:
         - bug
         - bugfix
         - fix
         - semver-patch
+        - patch
     - title: Security
       labels:
         - security

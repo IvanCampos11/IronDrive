@@ -78,6 +78,7 @@ pub struct MasterKey {
 }
 
 impl MasterKey {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
         &self.key
     }
@@ -286,6 +287,7 @@ async fn store_encrypted_master_key(pool: &DbPool, blob: &[u8]) -> Result<(), Ap
 ///
 /// file_hash = SHA-256(magic ‖ nonce ‖ ciphertext+tag).
 /// No plaintext hash stored — AES-GCM tag already authenticates plaintext.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn encrypt_file_bytes(data_key: &DataKey, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(data_key.as_bytes()));
 
@@ -408,6 +410,7 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; FILE_HASH_LEN] {
 
 /// SHA-256 of a file on disk via streaming reads. Avoids loading the entire
 /// file into memory.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn sha256_file(path: &Path) -> Result<[u8; FILE_HASH_LEN], AppError> {
     let mut file = tokio::fs::File::open(path)
         .await
@@ -519,6 +522,7 @@ pub async fn verify_file_hash(path: &Path) -> Result<(), AppError> {
 }
 
 /// Encrypt plaintext and write to disk with an optional write-verify pass.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn encrypt_and_write_file(
     data_key: &DataKey,
     plaintext: &[u8],
@@ -560,13 +564,13 @@ pub async fn encrypt_and_write_file_owned(
     file.write_all(&SINGLE_MAGIC)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write encrypted file magic: {e}")))?;
-    hasher.update(&SINGLE_MAGIC);
+    hasher.update(SINGLE_MAGIC);
 
     // Write nonce.
     file.write_all(&nonce_bytes)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write encrypted file nonce: {e}")))?;
-    hasher.update(&nonce_bytes);
+    hasher.update(nonce_bytes);
 
     // Write ciphertext (plaintext buffer is now encrypted in-place).
     file.write_all(&plaintext)
@@ -644,11 +648,11 @@ pub async fn stream_encrypt_chunks_to_file(
     out.write_all(&STREAM_MAGIC)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write STREAM magic: {e}")))?;
-    hasher.update(&STREAM_MAGIC);
+    hasher.update(STREAM_MAGIC);
     out.write_all(&stream_nonce)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to write STREAM nonce: {e}")))?;
-    hasher.update(&stream_nonce);
+    hasher.update(stream_nonce);
 
     // Build the STREAM encryptor.
     let key = Key::<Aes256Gcm>::from_slice(data_key.as_bytes());
@@ -685,7 +689,7 @@ pub async fn stream_encrypt_chunks_to_file(
         out.write_all(&seg_len_bytes)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to write segment header: {e}")))?;
-        hasher.update(&seg_len_bytes);
+        hasher.update(seg_len_bytes);
         out.write_all(&buf)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to write segment body: {e}")))?;
@@ -905,7 +909,7 @@ pub async fn is_stream_format(path: &Path) -> bool {
         Err(_) => return false,
     };
     let mut magic = [0u8; 3];
-    matches!(file.read_exact(&mut magic).await, Ok(_)) && magic == STREAM_MAGIC
+    (file.read_exact(&mut magic).await).is_ok() && magic == STREAM_MAGIC
 }
 
 /// Verify integrity of any encrypted file (single-shot or STREAM).
@@ -921,7 +925,7 @@ pub async fn verify_file_integrity_async(
     path: &Path,
 ) -> IntegrityStatus {
     // Tier 1: file hash — no key needed.
-    if let Err(_) = verify_file_hash(path).await {
+    if verify_file_hash(path).await.is_err() {
         return IntegrityStatus::FileHashMismatch;
     }
 

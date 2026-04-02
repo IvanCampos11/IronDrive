@@ -194,7 +194,7 @@ impl<'r> Responder<'r, 'static> for CatcherJsonBody {
     fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
         // If the request accepts HTML (browser), render an error template
         let accept = request.accept();
-        let wants_html = accept.map_or(false, |a| {
+        let wants_html = accept.is_some_and(|a| {
             a.iter().any(|q| {
                 let mt = q.media_type();
                 mt.top() == "text" && mt.sub() == "html"

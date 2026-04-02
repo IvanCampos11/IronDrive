@@ -1,0 +1,169 @@
+name: Auto Tag Release
+
+on:
+  pull_request_target:
+    types:
+      - closed
+    branches:
+      - dev
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  tag:
+    name: Create release tag from PR label
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'dev'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Determine version bump
+        id: bump
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(label => label.name);
+            const normalized = new Set(labels);
+
+            const bumpLabels = [
+              ['semver-major', 'major'],
+              ['semver-minor', 'minor'],
+              ['semver-patch', 'patch'],
+              ['major', 'major'],
+              ['minor', 'minor'],
+              ['patch', 'patch'],
+            ];
+
+            const selected = [...new Set(
+              bumpLabels
+                .filter(([label]) => normalized.has(label))
+                .map(([, bump]) => bump)
+            )];
+
+            if (selected.length > 1) {
+              core.setFailed(
+                `PR has conflicting version labels: ${selected.join(', ')}. Use exactly one of semver-major, semver-minor, or semver-patch.`
+              );
+              return;
+            }
+
+            if (selected.length === 0) {
+              if (normalized.has('release')) {
+                core.setFailed(
+                  'PR has the release label but no semver label. Add exactly one of semver-major, semver-minor, or semver-patch.'
+                );
+                return;
+              }
+
+              core.info('No semver label found on merged PR. Skipping tag creation.');
+              core.setOutput('should_tag', 'false');
+              return;
+            }
+
+            core.setOutput('should_tag', 'true');
+            core.setOutput('bump', selected[0]);
+
+      - name: Ensure release token exists
+        if: steps.bump.outputs.should_tag == 'true'
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.RELEASE_TOKEN }}" ]; then
+            echo "Missing RELEASE_TOKEN secret."
+            echo "Create a classic PAT with repo scope, or a fine-grained token with Contents: Read and write, then save it as RELEASE_TOKEN."
+            exit 1
+          fi
+
+      - name: Checkout merge commit
+        if: steps.bump.outputs.should_tag == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Determine next version tag
+        if: steps.bump.outputs.should_tag == 'true'
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin --tags --force
+
+          existing_tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          if [ -n "$existing_tag" ]; then
+            echo "already_tagged=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$existing_tag" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_tag="$(git tag -l 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+
+          if [ -z "$latest_tag" ]; then
+            base_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+            if [ -z "$base_version" ]; then
+              echo "Unable to determine base version from Cargo.toml"
+              exit 1
+            fi
+            latest_tag="v$base_version"
+          fi
+
+          version_core="${latest_tag#v}"
+          IFS='.' read -r major minor patch <<EOF
+          $version_core
+          EOF
+
+          case "${{ steps.bump.outputs.bump }}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+            *)
+              echo "Unsupported version bump: ${{ steps.bump.outputs.bump }}"
+              exit 1
+              ;;
+          esac
+
+          new_tag="v${major}.${minor}.${patch}"
+
+          if git rev-parse -q --verify "refs/tags/$new_tag" >/dev/null; then
+            echo "Tag $new_tag already exists"
+            exit 1
+          fi
+
+          echo "already_tagged=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$new_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        if: steps.bump.outputs.should_tag == 'true' && steps.version.outputs.already_tagged != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git"
+
+          tag="${{ steps.version.outputs.tag }}"
+          git tag -a "$tag" -m "Release $tag from PR #${{ github.event.pull_request.number }}"
+          git push origin "$tag"
+
+      - name: Job summary
+        shell: bash
+        run: |
+          if [ "${{ steps.bump.outputs.should_tag || 'false' }}" != 'true' ]; then
+            echo "No semver label found. No release tag was created." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.version.outputs.already_tagged || 'false' }}" = 'true' ]; then
+            echo "Commit already had release tag ${{ steps.version.outputs.tag }}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Created release tag ${{ steps.version.outputs.tag }} from PR #${{ github.event.pull_request.number }}." >> "$GITHUB_STEP_SUMMARY"
+          fi
