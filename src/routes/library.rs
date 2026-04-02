@@ -61,6 +61,8 @@ pub struct UploadResponse {
     pub path: String,
     pub size: u64,
     pub disk_size: u64,
+    /// Plaintext SHA-256 hex digest. Computed on the fly for single-shot uploads;
+    /// empty for chunked uploads.
     pub checksum_sha256: String,
     pub mime_type: Option<String>,
     pub message: String,
@@ -84,6 +86,7 @@ pub struct InitChunkUploadRequest {
     pub path: String,
     pub total_chunks: u32,
     pub total_bytes: u64,
+    /// Advisory only — format-validated but not enforced server-side.
     pub checksum_sha256: Option<String>,
 }
 
@@ -132,6 +135,7 @@ pub struct InitChunkDownloadResponse {
 pub struct FileChunkDownload {
     pub data: Vec<u8>,
     pub content_type: ContentType,
+    /// Plaintext SHA-256 hex digest for the `X-IronDrive-Integrity` header.
     pub checksum_sha256: String,
     pub chunk_index: u32,
     pub total_chunks: u32,
@@ -163,11 +167,12 @@ impl<'r> Responder<'r, 'static> for FileChunkDownload {
 }
 
 /// Custom responder for file downloads. Sends the decrypted body with
-/// appropriate headers including `X-IronDrive-Integrity`.
+/// `X-IronDrive-Integrity` (plaintext SHA-256, computed on the fly).
 pub struct FileDownload {
     pub data: Vec<u8>,
     pub filename: String,
     pub content_type: ContentType,
+    /// Plaintext SHA-256 hex digest for the `X-IronDrive-Integrity` header.
     pub checksum_sha256: String,
 }
 

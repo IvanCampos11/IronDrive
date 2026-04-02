@@ -27,6 +27,8 @@ pub struct InitUploadParams {
     pub target_path: String,
     pub total_chunks: u32,
     pub total_bytes: u64,
+    /// Client-supplied plaintext SHA-256. Advisory only — validated for format
+    /// but not enforced server-side (the on-disk format uses a ciphertext hash).
     pub checksum_sha256: Option<String>,
 }
 
@@ -62,6 +64,7 @@ pub struct InitDownloadResult {
 pub struct ChunkDownloadResult {
     pub data: Vec<u8>,
     pub mime_type: Option<String>,
+    /// Plaintext SHA-256 hex digest for the `X-IronDrive-Integrity` header.
     pub checksum_sha256: String,
     pub chunk_index: u32,
     pub total_chunks: u32,

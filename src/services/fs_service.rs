@@ -49,6 +49,8 @@ pub struct UploadResult {
     pub path: String,
     pub size: u64,
     pub disk_size: u64,
+    /// Plaintext SHA-256 hex digest, computed on the fly for API responses.
+    /// Empty for streaming uploads (computing it would defeat the point).
     pub checksum_sha256: String,
     pub mime_type: Option<String>,
 }
@@ -396,7 +398,7 @@ pub async fn upload_file_owned(
             .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
     }
 
-    // Compute checksum before encryption.
+    // Compute plaintext SHA-256 for the API response (not stored on disk).
     let checksum = crypto_service::sha256_bytes(&data);
     let checksum_hex = hex::encode(checksum);
     let plaintext_size = data.len() as u64;
@@ -1082,7 +1084,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(upload.size, 0);
-        assert!(upload.disk_size > 0); // nonce + tag + checksum
+        assert!(upload.disk_size > 0); // magic + nonce + tag + file_hash
 
         let download = download_file(&config, &unlock_state, &lib_id, "empty.bin")
             .await

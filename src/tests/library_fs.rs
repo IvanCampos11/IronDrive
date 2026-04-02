@@ -4,7 +4,7 @@
 //! and exercise the HTTP endpoints end-to-end:
 //!
 //! - List / Info / Usage on empty library
-//! - Upload → Download roundtrip (including checksum verification)
+//! - Upload → Download roundtrip (including integrity header verification)
 //! - Mkdir, Rename, Delete
 //! - Path traversal rejection at the HTTP layer
 //! - Auth / setup guards
@@ -1311,11 +1311,11 @@ async fn users_cannot_see_each_others_files() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — Checksum verification on download
+// Tests — Integrity header verification on download
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn download_checksum_matches_known_sha256() {
+async fn download_integrity_header_matches_known_sha256() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
@@ -1359,7 +1359,7 @@ async fn download_checksum_matches_known_sha256() {
 }
 
 #[tokio::test]
-async fn upload_and_download_checksums_match() {
+async fn upload_and_download_integrity_values_match() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
