@@ -102,6 +102,13 @@ fn require_data_key(unlock_state: &UnlockState, library_id: &str) -> Result<Data
         .ok_or(AppError::Locked)
 }
 
+/// Like `require_data_key` but returns `None` instead of erroring when
+/// the library is locked. Used for integrity checks that can fall back
+/// to key-free mode.
+fn try_data_key(unlock_state: &UnlockState, library_id: &str) -> Option<DataKey> {
+    unlock_state.get_library_key(library_id)
+}
+
 /// Turn a canonical on-disk path back into a user-facing relative path
 /// (relative to `root`). Returns `""` if the path equals root.
 fn relative_display_path(root: &Path, full: &Path) -> String {
@@ -195,8 +202,10 @@ pub async fn list_directory(
     user_path: &str,
     check_integrity: bool,
 ) -> Result<Vec<FsEntry>, AppError> {
+    // Try to get the data key. If locked, integrity checks fall back to
+    // key-free file hash only (instead of erroring).
     let data_key = if check_integrity {
-        Some(require_data_key(unlock_state, library_id)?)
+        try_data_key(unlock_state, library_id)
     } else {
         None
     };
@@ -273,14 +282,8 @@ pub async fn list_directory(
         let rel_path = relative_display_path(&canonical_root, &entry_path);
 
         let integrity = if check_integrity && !is_dir {
-            if let Some(ref dk) = data_key {
-                let status = verify_file_integrity_async(Some(dk), &entry_path).await;
-                Some(format_integrity_status(&status))
-            } else {
-                // No key available — key-free file hash check only.
-                let status = verify_file_integrity_async(None, &entry_path).await;
-                Some(format_integrity_status(&status))
-            }
+            let status = verify_file_integrity_async(data_key.as_ref(), &entry_path).await;
+            Some(format_integrity_status(&status))
         } else {
             None
         };
@@ -710,8 +713,8 @@ pub async fn get_entry_info(
     let rel_path = relative_display_path(&canonical_root, &target);
 
     let integrity = if check_integrity && !is_dir {
-        let dk = require_data_key(unlock_state, library_id)?;
-        let status = verify_file_integrity_async(Some(&dk), &target).await;
+        let dk = try_data_key(unlock_state, library_id);
+        let status = verify_file_integrity_async(dk.as_ref(), &target).await;
         Some(format_integrity_status(&status))
     } else {
         None
