@@ -48,7 +48,15 @@ jobs:
               });
               const merged = prs.find(pr => pr.merged_at);
               if (merged) {
-                const versionLabels = ['release', 'major', 'minor', 'patch'];
+                const versionLabels = [
+                  'release',
+                  'semver-major',
+                  'semver-minor',
+                  'semver-patch',
+                  'major',
+                  'minor',
+                  'patch',
+                ];
                 const hasLabel = merged.labels.some(l => versionLabels.includes(l.name));
                 core.setOutput('should_publish', hasLabel ? 'true' : 'false');
                 core.info(hasLabel
