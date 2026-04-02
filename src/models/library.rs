@@ -6,6 +6,7 @@ use crate::db::{is_unique_violation, DbPool};
 use crate::errors::AppError;
 
 /// A row from `personal_libraries`. One per user.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct PersonalLibrary {
     pub id: String,

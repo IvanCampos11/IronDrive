@@ -148,6 +148,7 @@ impl User {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
     }

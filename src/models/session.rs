@@ -98,6 +98,7 @@ impl Session {
     }
 
     /// Delete all sessions for a user ("log out everywhere").
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn delete_all_for_user(pool: &SqlitePool, user_id: &str) -> Result<u64, sqlx::Error> {
         let result = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
             .bind(user_id)
@@ -108,6 +109,7 @@ impl Session {
     }
 
     /// Delete all expired sessions. Returns the number removed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn delete_expired(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
         let now = Utc::now()
             .naive_utc()

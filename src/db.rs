@@ -13,7 +13,7 @@ pub fn is_unique_violation(err: &sqlx::Error) -> bool {
                 .message()
                 .to_ascii_lowercase()
                 .contains("unique constraint")
-                || db_err.code().map_or(false, |c| c == "2067")
+                || db_err.code().is_some_and(|c| c == "2067")
         }
         _ => false,
     }
@@ -97,7 +97,7 @@ pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
 
     let migrations = tokio::task::spawn_blocking(read_migration_files)
         .await
-        .map_err(|e| sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e)))?
         .map_err(sqlx::Error::Io)?;
 
     let mut applied_count: usize = 0;

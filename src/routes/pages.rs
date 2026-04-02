@@ -409,7 +409,7 @@ pub async fn files_page(
 
     let user_path = path.as_deref().unwrap_or("");
 
-    let entries = match fs_service::list_directory(
+    let entries: Vec<fs_service::FsEntry> = fs_service::list_directory(
         config.inner(),
         unlock_state.inner(),
         &lib.id,
@@ -417,10 +417,7 @@ pub async fn files_page(
         false,
     )
     .await
-    {
-        Ok(e) => e,
-        Err(_) => Vec::new(),
-    };
+    .unwrap_or_default();
 
     // Build breadcrumb segments
     let breadcrumbs = build_breadcrumbs(user_path);
@@ -433,9 +430,9 @@ pub async fn files_page(
                 "name": e.name,
                 "path": e.path,
                 "is_dir": e.is_dir,
-                "size": e.size.map(|s| format_bytes(s)),
+                "size": e.size.map(format_bytes),
                 "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(|s| format_bytes(s)),
+                "disk_size": e.disk_size.map(format_bytes),
                 "mime_type": e.mime_type,
                 "modified": e.modified.as_deref().map(format_timestamp),
                 "raw_modified": e.modified,
@@ -497,9 +494,9 @@ pub async fn files_partial(
                 "name": e.name,
                 "path": e.path,
                 "is_dir": e.is_dir,
-                "size": e.size.map(|s| format_bytes(s)),
+                "size": e.size.map(format_bytes),
                 "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(|s| format_bytes(s)),
+                "disk_size": e.disk_size.map(format_bytes),
                 "mime_type": e.mime_type,
                 "modified": e.modified.as_deref().map(format_timestamp),
                 "raw_modified": e.modified,

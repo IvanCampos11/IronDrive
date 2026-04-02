@@ -64,7 +64,7 @@ pub fn safe_join(root: &Path, user_path: &str) -> Result<PathBuf, AppError> {
     }
 
     // ── 4. Split on `/` and `\` and validate every component ─────────────
-    let components: Vec<&str> = user_path.split(|c| c == '/' || c == '\\').collect();
+    let components: Vec<&str> = user_path.split(['/', '\\']).collect();
 
     if components.len() > MAX_DEPTH {
         return Err(AppError::Validation(format!(
