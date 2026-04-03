@@ -31,7 +31,7 @@
 
 ## 1. Project Overview
 
-IronDrive is a self-hosted file storage and sharing platform — basically a Google Drive / nextcloud / opencloud alternative, written in **Rust** with **Rocket**.
+IronDrive is a self-hosted file storage and sharing platform — a Google Drive / nextcloud / opencloud alternative, written in **Rust** with **Rocket**.
 
 ### Design Principles
 
@@ -149,13 +149,6 @@ The short version: the DB knows about users, permissions, and keys. The filesyst
 │   - modification times  │   - modification times                 │
 └─────────────────────────┴────────────────────────────────────────┘
 ```
-
-### Why No File Database?
-
-- **No sync headaches** — Can't have DB and disk disagree if only one of them tracks files.
-- **Admin can browse** — The directory tree is visible (contents are encrypted, but structure is there).
-- **No orphans** — No phantom DB records pointing to missing files or vice versa.
-- **Dead-simple backups** — Copy `data/` and `db/`. That's the whole backup.
 
 ---
 
