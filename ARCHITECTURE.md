@@ -1,8 +1,8 @@
 # IronDrive — Architecture Guide
 
-> **Version:** 0.1.0-draft
-> **Last Updated:** 2025-01-09
-> **Status:** Pre-development — nothing runs yet, this is the plan
+> **Version:** 0.1.0
+> **Last Updated:** 2025-07-14
+> **Status:** Active development — core features implemented and tested
 
 ---
 
@@ -270,12 +270,17 @@ Does **not** protect against: server compromise (admin/attacker with server acce
 /// Server-mode keys are loaded automatically at boot.
 /// User-mode keys are loaded when the user calls /unlock.
 /// User-mode keys are removed when the user calls /lock or on session expiry.
+/// All keys are zeroized on removal or drop.
+///
+/// Internally uses Arc<DashMap> so clones share the same key store.
+/// This allows background tasks to hold a cheap handle to the live state.
 
+#[derive(Clone)]
 pub struct UnlockState {
-    /// library_id → data key (decrypted, in memory)
-    libraries: DashMap<String, Vec<u8>>,
-    /// space_id → data key (decrypted, in memory)
-    spaces: DashMap<String, Vec<u8>>,
+    /// library_id → data key (decrypted, zeroized on drop)
+    libraries: Arc<DashMap<String, ZeroVec>>,
+    /// space_id → data key (decrypted, zeroized on drop)
+    spaces: Arc<DashMap<String, ZeroVec>>,
 }
 ```
 
@@ -439,6 +444,11 @@ irondrive/
 ├── Rocket.toml                        # Rocket config (port, limits, TLS)
 ├── .env.example                       # Environment variable template
 ├── ARCHITECTURE.md                    # This document
+├── TODO.md                            # Milestone tracker
+├── Makefile                           # Build, test, run shortcuts
+├── Dockerfile                         # Container build
+├── docker-compose.yml                 # Docker Compose for local dev
+├── tailwind.config.js                 # Tailwind CSS config
 │
 ├── db/                                # SQLite database (gitignored)
 │   └── irondrive.db                   # Main database file
@@ -451,11 +461,12 @@ irondrive/
 │   ├── 005_create_sessions.sql
 │   ├── 006_create_chunked_uploads.sql
 │   ├── 007_create_integrity_events.sql
-│   └── 008_create_recovery_audit_log.sql
+│   ├── 008_create_recovery_audit_log.sql
+│   └── 009_create_server_config.sql
 │
 ├── data/                              # File storage root (gitignored)
 │   ├── libraries/                     # Personal libraries (one per user)
-│   │   └── <user_uuid>/
+│   │   └── <library_uuid>/
 │   │       ├── .irondrive.meta
 │   │       └── ...user's files (encrypted on disk)...
 │   ├── spaces/                        # Collaborative spaces
@@ -467,80 +478,79 @@ irondrive/
 │           ├── .meta.json
 │           └── ...numbered chunk files...
 │
+├── templates/                         # Tera HTML templates
+│   ├── base.html.tera                 # Base layout (nav, flash, sidebar)
+│   ├── auth/                          # Login, registration pages
+│   ├── files/                         # File browser, usage display
+│   ├── settings/                      # User settings
+│   ├── setup/                         # First-run setup wizard
+│   ├── errors/                        # 403, 404, 500 error pages
+│   └── partials/                      # Reusable components (nav, breadcrumb, etc.)
+│
+├── static/                            # Static assets
+│   ├── css/                           # Tailwind input + compiled CSS
+│   ├── js/                            # App JS (upload panel, HTMX helpers)
+│   └── vendor/                        # Third-party (htmx.min.js)
+│
 ├── src/
 │   ├── main.rs                        # Rocket launch, mount routes, attach fairings
-│   ├── config.rs                      # App config (from Rocket.toml / env vars)
-│   ├── db.rs                          # SQLx pool initialization
+│   ├── config.rs                      # AppConfig from env vars
+│   ├── db.rs                          # SQLx pool init + migration runner
 │   ├── errors.rs                      # Unified AppError type + Responder impl
 │   │
 │   ├── models/                        # DB-backed entities + queries
 │   │   ├── mod.rs
-│   │   ├── user.rs                    # User account
+│   │   ├── user.rs                    # User account CRUD
 │   │   ├── library.rs                 # Personal library record + key material
-│   │   ├── group.rs                   # Group + group_members
-│   │   ├── space.rs                   # Space + space_access + key material
-│   │   ├── session.rs                 # Auth sessions
-│   │   ├── chunked_upload.rs          # In-progress chunked upload records
-│   │   ├── integrity_event.rs         # File corruption / integrity failure records
-│   │   └── recovery_log.rs           # Recovery audit log entries
+│   │   └── session.rs                 # Auth sessions (create, validate, expire)
 │   │
 │   ├── routes/                        # Rocket route handlers (thin)
-│   │   ├── mod.rs                     # Re-exports + all_routes() function
+│   │   ├── mod.rs                     # Re-exports + all_routes()
 │   │   ├── auth.rs                    # Register, login, logout, setup-library
 │   │   ├── library.rs                 # Personal library filesystem routes
-│   │   ├── spaces.rs                  # Space CRUD + filesystem routes
-│   │   ├── groups.rs                  # Group CRUD + membership
-│   │   ├── users.rs                   # Profile, quota, admin user management
-│   │   ├── admin.rs                   # Admin-only: recovery trigger, user mgmt
+│   │   ├── integrity.rs               # Integrity events: list, acknowledge, admin scan
+│   │   ├── pages.rs                   # HTML page routes (login, browser, settings)
 │   │   └── health.rs                  # GET /health
 │   │
 │   ├── services/                      # Business logic (NO Rocket types)
 │   │   ├── mod.rs
 │   │   ├── auth_service.rs            # Registration, login, token management
-│   │   ├── fs_service.rs              # Generic filesystem ops (list, upload, etc.)
+│   │   ├── fs_service.rs              # Generic filesystem ops (list, upload, download, etc.)
 │   │   ├── chunk_service.rs           # Chunked upload/download orchestration
-│   │   ├── integrity_service.rs       # SHA-256 checksums, corruption detection, notifications
-│   │   ├── library_service.rs         # Personal library setup + rules
-│   │   ├── space_service.rs           # Space CRUD + permission resolution
-│   │   ├── group_service.rs           # Group logic
 │   │   ├── crypto_service.rs          # Key derivation, encrypt/decrypt, key wrapping
-│   │   ├── recovery_service.rs        # Failsafe recovery logic + audit logging
-│   │   ├── quota_service.rs           # Real disk usage calculation
-│   │   ├── unlock_state.rs            # In-memory key store
-│   │   └── background/               # Background service runners
-│   │       ├── mod.rs                 # BackgroundRunner — spawns + manages all tasks
+│   │   ├── integrity_service.rs       # Integrity scanning, event CRUD, corruption detection
+│   │   ├── library_service.rs         # Personal library setup + server-mode key loading
+│   │   ├── rate_limit.rs              # DashMap-based rate limiter
+│   │   ├── unlock_state.rs            # In-memory key store (Arc<DashMap> + zeroize)
+│   │   └── background/               # Background worker tasks
+│   │       ├── mod.rs                 # BackgroundRunner — spawns all workers on liftoff
 │   │       ├── integrity_scan.rs      # Periodic full-library integrity verification
-│   │       ├── session_cleanup.rs     # Expired session pruning
-│   │       └── chunk_cleanup.rs       # Stale incomplete upload cleanup
+│   │       ├── session_cleanup.rs     # Expired session pruning (hourly)
+│   │       └── chunk_cleanup.rs       # Stale chunked upload cleanup (every 30 min)
 │   │
 │   ├── guards/                        # Rocket request guards
 │   │   ├── mod.rs
 │   │   ├── auth_guard.rs              # AuthenticatedUser (from session token)
-│   │   ├── admin_guard.rs             # AdminUser (wraps AuthenticatedUser + role)
-│   │   ├── setup_guard.rs             # Rejects if setup_complete == false
-│   │   └── space_guard.rs             # SpaceAccess — permission check
+│   │   ├── admin_guard.rs             # AdminUser (wraps AuthenticatedUser + role check)
+│   │   ├── csrf_guard.rs              # CsrfXhr (cookie + header CSRF protection)
+│   │   ├── session_guard.rs           # SessionUser (lower-level session validation)
+│   │   └── setup_guard.rs             # SetupComplete (rejects if setup_complete == false)
 │   │
-│   ├── fairings/                      # Rocket fairings (middleware)
+│   ├── tests/                         # Integration tests (in-crate)
 │   │   ├── mod.rs
-│   │   ├── cors.rs                    # CORS headers
-│   │   ├── request_logger.rs          # Request/response logging
-│   │   └── background.rs             # Launch background services on liftoff
+│   │   ├── setup_flow.rs             # Registration, login, library setup tests
+│   │   ├── library_fs.rs             # File upload, download, mkdir, rename, delete
+│   │   ├── chunked_transfers.rs      # Chunked upload/download tests
+│   │   ├── integrity.rs              # Integrity scanning, events, cleanup tests
+│   │   └── page_routes.rs            # HTML page rendering tests
 │   │
 │   └── utils/                         # Shared stateless helpers
 │       ├── mod.rs
-│       ├── crypto.rs                  # Argon2 password hashing, AES-256-GCM, key wrapping
+│       ├── crypto.rs                  # Argon2 hashing, AES-256-GCM, key wrapping
 │       ├── path_safety.rs             # Path traversal prevention (CRITICAL)
-│       └── mime.rs                    # MIME type detection
+│       └── mime.rs                    # MIME type detection from extension
 │
-└── tests/                             # Integration tests
-    ├── common/mod.rs                  # Test setup (launch client, seed DB)
-    ├── auth_test.rs
-    ├── library_test.rs
-    ├── spaces_test.rs
-    ├── groups_test.rs
-    ├── chunked_transfer_test.rs       # Chunked upload/download tests
-    ├── integrity_test.rs              # Data integrity + corruption tests
-    └── encryption_test.rs             # Tests for all three encryption tiers
+└── target/                            # Cargo build output (gitignored)
 ```
 
 ---
@@ -763,7 +773,7 @@ CREATE TABLE recovery_audit_log (
 CREATE INDEX idx_recovery_audit_user ON recovery_audit_log(target_user_id, acknowledged);
 ```
 
-### Master Key Storage
+### Master Key Storage (`009_create_server_config.sql`)
 
 The master encryption key is stored separately from the main tables:
 
@@ -789,16 +799,16 @@ Pretty standard layered setup. The key rule: only the top layer (routes/guards/f
 
 | Layer | Location | Rocket Dependency | Responsibility |
 |---|---|---|---|
-| **Routes** | `src/routes/` | ✅ Yes | Parse request → call service → return JSON/status. As thin as possible. |
-| **Guards** | `src/guards/` | ✅ Yes | Extract & validate auth tokens, check permissions, enforce setup completion. |
-| **Fairings** | `src/fairings/` | ✅ Yes | Cross-cutting concerns: CORS, request logging, background service launch. |
-| **Services** | `src/services/` | ❌ No | All business logic. Pure Rust. Takes `&DbPool` and plain args. |
-| **Models** | `src/models/` | ❌ No | Data structs + SQL queries via SQLx. `Serialize`/`Deserialize`. |
-| **Utils** | `src/utils/` | ❌ No | Stateless helper functions (crypto, path safety, MIME). |
+| **Routes** | `src/routes/` | Yes | Parse request → call service → return JSON/status. As thin as possible. |
+| **Guards** | `src/guards/` | Yes | Extract & validate auth tokens, check permissions, enforce setup completion, CSRF. |
+| **Services** | `src/services/` | No | All business logic. Pure Rust. Takes `&DbPool` and plain args. |
+| **Models** | `src/models/` | No | Data structs + SQL queries via SQLx. `Serialize`/`Deserialize`. |
+| **Utils** | `src/utils/` | No | Stateless helper functions (crypto, path safety, MIME). |
+| **Background** | `src/services/background/` | No | Spawned via `AdHoc::on_liftoff` fairing in `main.rs`. Pure async loops. |
 
 ### The Rule
 
-**Only `routes/`, `guards/`, and `fairings/` import Rocket.** Everything else is framework-free.
+**Only `routes/` and `guards/` import Rocket.** Everything else is framework-free. Fairings are defined inline in `main.rs` using `AdHoc` — no separate module.
 
 ### Data Flow
 
@@ -807,10 +817,10 @@ HTTP Request
     │
     ▼
 ┌─────────┐     ┌──────────┐
-│ Fairing │────▶│  Guard   │  (auth check, setup check)
-└─────────┘     └──────────┘
-                     │
-                     ▼
+│ Fairing │────▶│  Guard   │  (auth, setup, CSRF checks)
+│ (inline │     └──────────┘
+│  AdHoc) │          │
+└─────────┘          ▼
                 ┌─────────┐
                 │  Route   │  (thin: parse params, call service)
                 └─────────┘
@@ -947,12 +957,11 @@ pub async fn list(
 
 | Method | Endpoint | Description | Auth Required |
 |---|---|---|---|
-| `GET` | `/api/v1/library/integrity` | List integrity events for personal library | Yes |
-| `POST` | `/api/v1/library/integrity/<event_id>/ack` | Acknowledge/dismiss an integrity event | Yes |
-| `POST` | `/api/v1/library/integrity/scan` | Trigger an on-demand integrity scan of personal library | Yes |
-| `GET` | `/api/v1/spaces/<id>/integrity` | List integrity events for a space | Yes |
-| `POST` | `/api/v1/spaces/<id>/integrity/<event_id>/ack` | Acknowledge integrity event for a space | Yes |
-| `POST` | `/api/v1/spaces/<id>/integrity/scan` | Trigger on-demand integrity scan of a space | Yes |
+| `GET` | `/api/v1/library/integrity/events` | List integrity events for personal library | Yes (SetupComplete) |
+| `POST` | `/api/v1/library/integrity/events/<id>/acknowledge` | Acknowledge/dismiss an integrity event | Yes (SetupComplete + CSRF) |
+| `GET` | `/api/v1/users/me/notifications` | Unacknowledged integrity events for current user | Yes (SetupComplete) |
+| `GET` | `/api/v1/admin/integrity/events?target_type&target_id` | List integrity events for any target (admin only) | Yes (AdminUser) |
+| `POST` | `/api/v1/admin/integrity/scan?target_type&target_id` | Trigger manual scan on a library or space | Yes (AdminUser + CSRF) |
 
 ### Groups
 
@@ -983,8 +992,8 @@ pub async fn list(
 | `POST` | `/api/v1/admin/recovery/library/<user_id>` | Trigger recovery for a user's library (failsafe only) |
 | `POST` | `/api/v1/admin/recovery/space/<space_id>` | Trigger recovery for a space (failsafe only) |
 | `GET` | `/api/v1/admin/recovery/log` | View all recovery audit log entries |
-| `GET` | `/api/v1/admin/integrity/events` | View all integrity events system-wide |
-| `POST` | `/api/v1/admin/integrity/scan-all` | Trigger integrity scan across all libraries and spaces |
+| `GET` | `/api/v1/admin/integrity/events?target_type&target_id` | View integrity events for a specific target |
+| `POST` | `/api/v1/admin/integrity/scan?target_type&target_id` | Trigger integrity scan on a specific library or space |
 
 ### Health
 
@@ -1209,43 +1218,29 @@ Server Startup
 ### BackgroundRunner
 
 ```rust
-pub struct BackgroundRunner {
-    handles: Vec<tokio::task::JoinHandle<()>>,
-}
+/// Spawns background worker loops on the Tokio runtime.
+/// Each worker runs in its own `tokio::spawn` task and loops forever.
+pub struct BackgroundRunner;
 
 impl BackgroundRunner {
-    /// Spawn all background services. Called once during Rocket startup.
-    pub fn start(
-        pool: DbPool,
-        unlock_state: Arc<UnlockState>,
-        config: Arc<AppConfig>,
-    ) -> Self {
-        let mut handles = Vec::new();
+    /// Launch all background workers. Called from the `on_liftoff` fairing.
+    ///
+    /// `unlock_state` is cloned from Rocket managed state — because
+    /// `UnlockState` uses `Arc<DashMap>` internally, the clone shares
+    /// the same live key store as the request handlers.
+    pub fn start(pool: SqlitePool, config: AppConfig, unlock_state: UnlockState) {
+        tokio::spawn(integrity_scan::integrity_scan_loop(
+            pool.clone(), config.clone(), unlock_state,
+        ));
+        tokio::spawn(session_cleanup::session_cleanup_loop(pool.clone()));
+        tokio::spawn(chunk_cleanup::chunk_cleanup_loop(pool, config));
 
-        handles.push(tokio::spawn(integrity_scan::run(
-            pool.clone(),
-            unlock_state.clone(),
-            config.clone(),
-        )));
-
-        handles.push(tokio::spawn(session_cleanup::run(pool.clone())));
-
-        handles.push(tokio::spawn(chunk_cleanup::run(
-            pool.clone(),
-            config.clone(),
-        )));
-
-        Self { handles }
-    }
-
-    /// Graceful shutdown — cancel all tasks.
-    pub async fn shutdown(self) {
-        for handle in self.handles {
-            handle.abort();
-        }
+        tracing::info!("BackgroundRunner: all workers launched");
     }
 }
 ```
+
+Note: tasks are fire-and-forget. If a worker panics, it dies silently — acceptable for a solo deployment where you're watching the logs. A production multi-tenant setup would want supervision/restart logic here.
 
 ### Service Details
 
@@ -1279,38 +1274,21 @@ impl BackgroundRunner {
 
 ### Integration with Rocket
 
-`BackgroundRunner` lives as Rocket managed state, started via a fairing:
+Background workers are launched via an inline `AdHoc::on_liftoff` fairing in `main.rs` — no separate fairing struct needed:
 
 ```rust
 // In main.rs
-rocket::build()
-    .attach(BackgroundFairing)
-    // ... other fairings and routes
-
-// In fairings/background.rs
-pub struct BackgroundFairing;
-
-#[rocket::async_trait]
-impl Fairing for BackgroundFairing {
-    fn info(&self) -> Info {
-        Info { name: "Background Services", kind: Kind::Liftoff }
-    }
-
-    async fn on_liftoff(&self, rocket: &Rocket<Orbit>) {
-        let pool = rocket.state::<DbPool>().unwrap().clone();
-        let unlock_state = rocket.state::<Arc<UnlockState>>().unwrap().clone();
-        let config = rocket.state::<Arc<AppConfig>>().unwrap().clone();
-
-        let runner = BackgroundRunner::start(pool, unlock_state, config);
-
-        // Store the runner handle for graceful shutdown
-        // (managed via Rocket's shutdown hooks)
-        rocket.manage(runner);
-    }
-}
+.attach(AdHoc::on_liftoff("Background Workers", |rocket| {
+    Box::pin(async move {
+        let pool = rocket.state::<SqlitePool>().unwrap().clone();
+        let config = rocket.state::<AppConfig>().unwrap().clone();
+        let unlock_state = rocket.state::<UnlockState>().unwrap().clone();
+        BackgroundRunner::start(pool, config, unlock_state);
+    })
+}))
 ```
 
-> All background services share the same `DbPool` and `UnlockState` as request handlers. They're async and cooperative — they yield between I/O ops and never block the thread pool.
+`UnlockState` uses `Arc<DashMap>` internally, so `.clone()` gives the background tasks a cheap handle to the same live key store. When a user unlocks their library via the API, background workers see the key immediately.
 
 ---
 
@@ -1439,19 +1417,24 @@ pub struct FsEntry {
 name = "irondrive"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-only"
 
 [dependencies]
 # Web framework
 rocket = { version = "0.5.1", features = ["json", "secrets"] }
+rocket_dyn_templates = { version = "0.2.0", features = ["tera"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono", "uuid"] }
 
 # Auth & crypto
 argon2 = "0.5"                   # Password hashing + key derivation
-aes-gcm = "0.10"                 # AES-256-GCM file encryption + key wrapping
+aes-gcm = { version = "0.10", features = ["stream"] }
 sha2 = "0.10"                    # SHA-256 checksums for data integrity
+hmac = "0.12"                    # HMAC-SHA256 signing for download tokens
+hex = "0.4"                      # Hex encoding for token hashes
 rand = "0.8"                     # Secure random generation
+base64 = "0.22"                  # Base64 encoding for key material
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -1463,11 +1446,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["fs", "io-util", "time", "rt", "sync"] }
 thiserror = "2"                  # Ergonomic error types
 tracing = "0.1"                  # Structured logging
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mime_guess = "2"                 # MIME type from file extension
 dotenvy = "0.15"                 # Load .env files
 async-trait = "0.1"              # Async trait support
 dashmap = "6"                    # Concurrent map for UnlockState
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -1484,7 +1468,9 @@ tempfile = "3"
 | `thiserror` (not anyhow) | Structured error variants — much better for API responses than opaque errors. |
 | `tracing` (not log) | Structured, async-aware. The standard choice in Rust at this point. |
 | `tokio` (extended features) | `time` for background intervals, `sync` for shared state, `rt` for spawning tasks. |
-| `dashmap` | Lock-free concurrent hashmap. `UnlockState` gets hit from both request handlers and background tasks, so this fits well. |
+| `dashmap` | Lock-free concurrent hashmap. `UnlockState` gets hit from both request handlers and background tasks. |
+| `zeroize` | Wipes key bytes from memory on drop. Wraps all in-memory data keys in `ZeroVec`. |
+| `rocket_dyn_templates` | Tera templates for server-rendered HTML pages (login, file browser, settings). |
 | SQLite (not Postgres) | Zero-config, embedded. Right choice for single-server self-hosted. One feature flag swap to Postgres if needed later. |
 
 ---
@@ -1513,7 +1499,7 @@ tempfile = "3"
 - Data keys are encrypted by master key (server mode) or user-derived key (user modes).
 - Keys only live in memory while needed.
 - On restart: server-mode keys auto-reload, user-mode keys need re-unlock.
-- `zeroize` for memory wiping is a v2 consideration.
+- `zeroize` crate wipes key bytes from memory on drop — all `UnlockState` keys are wrapped in `ZeroVec`.
 
 ### Recovery Audit Trail
 - Every admin recovery goes into `recovery_audit_log`. Append-only — never delete rows.
@@ -1710,4 +1696,4 @@ Do you want absolute privacy with no possible backdoor?
 
 ---
 
-*Living document — update as things get built.*
+*Living document — updated as things get built. Current through M5.7.*

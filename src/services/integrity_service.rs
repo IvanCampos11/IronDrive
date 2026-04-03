@@ -225,7 +225,7 @@ async fn scan_directory(
                     IntegrityStatus::Ok => {}
                     IntegrityStatus::FileHashMismatch => {
                         let rel = relative_path(root, &file_path);
-                        let _ = record_event(
+                        if let Err(e) = record_event(
                             pool,
                             target_type,
                             target_id,
@@ -234,7 +234,14 @@ async fn scan_directory(
                             Some("File hash mismatch detected during background scan"),
                             "background_scan",
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!(
+                                file = %rel,
+                                error = %e,
+                                "Failed to record checksum_mismatch event"
+                            );
+                        }
                         failures_found += 1;
                     }
                     IntegrityStatus::DecryptionFailed(ref msg) => {
@@ -245,7 +252,7 @@ async fn scan_directory(
                         } else {
                             "decrypt_failed"
                         };
-                        let _ = record_event(
+                        if let Err(e) = record_event(
                             pool,
                             target_type,
                             target_id,
@@ -254,7 +261,14 @@ async fn scan_directory(
                             Some(msg),
                             "background_scan",
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!(
+                                file = %rel,
+                                error = %e,
+                                "Failed to record {} event", event_type
+                            );
+                        }
                         failures_found += 1;
                     }
                 }
