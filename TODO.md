@@ -304,9 +304,9 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [x] `scan_library()` — walk all files, `verify_file_hash()` each, record failures
   - [x] `scan_space()` — same for spaces
 - [x] `007_create_integrity_events.sql` migration
-- [ ] Integrity routes in `src/routes/library.rs` and `src/routes/spaces.rs`
-- [ ] Wire into `GET /api/v1/users/me/notifications`
-- [ ] Admin integrity endpoints in `src/routes/admin.rs`
+- [x] Integrity routes in `src/routes/integrity.rs`
+- [x] Wire into `GET /api/v1/users/me/notifications`
+- [x] Admin integrity endpoints in `src/routes/integrity.rs`
 - [ ] `src/services/background/mod.rs` — `BackgroundRunner`
 - [ ] `src/services/background/integrity_scan.rs`:
   - [ ] Periodic loop, configurable interval

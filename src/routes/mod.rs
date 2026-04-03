@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod health;
+pub mod integrity;
 pub mod library;
 pub mod pages;
 
@@ -11,6 +12,7 @@ pub fn all_routes() -> Vec<Route> {
     routes.extend(health::routes());
     routes.extend(auth::routes());
     routes.extend(library::routes());
+    routes.extend(integrity::routes());
     routes.extend(pages::routes());
     routes
 }
