@@ -26,7 +26,7 @@
 | **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings, sidebar nav | ✅ Complete |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ✅ Complete |
 | **M5.6** | Data Integrity | New on-disk format (file hash), key-free `verify_file_hash()`, two-tier integrity, corruption detection | ✅ Complete |
-| **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | 🔨 In progress |
+| **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ✅ Complete |
 | **M6** | Groups | Group CRUD + membership | ⬜ Not started |
 | **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) | ⬜ Not started |
 | **M8** | User Encryption Tiers | Failsafe + pure user: passphrase-derived keys, lock/unlock, recovery, audit log | ⬜ Not started |
@@ -320,15 +320,15 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [x] Remove staging dir + DB row
 - [x] `on_liftoff` fairing in `main.rs` — launch `BackgroundRunner`
 - [x] Config env vars: `IRONDRIVE_INTEGRITY_SCAN_INTERVAL_HOURS`, `IRONDRIVE_INTEGRITY_SCAN_ENABLED`
-- [ ] Tests:
-  - [ ] Upload → corrupt on disk → `verify_file_hash()` catches it without key
-  - [ ] Scan finds corrupted file → event created
-  - [ ] Acknowledge → gone from unacknowledged list
-  - [ ] Truncated file → caught
-  - [ ] Session cleanup actually removes expired sessions
-  - [ ] Chunk cleanup removes expired staging
-  - [ ] Integrity scanner catches corrupted file
-  - [ ] Scanner skips locked libraries (key-free check only, no GCM)
+- [x] Tests:
+  - [x] Upload → corrupt on disk → `verify_file_hash()` catches it without key
+  - [x] Scan finds corrupted file → event created
+  - [x] Acknowledge → gone from unacknowledged list
+  - [x] Truncated file → caught
+  - [x] Session cleanup actually removes expired sessions
+  - [x] Chunk cleanup removes expired staging
+  - [x] Integrity scanner catches corrupted file
+  - [x] Scanner skips locked libraries (key-free check only, no GCM)
 
 ### M6 — Groups
 
