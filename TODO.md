@@ -308,16 +308,16 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 - [x] Wire into `GET /api/v1/users/me/notifications`
 - [x] Admin integrity endpoints in `src/routes/integrity.rs`
 - [x] `src/services/background/mod.rs` — `BackgroundRunner`
-- [ ] `src/services/background/integrity_scan.rs`:
-  - [ ] Periodic loop, configurable interval
-  - [ ] Skip locked libraries/spaces for GCM check (key-free file hash still runs)
-  - [ ] Throttle I/O between files so we don't starve request handling
-  - [ ] Log via `tracing`
-- [ ] `src/services/background/session_cleanup.rs`:
-  - [ ] Hourly loop, prune expired sessions
-- [ ] `src/services/background/chunk_cleanup.rs`:
-  - [ ] Every 30min, delete expired incomplete uploads
-  - [ ] Remove staging dir + DB row
+- [x] `src/services/background/integrity_scan.rs`:
+  - [x] Periodic loop, configurable interval
+  - [x] Skip locked libraries/spaces for GCM check (key-free file hash still runs)
+  - [x] Throttle I/O between files so we don't starve request handling
+  - [x] Log via `tracing`
+- [x] `src/services/background/session_cleanup.rs`:
+  - [x] Hourly loop, prune expired sessions
+- [x] `src/services/background/chunk_cleanup.rs`:
+  - [x] Every 30min, delete expired incomplete uploads
+  - [x] Remove staging dir + DB row
 - [x] `on_liftoff` fairing in `main.rs` — launch `BackgroundRunner`
 - [x] Config env vars: `IRONDRIVE_INTEGRITY_SCAN_INTERVAL_HOURS`, `IRONDRIVE_INTEGRITY_SCAN_ENABLED`
 - [ ] Tests:
