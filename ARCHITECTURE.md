@@ -1233,8 +1233,6 @@ impl BackgroundRunner {
 }
 ```
 
-Note: tasks are fire-and-forget. If a worker panics, it dies silently — acceptable for a solo deployment where you're watching the logs. A production multi-tenant setup would want supervision/restart logic here.
-
 ### Service Details
 
 #### Integrity Scanner (`integrity_scan.rs`)
@@ -1689,4 +1687,4 @@ Do you want absolute privacy with no possible backdoor?
 
 ---
 
-*Living document — updated as things get built. Current through M5.7.*
+*Living document — updated as things get built.*
