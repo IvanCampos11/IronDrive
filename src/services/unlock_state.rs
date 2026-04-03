@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use dashmap::DashMap;
 use zeroize::Zeroize;
 
@@ -8,10 +10,14 @@ use crate::services::crypto_service::DataKey;
 /// **Server-mode** keys stay in memory for the server's lifetime.
 /// **User-mode** keys are loaded on `/unlock` and removed on `/lock` or session expiry.
 /// All keys are zeroized on removal or drop.
+///
+/// Internally uses `Arc<DashMap>` so clones share the same key store.
+/// This allows background tasks to hold a cheap handle to the live state.
+#[derive(Clone)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub struct UnlockState {
-    libraries: DashMap<String, ZeroVec>,
-    spaces: DashMap<String, ZeroVec>,
+    libraries: Arc<DashMap<String, ZeroVec>>,
+    spaces: Arc<DashMap<String, ZeroVec>>,
 }
 
 /// A `Vec<u8>` wrapper that zeroizes its contents on drop.
@@ -27,8 +33,8 @@ impl Drop for ZeroVec {
 impl UnlockState {
     pub fn new() -> Self {
         Self {
-            libraries: DashMap::new(),
-            spaces: DashMap::new(),
+            libraries: Arc::new(DashMap::new()),
+            spaces: Arc::new(DashMap::new()),
         }
     }
 

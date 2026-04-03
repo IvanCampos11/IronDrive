@@ -91,6 +91,15 @@ async fn rocket() -> _ {
         .attach(Template::fairing())
         .attach(security_headers_fairing())
         .attach(cache_control_fairing())
+        .attach(AdHoc::on_liftoff("Background Workers", |rocket| {
+            Box::pin(async move {
+                let pool = rocket.state::<SqlitePool>().expect("DbPool not managed").clone();
+                let config = rocket.state::<config::AppConfig>().expect("AppConfig not managed").clone();
+                let unlock_state = rocket.state::<services::unlock_state::UnlockState>()
+                    .expect("UnlockState not managed").clone();
+                services::background::BackgroundRunner::start(pool, config, unlock_state);
+            })
+        }))
         .mount("/", routes::all_routes())
         .mount("/static", routes::static_file_server())
         .register(

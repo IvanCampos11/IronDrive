@@ -26,7 +26,7 @@
 | **M5F** | Frontend (Tera + HTMX) | Server-rendered UI — auth flows, setup wizard, file browser, upload/download, settings, sidebar nav | ✅ Complete |
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ✅ Complete |
 | **M5.6** | Data Integrity | New on-disk format (file hash), key-free `verify_file_hash()`, two-tier integrity, corruption detection | ✅ Complete |
-| **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ⬜ Not started |
+| **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ✅ Complete |
 | **M6** | Groups | Group CRUD + membership | ⬜ Not started |
 | **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) | ⬜ Not started |
 | **M8** | User Encryption Tiers | Failsafe + pure user: passphrase-derived keys, lock/unlock, recovery, audit log | ⬜ Not started |
@@ -297,38 +297,38 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 
 ### M5.7 — Background Services & Integrity Events
 
-- [ ] `src/services/integrity_service.rs`:
-  - [ ] `record_event()` — insert into `integrity_events`
-  - [ ] `list_events()` — query for a library/space (unacknowledged first)
-  - [ ] `acknowledge_event()` — mark as acknowledged
-  - [ ] `scan_library()` — walk all files, `verify_file_hash()` each, record failures
-  - [ ] `scan_space()` — same for spaces
-- [ ] `007_create_integrity_events.sql` migration
-- [ ] Integrity routes in `src/routes/library.rs` and `src/routes/spaces.rs`
-- [ ] Wire into `GET /api/v1/users/me/notifications`
-- [ ] Admin integrity endpoints in `src/routes/admin.rs`
-- [ ] `src/services/background/mod.rs` — `BackgroundRunner`
-- [ ] `src/services/background/integrity_scan.rs`:
-  - [ ] Periodic loop, configurable interval
-  - [ ] Skip locked libraries/spaces for GCM check (key-free file hash still runs)
-  - [ ] Throttle I/O between files so we don't starve request handling
-  - [ ] Log via `tracing`
-- [ ] `src/services/background/session_cleanup.rs`:
-  - [ ] Hourly loop, prune expired sessions
-- [ ] `src/services/background/chunk_cleanup.rs`:
-  - [ ] Every 30min, delete expired incomplete uploads
-  - [ ] Remove staging dir + DB row
-- [ ] `src/fairings/background.rs` — launch `BackgroundRunner` on liftoff
-- [ ] Config env vars: `IRONDRIVE_INTEGRITY_SCAN_INTERVAL_HOURS`, `IRONDRIVE_INTEGRITY_SCAN_ENABLED`
-- [ ] Tests:
-  - [ ] Upload → corrupt on disk → `verify_file_hash()` catches it without key
-  - [ ] Scan finds corrupted file → event created
-  - [ ] Acknowledge → gone from unacknowledged list
-  - [ ] Truncated file → caught
-  - [ ] Session cleanup actually removes expired sessions
-  - [ ] Chunk cleanup removes expired staging
-  - [ ] Integrity scanner catches corrupted file
-  - [ ] Scanner skips locked libraries (key-free check only, no GCM)
+- [x] `src/services/integrity_service.rs`:
+  - [x] `record_event()` — insert into `integrity_events`
+  - [x] `list_events()` — query for a library/space (unacknowledged first)
+  - [x] `acknowledge_event()` — mark as acknowledged
+  - [x] `scan_library()` — walk all files, `verify_file_hash()` each, record failures
+  - [x] `scan_space()` — same for spaces
+- [x] `007_create_integrity_events.sql` migration
+- [x] Integrity routes in `src/routes/integrity.rs`
+- [x] Wire into `GET /api/v1/users/me/notifications`
+- [x] Admin integrity endpoints in `src/routes/integrity.rs`
+- [x] `src/services/background/mod.rs` — `BackgroundRunner`
+- [x] `src/services/background/integrity_scan.rs`:
+  - [x] Periodic loop, configurable interval
+  - [x] Skip locked libraries/spaces for GCM check (key-free file hash still runs)
+  - [x] Throttle I/O between files so we don't starve request handling
+  - [x] Log via `tracing`
+- [x] `src/services/background/session_cleanup.rs`:
+  - [x] Hourly loop, prune expired sessions
+- [x] `src/services/background/chunk_cleanup.rs`:
+  - [x] Every 30min, delete expired incomplete uploads
+  - [x] Remove staging dir + DB row
+- [x] `on_liftoff` fairing in `main.rs` — launch `BackgroundRunner`
+- [x] Config env vars: `IRONDRIVE_INTEGRITY_SCAN_INTERVAL_HOURS`, `IRONDRIVE_INTEGRITY_SCAN_ENABLED`
+- [x] Tests:
+  - [x] Upload → corrupt on disk → `verify_file_hash()` catches it without key
+  - [x] Scan finds corrupted file → event created
+  - [x] Acknowledge → gone from unacknowledged list
+  - [x] Truncated file → caught
+  - [x] Session cleanup actually removes expired sessions
+  - [x] Chunk cleanup removes expired staging
+  - [x] Integrity scanner catches corrupted file
+  - [x] Scanner skips locked libraries (key-free check only, no GCM)
 
 ### M6 — Groups
 
