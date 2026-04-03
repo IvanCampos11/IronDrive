@@ -307,7 +307,7 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 - [x] Integrity routes in `src/routes/integrity.rs`
 - [x] Wire into `GET /api/v1/users/me/notifications`
 - [x] Admin integrity endpoints in `src/routes/integrity.rs`
-- [ ] `src/services/background/mod.rs` — `BackgroundRunner`
+- [x] `src/services/background/mod.rs` — `BackgroundRunner`
 - [ ] `src/services/background/integrity_scan.rs`:
   - [ ] Periodic loop, configurable interval
   - [ ] Skip locked libraries/spaces for GCM check (key-free file hash still runs)
@@ -318,8 +318,8 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 - [ ] `src/services/background/chunk_cleanup.rs`:
   - [ ] Every 30min, delete expired incomplete uploads
   - [ ] Remove staging dir + DB row
-- [ ] `src/fairings/background.rs` — launch `BackgroundRunner` on liftoff
-- [ ] Config env vars: `IRONDRIVE_INTEGRITY_SCAN_INTERVAL_HOURS`, `IRONDRIVE_INTEGRITY_SCAN_ENABLED`
+- [x] `on_liftoff` fairing in `main.rs` — launch `BackgroundRunner`
+- [x] Config env vars: `IRONDRIVE_INTEGRITY_SCAN_INTERVAL_HOURS`, `IRONDRIVE_INTEGRITY_SCAN_ENABLED`
 - [ ] Tests:
   - [ ] Upload → corrupt on disk → `verify_file_hash()` catches it without key
   - [ ] Scan finds corrupted file → event created
