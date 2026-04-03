@@ -301,8 +301,8 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [x] `record_event()` — insert into `integrity_events`
   - [x] `list_events()` — query for a library/space (unacknowledged first)
   - [x] `acknowledge_event()` — mark as acknowledged
-  - [ ] `scan_library()` — walk all files, `verify_file_hash()` each, record failures
-  - [ ] `scan_space()` — same for spaces
+  - [x] `scan_library()` — walk all files, `verify_file_hash()` each, record failures
+  - [x] `scan_space()` — same for spaces
 - [x] `007_create_integrity_events.sql` migration
 - [ ] Integrity routes in `src/routes/library.rs` and `src/routes/spaces.rs`
 - [ ] Wire into `GET /api/v1/users/me/notifications`
