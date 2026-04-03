@@ -166,22 +166,40 @@ async fn setup_library(client: &Client, token: &str) -> Value {
 }
 
 /// Register (first user → admin) + login + setup-library.
-/// Returns `(token, library_id)`.
+/// Returns `(token, library_id, csrf)`.
 async fn create_ready_admin(
     client: &Client,
     username: &str,
     email: &str,
     password: &str,
-) -> (String, String) {
+) -> (String, String, String) {
     register_user(client, username, email, password).await;
     let token = login_user(client, username, password).await;
     let lib = setup_library(client, &token).await;
     let library_id = lib["library_id"].as_str().unwrap().to_string();
-    (token, library_id)
+    let csrf = setup_csrf(client).await;
+    (token, library_id, csrf)
 }
 
 fn auth_header(token: &str) -> Header<'static> {
     Header::new("Authorization", format!("Bearer {}", token))
+}
+
+/// Hit a page endpoint to establish the CSRF cookie, then return the token.
+/// The `CsrfXhr` guard expects `X-CSRF-Token` header == `csrf_token` cookie.
+async fn setup_csrf(client: &Client) -> String {
+    // GET /login sets the csrf_token cookie via ensure_csrf_token()
+    let _ = client.get("/login").dispatch().await;
+    client
+        .cookies()
+        .get("csrf_token")
+        .expect("CSRF cookie should be set after GET /login")
+        .value()
+        .to_string()
+}
+
+fn csrf_header(csrf: &str) -> Header<'static> {
+    Header::new("X-CSRF-Token", csrf.to_string())
 }
 
 /// Find the single encrypted file on disk inside the library directory.
@@ -204,7 +222,7 @@ async fn scan_clean_library_finds_no_failures() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload a file
     let resp = client
@@ -222,7 +240,7 @@ async fn scan_clean_library_finds_no_failures() {
             library_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
     assert_eq!(resp.status(), Status::Ok);
@@ -237,7 +255,7 @@ async fn corrupt_file_detected_by_scan() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload
     let resp = client
@@ -265,7 +283,7 @@ async fn corrupt_file_detected_by_scan() {
             library_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
     assert_eq!(resp.status(), Status::Ok);
@@ -297,7 +315,7 @@ async fn truncated_file_detected_by_scan() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload
     let resp = client
@@ -321,7 +339,7 @@ async fn truncated_file_detected_by_scan() {
             library_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
     assert_eq!(resp.status(), Status::Ok);
@@ -336,7 +354,7 @@ async fn acknowledge_event_removes_from_notifications() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload + corrupt
     let resp = client
@@ -360,7 +378,7 @@ async fn acknowledge_event_removes_from_notifications() {
             library_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
     assert_eq!(resp.status(), Status::Ok);
@@ -383,7 +401,7 @@ async fn acknowledge_event_removes_from_notifications() {
             event_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
     assert_eq!(resp.status(), Status::Ok);
@@ -407,7 +425,7 @@ async fn list_events_via_admin_endpoint() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload + corrupt
     client
@@ -430,7 +448,7 @@ async fn list_events_via_admin_endpoint() {
             library_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
 
@@ -456,16 +474,16 @@ async fn admin_scan_requires_target_id() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, _) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, _, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     let resp = client
         .post("/api/v1/admin/integrity/scan?target_type=library")
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
 
-    assert_eq!(resp.status(), Status::UnprocessableEntity);
+    assert_eq!(resp.status(), Status::BadRequest);
 }
 
 #[tokio::test]
@@ -473,7 +491,7 @@ async fn admin_list_events_requires_target_id() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, _) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, _, _csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     let resp = client
         .get("/api/v1/admin/integrity/events?target_type=library")
@@ -481,7 +499,7 @@ async fn admin_list_events_requires_target_id() {
         .dispatch()
         .await;
 
-    assert_eq!(resp.status(), Status::UnprocessableEntity);
+    assert_eq!(resp.status(), Status::BadRequest);
 }
 
 #[tokio::test]
@@ -519,7 +537,8 @@ async fn session_cleanup_removes_expired_sessions() {
     let pw = alice_password();
 
     // Register + login to create a user in the DB
-    register_user(&client, "alice", "alice@example.com", &pw).await;
+    let reg = register_user(&client, "alice", "alice@example.com", &pw).await;
+    let user_id = reg["user_id"].as_str().unwrap();
     let token = login_user(&client, "alice", &pw).await;
 
     // The login above created a valid session.  Verify it works.
@@ -538,7 +557,7 @@ async fn session_cleanup_removes_expired_sessions() {
         .expect("DbPool not in managed state");
 
     let expired_at = chrono::Utc::now().naive_utc() - chrono::Duration::hours(1);
-    crate::models::session::Session::create(pool, "nonexistent-user", "expired-hash-abc", expired_at)
+    crate::models::session::Session::create(pool, user_id, "expired-hash-abc", expired_at)
         .await
         .unwrap();
 
@@ -573,7 +592,7 @@ async fn chunk_cleanup_removes_expired_uploads() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) =
+    let (_token, library_id, _csrf) =
         create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     let rocket = client.rocket();
@@ -590,12 +609,20 @@ async fn chunk_cleanup_removes_expired_uploads() {
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
 
+    // Look up the real user_id from the library
+    let (user_id,): (String,) =
+        sqlx::query_as("SELECT user_id FROM personal_libraries WHERE id = ?")
+            .bind(&library_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
     sqlx::query(
-        "INSERT INTO chunked_uploads (id, user_id, target_type, target_id, target_path, total_chunks, received_chunks, total_bytes, expires_at)
-         VALUES (?, ?, 'library', ?, 'test.bin', 2, 0, 1024, ?)",
+        "INSERT INTO chunked_uploads (id, user_id, target_type, target_id, target_path, filename, total_chunks, received_chunks, total_bytes, expires_at)
+         VALUES (?, ?, 'library', ?, 'test.bin', 'test.bin', 2, 0, 1024, ?)",
     )
     .bind(&upload_id)
-    .bind("alice-user-id") // doesn't matter for cleanup
+    .bind(&user_id)
     .bind(&library_id)
     .bind(&expired_at)
     .execute(pool)
@@ -642,7 +669,7 @@ async fn scan_detects_corruption_in_subdirectory() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload files in root and in a subdir
     client
@@ -673,7 +700,7 @@ async fn scan_detects_corruption_in_subdirectory() {
             library_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
     assert_eq!(resp.status(), Status::Ok);
@@ -704,7 +731,7 @@ async fn scan_empty_library_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     let resp = client
         .post(format!(
@@ -712,7 +739,7 @@ async fn scan_empty_library_succeeds() {
             library_id
         ))
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
     assert_eq!(resp.status(), Status::Ok);
@@ -727,7 +754,7 @@ async fn no_events_initially() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, _) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, _, _csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Events list should be empty
     let resp = client
@@ -755,12 +782,12 @@ async fn acknowledge_nonexistent_event_returns_404() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, _) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, _, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     let resp = client
         .post("/api/v1/library/integrity/events/nonexistent-id/acknowledge")
         .header(auth_header(&token))
-        .header(Header::new("X-Requested-With", "XMLHttpRequest"))
+        .header(csrf_header(&csrf))
         .dispatch()
         .await;
 
