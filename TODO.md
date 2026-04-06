@@ -27,11 +27,11 @@
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ✅ Complete |
 | **M5.6** | Data Integrity | New on-disk format (file hash), key-free `verify_file_hash()`, two-tier integrity, corruption detection | ✅ Complete |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ✅ Complete |
-| **M6** | Groups | Group CRUD + membership | ⬜ Not started |
-| **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) | ⬜ Not started |
-| **M8** | User Encryption Tiers | Failsafe + pure user: passphrase-derived keys, lock/unlock, recovery, audit log | ⬜ Not started |
-| **M9** | Quotas | Disk usage calculation + enforcement on upload | ⬜ Not started |
-| **M10** | Polish | CORS, request logging, error consistency, integration tests | ⬜ Not started |
+| **M6** | Groups | Group CRUD + membership + group management UI | ⬜ Not started |
+| **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) + space browser & sharing UI | ⬜ Not started |
+| **M8** | User Encryption Tiers | Passphrase-derived keys, lock/unlock, recovery, audit log + setup wizard modes, lock/unlock UI, recovery alerts | ⬜ Not started |
+| **M9** | Quotas | Disk usage calculation + enforcement on upload + quota display, usage breakdown, warning banners | ⬜ Not started |
+| **M10** | Polish | CORS, request logging, error consistency, integration tests + UI/UX audit, responsive/a11y/dark mode pass | ⬜ Not started |
 
 ---
 
@@ -335,6 +335,20 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 - [ ] `src/models/group.rs` — Group, GroupMember structs + queries
 - [ ] `src/services/group_service.rs` — create, update, delete, add/remove members
 - [ ] `src/routes/groups.rs` — all group endpoints
+- [ ] **Frontend**
+  - [ ] `templates/groups/index.html.tera` — group list page (card/table layout with create button)
+  - [ ] `templates/groups/detail.html.tera` — single group view (member list, add/remove members)
+  - [ ] `templates/partials/group_card.html.tera` — reusable group card component
+  - [ ] `GET /groups` page route — list all groups the user belongs to / owns
+  - [ ] `GET /groups/:id` page route — group detail with member management
+  - [ ] Create group modal (name, description) → `POST /groups` → redirect with flash
+  - [ ] Edit group modal (rename, update description) → `POST /groups/:id` → redirect with flash
+  - [ ] Delete group → confirmation modal → `POST /groups/:id/delete` → redirect with flash
+  - [ ] Add member: user search/select input → `POST /groups/:id/members` → HTMX swap member list
+  - [ ] Remove member → confirmation modal → `POST /groups/:id/members/:uid/remove` → HTMX swap member list
+  - [ ] Update sidebar nav: add "Groups" link with icon
+  - [ ] Empty state for no groups
+  - [ ] Responsive layout for group pages
 - [ ] Integration tests
 
 ### M7 — Spaces
@@ -348,6 +362,25 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [ ] Load all server-mode space keys into `UnlockState` at boot
 - [ ] `src/guards/space_guard.rs` — permission check guard
 - [ ] `src/routes/spaces.rs` — all space endpoints (CRUD + filesystem + access)
+- [ ] **Frontend**
+  - [ ] `templates/spaces/index.html.tera` — space list page (cards showing name, owner, member count, usage)
+  - [ ] `templates/spaces/browser.html.tera` — space file browser (reuse `file_list.html.tera` partial with space context)
+  - [ ] `templates/spaces/settings.html.tera` — space settings (rename, delete, manage access)
+  - [ ] `templates/partials/space_card.html.tera` — reusable space card component
+  - [ ] `templates/partials/access_list.html.tera` — member/group access list with role badges
+  - [ ] `GET /spaces` page route — list all spaces the user has access to
+  - [ ] `GET /spaces/:id` page route — space file browser (same UX as personal library browser)
+  - [ ] `GET /spaces/:id/settings` page route — space settings & access management
+  - [ ] Create space modal (name) → `POST /spaces` → redirect to new space browser
+  - [ ] Delete space → confirmation modal → `POST /spaces/:id/delete` → redirect with flash
+  - [ ] Share space: grant access to user or group → role selector (viewer/editor/admin) → HTMX swap access list
+  - [ ] Revoke access → confirmation modal → HTMX swap access list
+  - [ ] Space file operations: reuse upload, download, mkdir, rename, delete UI (same partials, scoped to space)
+  - [ ] Breadcrumb shows space name as root instead of "My Library"
+  - [ ] Update sidebar nav: add "Spaces" link with icon + list of user's spaces
+  - [ ] Empty state for no spaces
+  - [ ] Permission-aware UI: hide edit/delete/upload buttons if user is viewer-only
+  - [ ] Responsive layout for space pages
 - [ ] Integration tests
 
 ### M8 — User Encryption Tiers
@@ -370,7 +403,34 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 - [ ] Recovery notification in `GET /api/v1/users/me/notifications`
 - [ ] Notification acknowledge endpoint
 - [ ] `src/routes/admin.rs` — recovery endpoints (admin only)
-- [ ] Update setup wizard for all three encryption modes
+- [ ] **Frontend**
+  - [ ] Update `templates/setup/wizard.html.tera` — encryption mode selector (server / failsafe / pure)
+    - [ ] Mode cards with descriptions and security trade-off explanation
+    - [ ] Passphrase input fields for failsafe/pure modes (with strength indicator)
+    - [ ] Pure mode warning dialog ("no recovery possible — are you sure?")
+    - [ ] Confirm passphrase field with match validation
+  - [ ] `templates/partials/lock_banner.html.tera` — banner shown when library/space is locked ("Enter passphrase to unlock")
+  - [ ] `templates/partials/unlock_modal.html.tera` — passphrase entry modal for unlocking
+  - [ ] Lock/unlock UI in file browser:
+    - [ ] Lock button in toolbar/nav when library/space is unlocked
+    - [ ] Locked state: show lock banner instead of file list, hide upload/mkdir/rename/delete buttons
+    - [ ] `POST /files/unlock` → submit passphrase → unlock → redirect to file browser
+    - [ ] `POST /files/lock` → lock → redirect with flash
+  - [ ] Lock/unlock UI for spaces:
+    - [ ] Same lock banner + unlock modal scoped to `/spaces/:id`
+    - [ ] `POST /spaces/:id/unlock` / `POST /spaces/:id/lock`
+  - [ ] Update `templates/settings/index.html.tera`:
+    - [ ] Display current encryption tier (server / failsafe / pure) with explanation
+    - [ ] Change passphrase form (current passphrase + new passphrase + confirm)
+  - [ ] Recovery notification UI:
+    - [ ] `templates/partials/recovery_alert.html.tera` — dismissible alert banner ("Admin recovered your library on <date>")
+    - [ ] Show in nav or top-of-page when unacknowledged recovery exists
+    - [ ] Acknowledge button → `POST /notifications/:id/acknowledge` → HTMX remove alert
+  - [ ] Admin recovery page:
+    - [ ] `templates/admin/recovery.html.tera` — list users, trigger recovery for failsafe users
+    - [ ] Confirmation modal before triggering recovery
+    - [ ] Recovery audit log table
+  - [ ] Responsive layout for all new modals and pages
 - [ ] Tests:
   - [ ] Failsafe: setup → lock → unlock → file roundtrip
   - [ ] Failsafe: recovery → notification → acknowledge
@@ -378,6 +438,9 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [ ] Pure: recovery attempt → rejected
   - [ ] Bad passphrase → rejected
   - [ ] Onboarding covers all three modes + pure mode warning
+  - [ ] Setup wizard renders all three mode options
+  - [ ] Lock/unlock UI state transitions (locked → unlock form → unlocked file browser)
+  - [ ] Recovery alert appears after admin recovery, disappears after acknowledge
 
 ### M9 — Quotas
 
@@ -388,7 +451,24 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 - [ ] Quota check before file upload
 - [ ] Usage info in `GET /api/v1/users/me` response
 - [ ] Usage info in `GET /api/v1/library/status` response
+- [ ] **Frontend**
+  - [ ] Update `templates/files/usage.html.tera` — show quota limit alongside current usage
+    - [ ] Progress bar: used / quota (color changes: green → yellow → red as approaching limit)
+    - [ ] Breakdown: library usage + per-space usage table
+  - [ ] Update `templates/partials/sidebar_usage.html.tera` — show quota fraction (e.g., "3.2 GB / 10 GB")
+    - [ ] Warning color when usage > 80% of quota
+    - [ ] Critical color when usage > 95% of quota
+  - [ ] Upload rejection feedback: flash message when upload is rejected due to quota ("Storage full — free up space or contact admin")
+  - [ ] Quota warning banner on file browser when near limit (> 90%)
+  - [ ] Admin quota management (if admin UI exists by this point):
+    - [ ] Set per-user quota in admin settings
+    - [ ] View all users' usage vs quota
+  - [ ] Update space settings page: show space-specific usage
+  - [ ] Responsive layout for updated usage page
 - [ ] Tests for quota enforcement
+  - [ ] Upload rejected when over quota → correct flash message shown
+  - [ ] Sidebar usage reflects quota fraction
+  - [ ] Warning banner appears when near limit
 
 ### M10 — Polish
 
@@ -397,6 +477,20 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 - [ ] Go through all error responses for consistency
 - [ ] `tracing` spans on all service functions
 - [ ] Make sure crypto errors never leak key material into logs
+- [ ] **Frontend**
+  - [ ] Consistent error page styling across all error codes (400, 401, 403, 404, 409, 422, 500)
+  - [ ] Gzip / Brotli compression fairing for responses (moved from M5F)
+  - [ ] UI audit: verify all flash messages have consistent styling and auto-dismiss behavior
+  - [ ] UI audit: verify all modals have consistent close behavior (Escape key, click outside, X button)
+  - [ ] UI audit: verify all forms disable submit button during in-flight requests
+  - [ ] UI audit: verify CSRF tokens present on all new forms added in M6–M9
+  - [ ] Responsive design pass: verify all M6–M9 pages work on mobile
+  - [ ] Accessibility pass: ARIA labels on all new interactive elements from M6–M9
+  - [ ] Dark mode pass: verify all new M6–M9 components have proper `dark:` variants
+  - [ ] Loading states: verify HTMX indicators on all new HTMX-powered interactions
+  - [ ] Navigation: verify sidebar active state highlights correctly on all pages
+  - [ ] Breadcrumb consistency across library browser, space browser, group pages
+  - [ ] Cache-bust updated CSS/JS assets (bump version query param)
 - [ ] Big integration test pass:
   - [ ] Full lifecycle: register → setup (server) → upload → download
   - [ ] Full lifecycle: register → setup (failsafe) → unlock → upload → lock → unlock → download
