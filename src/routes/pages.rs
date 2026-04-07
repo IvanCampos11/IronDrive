@@ -16,7 +16,7 @@ use crate::models::library::PersonalLibrary;
 use crate::services::crypto_service::MasterKey;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
-use crate::services::{auth_service, chunk_service, fs_service, library_service};
+use crate::services::{auth_service, chunk_service, fs_service, group_service, library_service};
 
 // ---------------------------------------------------------------------------
 // Form structs
@@ -68,6 +68,13 @@ pub struct MoveForm {
 #[derive(FromForm)]
 pub struct DeleteForm {
     pub path: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct CreateGroupForm {
+    pub name: String,
+    pub description: Option<String>,
     pub csrf_token: String,
 }
 
@@ -1447,6 +1454,90 @@ pub async fn settings_page(
 }
 
 // ---------------------------------------------------------------------------
+// Groups pages
+// ---------------------------------------------------------------------------
+
+/// GET /groups
+#[get("/groups")]
+pub async fn groups_page(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    flash: Option<FlashMessage<'_>>,
+) -> Template {
+    let groups_data = group_service::list_user_groups(pool.inner(), &user.0.id)
+        .await
+        .unwrap_or_default();
+
+    let groups: Vec<serde_json::Value> = groups_data
+        .into_iter()
+        .map(|g| {
+            serde_json::json!({
+                "id": g.group.id,
+                "name": g.group.name,
+                "description": g.group.description,
+                "created_by": g.group.created_by,
+                "created_at": format_timestamp(&g.group.created_at),
+                "member_count": g.member_count,
+                "user_role": g.user_role,
+            })
+        })
+        .collect();
+
+    Template::render(
+        "groups/index",
+        context! {
+            user: &user.0.username,
+            csrf_token: ensure_csrf_token(cookies),
+            current_path: "groups",
+            groups: groups,
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    )
+}
+
+/// POST /groups/create
+#[post("/groups/create", data = "<form>")]
+pub async fn groups_create_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    form: Form<CreateGroupForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(groups_page)),
+            "Invalid request. Please try again.",
+        )
+    })?;
+
+    match group_service::create_group(
+        pool.inner(),
+        &user.0.id,
+        &form.name,
+        form.description.as_deref(),
+    )
+    .await
+    {
+        Ok(g) => Ok(Flash::success(
+            Redirect::to(uri!(groups_page)),
+            format!("Group \"{}\" created.", g.group.name),
+        )),
+        Err(AppError::Conflict(msg)) => {
+            Err(Flash::error(Redirect::to(uri!(groups_page)), msg))
+        }
+        Err(AppError::Validation(msg)) => {
+            Err(Flash::error(Redirect::to(uri!(groups_page)), msg))
+        }
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(groups_page)),
+            "Failed to create group. Please try again.",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
 
@@ -1566,5 +1657,7 @@ pub fn routes() -> Vec<Route> {
         usage_sidebar,
         usage_page,
         settings_page,
+        groups_page,
+        groups_create_submit,
     ]
 }
