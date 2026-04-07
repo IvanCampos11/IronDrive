@@ -9,7 +9,7 @@ CREATE TABLE groups (
 CREATE TABLE group_members (
     group_id  TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role      TEXT NOT NULL DEFAULT 'member',  -- 'member' | 'manager'
+    role      TEXT NOT NULL DEFAULT 'member',  -- 'owner' | 'manager' | 'member'
     joined_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (group_id, user_id)
 );

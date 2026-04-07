@@ -1,0 +1,110 @@
+{% extends "base" %}
+
+{% block title %}Groups – IronDrive{% endblock %}
+
+{% block content %}
+<div class="animate-fade-in">
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">Groups</h1>
+    <button type="button" id="create-group-btn" class="btn-primary text-sm">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+      New Group
+    </button>
+  </div>
+
+  {% if groups | length == 0 %}
+  <!-- Empty state -->
+  <div class="card text-center py-20 px-6">
+    <div class="inline-flex items-center justify-center w-16 h-16 bg-gray-100 dark:bg-gray-800 rounded-2xl mb-5">
+      <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/>
+      </svg>
+    </div>
+    <p class="text-sm font-medium text-gray-600 dark:text-gray-400">No groups yet</p>
+    <p class="mt-1.5 text-xs text-gray-400 dark:text-gray-500">Create a group to collaborate with others</p>
+  </div>
+  {% else %}
+  <!-- Group cards grid -->
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+    {% for group in groups %}
+    <a href="/groups/{{ group.id }}" class="card p-5 hover:shadow-md transition-shadow group">
+      <div class="flex items-start justify-between mb-3">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="flex items-center justify-center w-10 h-10 bg-blue-50 dark:bg-blue-900/30 rounded-xl flex-shrink-0">
+            <svg class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+          </div>
+          <h2 class="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">{{ group.name }}</h2>
+        </div>
+        <span class="inline-flex px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0
+          {% if group.user_role == 'owner' %}
+            bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300
+          {% elif group.user_role == 'manager' %}
+            bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300
+          {% else %}
+            bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400
+          {% endif %}
+        ">{{ group.user_role }}</span>
+      </div>
+
+      {% if group.description %}
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3 line-clamp-2">{{ group.description }}</p>
+      {% else %}
+      <p class="text-xs text-gray-400 dark:text-gray-500 mb-3 italic">No description</p>
+      {% endif %}
+
+      <div class="flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
+        <span class="flex items-center gap-1">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+          {{ group.member_count }} member{% if group.member_count != 1 %}s{% endif %}
+        </span>
+        <span>{{ group.created_at }}</span>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- Create Group modal -->
+<div id="create-group-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="create-group-modal-title">
+  <div class="card max-w-sm w-full mx-4 p-6 shadow-modal">
+    <div class="flex items-center gap-3 mb-5">
+      <div class="flex items-center justify-center w-9 h-9 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
+        <svg class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+      </div>
+      <h3 id="create-group-modal-title" class="text-lg font-semibold text-gray-900 dark:text-white">New Group</h3>
+    </div>
+    <form method="post" action="/groups/create" id="create-group-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="mb-4">
+        <label for="group-name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Name</label>
+        <input
+          type="text" name="name" id="group-name" required
+          placeholder="e.g. Design Team"
+          maxlength="100"
+          class="input-field"
+        >
+      </div>
+      <div class="mb-5">
+        <label for="group-description" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Description <span class="text-gray-400 font-normal">(optional)</span></label>
+        <textarea
+          name="description" id="group-description"
+          placeholder="What is this group for?"
+          maxlength="500"
+          rows="3"
+          class="input-field resize-none"
+        ></textarea>
+      </div>
+      <div class="flex justify-end gap-3">
+        <button type="button" data-modal-close class="btn-secondary">Cancel</button>
+        <button type="submit" class="btn-primary">Create Group</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/groups.js?v=0.3.0" defer></script>
+{% endblock %}

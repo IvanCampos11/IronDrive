@@ -16,7 +16,7 @@ use crate::models::library::PersonalLibrary;
 use crate::services::crypto_service::MasterKey;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
-use crate::services::{auth_service, chunk_service, fs_service, library_service};
+use crate::services::{auth_service, chunk_service, fs_service, group_service, library_service};
 
 // ---------------------------------------------------------------------------
 // Form structs
@@ -68,6 +68,27 @@ pub struct MoveForm {
 #[derive(FromForm)]
 pub struct DeleteForm {
     pub path: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct CreateGroupForm {
+    pub name: String,
+    pub description: Option<String>,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct EditGroupForm {
+    pub name: String,
+    pub description: Option<String>,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct AddMemberForm {
+    pub username: String,
+    pub role: String,
     pub csrf_token: String,
 }
 
@@ -1447,6 +1468,302 @@ pub async fn settings_page(
 }
 
 // ---------------------------------------------------------------------------
+// Groups pages
+// ---------------------------------------------------------------------------
+
+/// GET /groups
+#[get("/groups")]
+pub async fn groups_page(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    flash: Option<FlashMessage<'_>>,
+) -> Template {
+    let groups_data = group_service::list_user_groups(pool.inner(), &user.0.id)
+        .await
+        .unwrap_or_default();
+
+    let groups: Vec<serde_json::Value> = groups_data
+        .into_iter()
+        .map(|g| {
+            serde_json::json!({
+                "id": g.group.id,
+                "name": g.group.name,
+                "description": g.group.description,
+                "created_by": g.group.created_by,
+                "created_at": format_timestamp(&g.group.created_at),
+                "member_count": g.member_count,
+                "user_role": g.user_role,
+            })
+        })
+        .collect();
+
+    Template::render(
+        "groups/index",
+        context! {
+            user: &user.0.username,
+            csrf_token: ensure_csrf_token(cookies),
+            current_path: "groups",
+            groups: groups,
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    )
+}
+
+/// POST /groups/create
+#[post("/groups/create", data = "<form>")]
+pub async fn groups_create_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    form: Form<CreateGroupForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(groups_page)),
+            "Invalid request. Please try again.",
+        )
+    })?;
+
+    match group_service::create_group(
+        pool.inner(),
+        &user.0.id,
+        &form.name,
+        form.description.as_deref(),
+    )
+    .await
+    {
+        Ok(g) => Ok(Flash::success(
+            Redirect::to(uri!(groups_page)),
+            format!("Group \"{}\" created.", g.group.name),
+        )),
+        Err(AppError::Conflict(msg)) => {
+            Err(Flash::error(Redirect::to(uri!(groups_page)), msg))
+        }
+        Err(AppError::Validation(msg)) => {
+            Err(Flash::error(Redirect::to(uri!(groups_page)), msg))
+        }
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(groups_page)),
+            "Failed to create group. Please try again.",
+        )),
+    }
+}
+
+/// GET /groups/<id>
+#[get("/groups/<id>")]
+pub async fn group_detail_page(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    id: &str,
+    flash: Option<FlashMessage<'_>>,
+) -> Result<Template, Flash<Redirect>> {
+    let group_meta = group_service::get_group(pool.inner(), &user.0.id, id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(group_id = %id, error = %e, "group_detail_page: group lookup failed");
+            Flash::error(
+                Redirect::to(uri!(groups_page)),
+                "Group not found or you are not a member.",
+            )
+        })?;
+
+    let members_data = group_service::list_members(pool.inner(), &user.0.id, id)
+        .await
+        .unwrap_or_default();
+
+    let is_owner = group_meta.user_role == "owner";
+    let is_manager = group_meta.user_role == "manager";
+
+    let members: Vec<serde_json::Value> = members_data
+        .into_iter()
+        .map(|m| {
+            serde_json::json!({
+                "user_id": m.user_id,
+                "username": m.username,
+                "email": m.email,
+                "role": m.role,
+                "joined_at": format_timestamp(&m.joined_at),
+            })
+        })
+        .collect();
+
+    Ok(Template::render(
+        "groups/detail",
+        context! {
+            user: &user.0.username,
+            csrf_token: ensure_csrf_token(cookies),
+            current_path: "groups",
+            group: serde_json::json!({
+                "id": group_meta.group.id,
+                "name": group_meta.group.name,
+                "description": group_meta.group.description,
+                "created_by": group_meta.group.created_by,
+                "created_at": format_timestamp(&group_meta.group.created_at),
+            }),
+            group_id: &group_meta.group.id,
+            user_role: &group_meta.user_role,
+            member_count: group_meta.member_count,
+            is_owner: is_owner,
+            is_manager: is_manager,
+            members: members,
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    ))
+}
+
+/// POST /groups/<id>/edit
+#[post("/groups/<id>/edit", data = "<form>")]
+pub async fn group_edit_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    id: &str,
+    form: Form<EditGroupForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redirect_to = uri!(group_detail_page(id = id));
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+    })?;
+
+    match group_service::update_group(
+        pool.inner(),
+        &user.0.id,
+        id,
+        &form.name,
+        form.description.as_deref(),
+    )
+    .await
+    {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redirect_to),
+            "Group updated.",
+        )),
+        Err(AppError::Forbidden) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "You don't have permission to edit this group.",
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
+        Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "Failed to update group.",
+        )),
+    }
+}
+
+/// POST /groups/<id>/delete
+#[post("/groups/<id>/delete", data = "<form>")]
+pub async fn group_delete_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    id: &str,
+    form: Form<CsrfOnlyForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(groups_page)),
+            "Invalid request. Please try again.",
+        )
+    })?;
+
+    match group_service::delete_group(pool.inner(), &user.0.id, id).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(uri!(groups_page)),
+            "Group deleted.",
+        )),
+        Err(AppError::Forbidden) => Err(Flash::error(
+            Redirect::to(uri!(groups_page)),
+            "Only the group owner can delete the group.",
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(groups_page)),
+            "Failed to delete group.",
+        )),
+    }
+}
+
+/// POST /groups/<id>/members/add
+#[post("/groups/<id>/members/add", data = "<form>")]
+pub async fn group_add_member_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    id: &str,
+    form: Form<AddMemberForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redirect_to = uri!(group_detail_page(id = id));
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+    })?;
+
+    match group_service::add_member(
+        pool.inner(),
+        &user.0.id,
+        id,
+        &form.username,
+        &form.role,
+    )
+    .await
+    {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redirect_to),
+            format!("Added {} to the group.", form.username),
+        )),
+        Err(AppError::NotFound) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            format!("User \"{}\" not found.", form.username),
+        )),
+        Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
+        Err(AppError::Forbidden) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "You don't have permission to add members.",
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "Failed to add member.",
+        )),
+    }
+}
+
+/// POST /groups/<id>/members/<user_id>/remove
+#[post("/groups/<id>/members/<user_id>/remove", data = "<form>")]
+pub async fn group_remove_member_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    id: &str,
+    user_id: &str,
+    form: Form<CsrfOnlyForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redirect_to = uri!(group_detail_page(id = id));
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+    })?;
+
+    match group_service::remove_member(pool.inner(), &user.0.id, id, user_id).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redirect_to),
+            "Member removed.",
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
+        Err(AppError::Forbidden) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "You don't have permission to remove members.",
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "Failed to remove member.",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
 
@@ -1566,5 +1883,12 @@ pub fn routes() -> Vec<Route> {
         usage_sidebar,
         usage_page,
         settings_page,
+        groups_page,
+        groups_create_submit,
+        group_detail_page,
+        group_edit_submit,
+        group_delete_submit,
+        group_add_member_submit,
+        group_remove_member_submit,
     ]
 }
