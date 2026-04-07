@@ -64,11 +64,8 @@ pub async fn get_group(
     user_id: &str,
     group_id: &str,
 ) -> Result<GroupWithMeta, AppError> {
-    let groups = Group::find_all_for_user(pool, user_id).await?;
-
-    groups
-        .into_iter()
-        .find(|g| g.group.id == group_id)
+    Group::find_for_user(pool, user_id, group_id)
+        .await?
         .ok_or(AppError::NotFound)
 }
 

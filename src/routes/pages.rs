@@ -1562,7 +1562,8 @@ pub async fn group_detail_page(
 ) -> Result<Template, Flash<Redirect>> {
     let group_meta = group_service::get_group(pool.inner(), &user.0.id, id)
         .await
-        .map_err(|_| {
+        .map_err(|e| {
+            tracing::warn!(group_id = %id, error = %e, "group_detail_page: group lookup failed");
             Flash::error(
                 Redirect::to(uri!(groups_page)),
                 "Group not found or you are not a member.",

@@ -1,6 +1,6 @@
 # IronDrive — TODO
 
-> **Last Updated:** 2026-04-03
+> **Last Updated:** 2026-04-07
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ---
@@ -27,7 +27,7 @@
 | **M5.5** | Chunked Transfers | Chunked upload/download endpoints, `chunk_service`, staging dir management | ✅ Complete |
 | **M5.6** | Data Integrity | New on-disk format (file hash), key-free `verify_file_hash()`, two-tier integrity, corruption detection | ✅ Complete |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ✅ Complete |
-| **M6** | Groups | Group CRUD + membership + group management UI | ⬜ Not started |
+| **M6** | Groups | Group CRUD + membership + group management UI | ✅ Complete |
 | **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) + space browser & sharing UI | ⬜ Not started |
 | **M8** | User Encryption Tiers | Passphrase-derived keys, lock/unlock, recovery, audit log + setup wizard modes, lock/unlock UI, recovery alerts | ⬜ Not started |
 | **M9** | Quotas | Disk usage calculation + enforcement on upload + quota display, usage breakdown, warning banners | ⬜ Not started |
@@ -332,24 +332,74 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 
 ### M6 — Groups
 
-- [ ] `src/models/group.rs` — Group, GroupMember structs + queries
-- [ ] `src/services/group_service.rs` — create, update, delete, add/remove members
-- [ ] `src/routes/groups.rs` — all group endpoints
-- [ ] **Frontend**
-  - [ ] `templates/groups/index.html.tera` — group list page (card/table layout with create button)
-  - [ ] `templates/groups/detail.html.tera` — single group view (member list, add/remove members)
-  - [ ] `templates/partials/group_card.html.tera` — reusable group card component
-  - [ ] `GET /groups` page route — list all groups the user belongs to / owns
-  - [ ] `GET /groups/:id` page route — group detail with member management
-  - [ ] Create group modal (name, description) → `POST /groups` → redirect with flash
-  - [ ] Edit group modal (rename, update description) → `POST /groups/:id` → redirect with flash
-  - [ ] Delete group → confirmation modal → `POST /groups/:id/delete` → redirect with flash
-  - [ ] Add member: user search/select input → `POST /groups/:id/members` → HTMX swap member list
-  - [ ] Remove member → confirmation modal → `POST /groups/:id/members/:uid/remove` → HTMX swap member list
-  - [ ] Update sidebar nav: add "Groups" link with icon
-  - [ ] Empty state for no groups
-  - [ ] Responsive layout for group pages
-- [ ] Integration tests
+- [x] `migrations/003_create_groups.sql` — `groups` + `group_members` tables (cascade delete, composite PK)
+- [x] `src/models/group.rs` — Group, GroupMember, GroupMemberDetail, GroupWithMeta structs + queries
+  - [x] `Group::create()`, `find_by_id()`, `find_by_name()`, `find_for_user()`, `find_all_for_user()`, `update()`, `delete_by_id()`
+  - [x] `GroupMember::add()`, `remove()`, `find()`, `is_member()`, `list_with_details()`, `update_role()`
+  - [x] Race-safe UNIQUE constraint handling on group names and member inserts
+  - [x] Owner-first member sort order (`CASE WHEN` on role)
+  - [x] 10 unit tests (create, find, duplicate, update, delete cascade, list for user, add/remove member, role update, list with details)
+- [x] `src/services/group_service.rs` — business logic
+  - [x] `create_group()` — create + auto-add creator as owner
+  - [x] `get_group()` — single targeted query (not full-list scan)
+  - [x] `list_user_groups()` — all groups user belongs to with meta
+  - [x] `update_group()` — requires owner/manager role
+  - [x] `delete_group()` — owner (creator) only
+  - [x] `list_members()` — requires membership
+  - [x] `add_member()` — by username, owner/manager only, cannot assign owner role
+  - [x] `remove_member()` — owner/manager remove others, self-leave, owner protected
+  - [x] `update_member_role()` — owner only, cannot change owner's role
+  - [x] Input validation: name 1-100 chars (trimmed), description max 500 chars, role whitelist
+  - [x] Structured `tracing` logging on all mutations
+- [x] `src/routes/groups.rs` — 9 JSON API endpoints
+  - [x] `POST /api/v1/groups` — create group
+  - [x] `GET /api/v1/groups` — list user's groups
+  - [x] `GET /api/v1/groups/<id>` — get single group
+  - [x] `PUT /api/v1/groups/<id>` — update group
+  - [x] `DELETE /api/v1/groups/<id>` — delete group
+  - [x] `GET /api/v1/groups/<id>/members` — list members
+  - [x] `POST /api/v1/groups/<id>/members` — add member by username
+  - [x] `DELETE /api/v1/groups/<id>/members/<user_id>` — remove member
+  - [x] `PUT /api/v1/groups/<id>/members/<user_id>` — update member role
+- [x] **Frontend**
+  - [x] `templates/groups/index.html.tera` — group list page (responsive card grid, empty state, create modal)
+  - [x] `templates/groups/detail.html.tera` — group detail page (info card, member table, edit/delete/add-member modals)
+  - [x] `templates/partials/member_list.html.tera` — member table partial (avatar, username, email, role badges, remove button)
+  - [x] `static/js/groups.js` — modal logic for create group (CSP-compliant, no inline JS)
+  - [x] `static/js/group_detail.js` — modal logic for edit/delete/add-member + confirm-before-remove
+  - [x] `GET /groups` page route — list groups with flash messages
+  - [x] `GET /groups/<id>` page route — group detail with member list
+  - [x] `POST /groups/create` — form submit with CSRF → create group → redirect with flash
+  - [x] `POST /groups/<id>/edit` — form submit with CSRF → update group → redirect with flash
+  - [x] `POST /groups/<id>/delete` — form submit with CSRF → delete group → redirect with flash
+  - [x] `POST /groups/<id>/members/add` — form submit with CSRF → add member → redirect with flash
+  - [x] `POST /groups/<id>/members/<user_id>/remove` — form submit with CSRF → remove member → redirect with flash
+  - [x] Updated sidebar nav: "Groups" link with users icon between Shares and Spaces
+  - [x] Role badges: owner (blue), manager (amber), member (gray)
+  - [x] Empty state for no groups
+  - [x] Responsive layout, dark mode support, accessibility (aria-modal, aria-label)
+  - [x] All modals: open/close via external JS, Escape key dismiss, backdrop click dismiss
+- [x] Integration tests (`src/tests/groups.rs`) — 20 tests
+  - [x] Create group → appears in list
+  - [x] Duplicate group name → 409 Conflict
+  - [x] Get group detail → correct response
+  - [x] Update group name/description → updated
+  - [x] Delete group → removed
+  - [x] Add member → appears in member list
+  - [x] Remove member → gone from list
+  - [x] Owner cannot be removed
+  - [x] Non-member cannot access group
+  - [x] Member cannot add/remove members or edit/delete group
+  - [x] Manager can add members and edit but not delete
+  - [x] Update member role (promote to manager)
+  - [x] Duplicate member → 409 Conflict
+  - [x] Add nonexistent user → 404
+  - [x] Member can self-leave
+  - [x] Unauthenticated API → 401
+  - [x] Groups page renders for authenticated user
+  - [x] Group detail page renders with group name and owner
+  - [x] Unauthenticated groups page → redirect
+  - [x] CSRF required on form POSTs (missing → 422)
 
 ### M7 — Spaces
 

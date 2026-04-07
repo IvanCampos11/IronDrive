@@ -125,6 +125,36 @@ impl Group {
         Ok(group)
     }
 
+    /// Single group with meta for a specific user. Returns `None` if the user
+    /// is not a member. Preferred over `find_all_for_user` + filter when you
+    /// only need one group.
+    pub async fn find_for_user(
+        pool: &DbPool,
+        user_id: &str,
+        group_id: &str,
+    ) -> Result<Option<GroupWithMeta>, AppError> {
+        let row = sqlx::query_as::<_, (String, String, Option<String>, String, String, i64, String)>(
+            "SELECT g.id, g.name, g.description, g.created_by, g.created_at,
+                    (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) AS member_count,
+                    gm.role
+             FROM groups g
+             INNER JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = ?
+             WHERE g.id = ?",
+        )
+        .bind(user_id)
+        .bind(group_id)
+        .fetch_optional(pool)
+        .await?;
+
+        Ok(row.map(|(id, name, description, created_by, created_at, member_count, user_role)| {
+            GroupWithMeta {
+                group: Group { id, name, description, created_by, created_at },
+                member_count,
+                user_role,
+            }
+        }))
+    }
+
     /// All groups that a user belongs to (via `group_members`), with member count and user role.
     pub async fn find_all_for_user(
         pool: &DbPool,
@@ -294,7 +324,15 @@ impl GroupMember {
         group_id: &str,
         user_id: &str,
     ) -> Result<bool, AppError> {
-        Ok(Self::find(pool, group_id, user_id).await?.is_some())
+        let count: (i32,) = sqlx::query_as(
+            "SELECT COUNT(1) FROM group_members WHERE group_id = ? AND user_id = ?",
+        )
+        .bind(group_id)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(count.0 > 0)
     }
 
     /// All members of a group, joined with user info.
@@ -308,7 +346,8 @@ impl GroupMember {
              FROM group_members gm
              INNER JOIN users u ON u.id = gm.user_id
              WHERE gm.group_id = ?
-             ORDER BY gm.role ASC, u.username ASC",
+             ORDER BY CASE gm.role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END,
+                      u.username ASC",
         )
         .bind(group_id)
         .fetch_all(pool)
@@ -604,11 +643,11 @@ mod tests {
         let members = GroupMember::list_with_details(&pool, &group.id).await.unwrap();
         assert_eq!(members.len(), 2);
 
-        // Sorted by role ASC then username ASC — "member" < "owner"
-        assert_eq!(members[0].username, "bob");
-        assert_eq!(members[0].role, "member");
-        assert_eq!(members[1].username, "alice");
-        assert_eq!(members[1].role, "owner");
+        // Sorted: owner first, then by username ASC
+        assert_eq!(members[0].username, "alice");
+        assert_eq!(members[0].role, "owner");
+        assert_eq!(members[1].username, "bob");
+        assert_eq!(members[1].role, "member");
     }
 
     #[tokio::test]
