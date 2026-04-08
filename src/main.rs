@@ -305,6 +305,15 @@ async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket
         "Server-mode library keys loaded into UnlockState"
     );
 
+    let space_loaded =
+        services::space_service::load_server_mode_keys(&pool, &master_key, &unlock_state)
+            .await
+            .expect("Failed to load server-mode space keys");
+    tracing::info!(
+        count = space_loaded,
+        "Server-mode space keys loaded into UnlockState"
+    );
+
     // Clean up expired chunked upload sessions from previous runs.
     if let Err(e) = services::chunk_service::cleanup_expired_uploads(&pool, cfg).await {
         tracing::warn!(error = %e, "Failed to clean up expired chunked uploads on startup");

@@ -28,7 +28,7 @@
 | **M5.6** | Data Integrity | New on-disk format (file hash), key-free `verify_file_hash()`, two-tier integrity, corruption detection | ✅ Complete |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ✅ Complete |
 | **M6** | Groups | Group CRUD + membership + group management UI | ✅ Complete |
-| **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) + space browser & sharing UI | ⬜ Not started |
+| **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) + space browser & sharing UI | 🔨 In progress |
 | **M8** | User Encryption Tiers | Passphrase-derived keys, lock/unlock, recovery, audit log + setup wizard modes, lock/unlock UI, recovery alerts | ⬜ Not started |
 | **M9** | Quotas | Disk usage calculation + enforcement on upload + quota display, usage breakdown, warning banners | ⬜ Not started |
 | **M10** | Polish | CORS, request logging, error consistency, integration tests + UI/UX audit, responsive/a11y/dark mode pass | ⬜ Not started |
@@ -403,13 +403,13 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 
 ### M7 — Spaces
 
-- [ ] `src/models/space.rs` — Space, SpaceAccess structs + queries
-- [ ] `src/services/space_service.rs`:
-  - [ ] Create space (DB row + dir + data key, server mode)
-  - [ ] Delete space (DB row + dir)
-  - [ ] Permission resolution (owner → group → direct grant)
-  - [ ] Grant/revoke access
-  - [ ] Load all server-mode space keys into `UnlockState` at boot
+- [x] `src/models/space.rs` — Space, SpaceAccess structs + queries
+- [x] `src/services/space_service.rs`:
+  - [x] Create space (DB row + dir + data key, server mode)
+  - [x] Delete space (DB row + dir)
+  - [x] Permission resolution (owner → group → direct grant)
+  - [x] Grant/revoke access
+  - [x] Load all server-mode space keys into `UnlockState` at boot
 - [ ] `src/guards/space_guard.rs` — permission check guard
 - [ ] `src/routes/spaces.rs` — all space endpoints (CRUD + filesystem + access)
 - [ ] **Frontend**
