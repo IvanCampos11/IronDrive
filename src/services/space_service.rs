@@ -5,6 +5,7 @@ use tokio::fs;
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::errors::AppError;
+use crate::models::group::Group;
 use crate::models::space::{
     CreateSpaceParams, Space, SpaceAccess, SpaceAccessDetail, SpaceWithMeta, UpdateSpaceParams,
 };
@@ -105,6 +106,11 @@ pub async fn create_group_space(
     name: &str,
 ) -> Result<SpaceWithMeta, AppError> {
     let name = validate_name(name)?;
+
+    // Verify the group exists before creating a space for it.
+    Group::find_by_id(pool, group_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
 
     let data_key = generate_data_key();
     let encrypted_data_key = wrap_data_key(master_key, &data_key)?;
@@ -273,6 +279,11 @@ pub async fn grant_group_access(
 ) -> Result<SpaceAccess, AppError> {
     require_permission(pool, actor_id, space_id, PERM_ADMIN).await?;
     validate_permission(permission)?;
+
+    // Verify the group exists before granting it access.
+    Group::find_by_id(pool, group_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
 
     let access = SpaceAccess::grant(pool, space_id, "group", group_id, permission).await?;
 
@@ -1123,5 +1134,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group existence hardening
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_group_space_nonexistent_group_returns_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_str().unwrap();
+        let pool = test_pool().await;
+        let config = test_config(data_dir);
+        let master_key = bootstrap_master_key(&pool, &config.secret_key)
+            .await
+            .unwrap();
+        let unlock_state = UnlockState::new();
+
+        let err = create_group_space(
+            &pool,
+            &config,
+            &master_key,
+            &unlock_state,
+            "nonexistent-group-id",
+            "Ghost Space",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::NotFound));
+
+        // Verify no space was created.
+        let all = Space::find_all_server_mode(&pool).await.unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn grant_group_access_nonexistent_group_returns_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_str().unwrap();
+        let pool = test_pool().await;
+        let config = test_config(data_dir);
+        let master_key = bootstrap_master_key(&pool, &config.secret_key)
+            .await
+            .unwrap();
+        let unlock_state = UnlockState::new();
+        let alice_id = seed_user(&pool, "alice").await;
+
+        let created =
+            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+                .await
+                .unwrap();
+
+        let err = grant_group_access(
+            &pool,
+            &alice_id,
+            &created.space.id,
+            "nonexistent-group-id",
+            "read",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::NotFound));
+
+        // Verify no access row was created.
+        let entries = SpaceAccess::list_with_details(&pool, &created.space.id)
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
     }
 }

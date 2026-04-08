@@ -410,7 +410,7 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
   - [x] Permission resolution (owner → group → direct grant)
   - [x] Grant/revoke access
   - [x] Load all server-mode space keys into `UnlockState` at boot
-- [ ] `src/guards/space_guard.rs` — permission check guard
+- [x] `src/guards/space_guard.rs` — permission check guard
 - [ ] `src/routes/spaces.rs` — all space endpoints (CRUD + filesystem + access)
 - [ ] **Frontend**
   - [ ] `templates/spaces/index.html.tera` — space list page (cards showing name, owner, member count, usage)
