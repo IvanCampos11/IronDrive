@@ -13,10 +13,13 @@ use crate::errors::AppError;
 use crate::guards::csrf_guard::{ensure_csrf_token, validate_csrf, CsrfXhr};
 use crate::guards::session_guard::{SessionSetupComplete, SessionUser, COOKIE_NAME};
 use crate::models::library::PersonalLibrary;
+use crate::guards::space_guard::{SessionSpaceAdmin, SessionSpaceReader, SessionSpaceWriter};
 use crate::services::crypto_service::MasterKey;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
-use crate::services::{auth_service, chunk_service, fs_service, group_service, library_service};
+use crate::services::{
+    auth_service, chunk_service, fs_service, group_service, library_service, space_service,
+};
 
 // ---------------------------------------------------------------------------
 // Form structs
@@ -115,6 +118,33 @@ pub struct ChunkedInitRequest {
 pub struct ChunkedCompleteRequest {
     pub upload_id: String,
     pub verify: Option<bool>,
+}
+
+#[derive(FromForm)]
+pub struct CreateSpaceForm {
+    pub name: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct RenameSpaceForm {
+    pub name: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct GrantAccessForm {
+    pub grantee_type: String,
+    pub grantee_name: String,
+    pub permission: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct RevokeAccessForm {
+    pub grantee_type: String,
+    pub grantee_id: String,
+    pub csrf_token: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,7 +1040,8 @@ pub async fn chunked_init_upload(
         config.inner(),
         chunk_service::InitUploadParams {
             user_id: user.0.id.clone(),
-            library_id: lib.id,
+            target_id: lib.id,
+            target_type: "library".to_string(),
             target_path: body.path.clone(),
             total_chunks: body.total_chunks,
             total_bytes: body.total_bytes,
@@ -1093,6 +1124,7 @@ pub async fn chunked_receive_chunk(
         config.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         upload_id,
         chunk_index,
         &stream.into_inner(),
@@ -1141,6 +1173,7 @@ pub async fn chunked_complete_upload(
         unlock_state.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         &body.upload_id,
         body.verify.unwrap_or(false),
     )
@@ -1188,6 +1221,7 @@ pub async fn chunked_cancel_upload(
         config.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         &upload_id,
     )
     .await
@@ -1230,6 +1264,7 @@ pub async fn chunked_init_download(
         unlock_state.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         &path,
     )
     .await
@@ -1850,6 +1885,1042 @@ fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Spaces — page routes
+// ---------------------------------------------------------------------------
+
+fn build_space_breadcrumbs(space_name: &str, path: &str) -> Vec<serde_json::Value> {
+    let mut crumbs = vec![serde_json::json!({ "name": space_name, "path": "" })];
+    if !path.is_empty() {
+        let mut accumulated = String::new();
+        for segment in path.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            if !accumulated.is_empty() {
+                accumulated.push('/');
+            }
+            accumulated.push_str(segment);
+            crumbs.push(serde_json::json!({
+                "name": segment,
+                "path": accumulated.clone(),
+            }));
+        }
+    }
+    crumbs
+}
+
+/// GET /spaces — list all spaces the user can access
+#[get("/spaces")]
+pub async fn spaces_page(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    flash: Option<FlashMessage<'_>>,
+) -> Template {
+    let spaces_data = space_service::list_user_spaces(pool.inner(), &user.0.id)
+        .await
+        .unwrap_or_default();
+
+    let spaces: Vec<serde_json::Value> = spaces_data
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.space.id,
+                "name": s.space.name,
+                "owner_type": s.space.owner_type,
+                "owner_id": s.space.owner_id,
+                "created_at": format_timestamp(&s.space.created_at),
+                "grantee_count": s.grantee_count,
+                "user_permission": s.user_permission,
+            })
+        })
+        .collect();
+
+    Template::render(
+        "spaces/index",
+        context! {
+            user: &user.0.username,
+            csrf_token: ensure_csrf_token(cookies),
+            current_path: "spaces",
+            spaces: spaces,
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    )
+}
+
+/// POST /spaces/create
+#[post("/spaces/create", data = "<form>")]
+pub async fn spaces_create_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    master_key: &State<MasterKey>,
+    unlock_state: &State<UnlockState>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    form: Form<CreateSpaceForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(uri!(spaces_page)),
+            "Invalid request. Please try again.",
+        )
+    })?;
+
+    match space_service::create_space(
+        pool.inner(),
+        config.inner(),
+        master_key.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+        &form.name,
+    )
+    .await
+    {
+        Ok(s) => Ok(Flash::success(
+            Redirect::to(format!("/spaces/{}", s.space.id)),
+            format!("Space \"{}\" created.", s.space.name),
+        )),
+        Err(AppError::Validation(msg)) => {
+            Err(Flash::error(Redirect::to(uri!(spaces_page)), msg))
+        }
+        Err(_) => Err(Flash::error(
+            Redirect::to(uri!(spaces_page)),
+            "Failed to create space. Please try again.",
+        )),
+    }
+}
+
+/// GET /spaces/<space_id> — space file browser
+#[get("/spaces/<space_id>?<path>")]
+pub async fn space_browser_page(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    cookies: &CookieJar<'_>,
+    reader: SessionSpaceReader,
+    space_id: &str,
+    path: Option<String>,
+    flash: Option<FlashMessage<'_>>,
+) -> Template {
+    let user_path = path.as_deref().unwrap_or("");
+
+    let entries: Vec<fs_service::FsEntry> = fs_service::list_space_directory(
+        config.inner(),
+        unlock_state.inner(),
+        space_id,
+        user_path,
+        false,
+    )
+    .await
+    .unwrap_or_default();
+
+    let breadcrumbs = build_space_breadcrumbs(&reader.space.space.name, user_path);
+
+    let display_entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+                "is_dir": e.is_dir,
+                "size": e.size.map(format_bytes),
+                "raw_size": e.size.unwrap_or(0),
+                "disk_size": e.disk_size.map(format_bytes),
+                "mime_type": e.mime_type,
+                "modified": e.modified.as_deref().map(format_timestamp),
+                "raw_modified": e.modified,
+                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
+            })
+        })
+        .collect();
+
+    let can_write =
+        reader.space.user_permission == "write" || reader.space.user_permission == "admin";
+
+    let csrf_token = ensure_csrf_token(cookies);
+
+    Template::render(
+        "spaces/browser",
+        context! {
+            user: &reader.user.username,
+            csrf_token: csrf_token,
+            chunk_size_bytes: config.chunk_size_bytes,
+            max_parallel_chunks: config.max_parallel_chunks,
+            space_id: space_id,
+            space_name: &reader.space.space.name,
+            path: user_path,
+            entries: display_entries,
+            breadcrumbs: breadcrumbs,
+            is_root: user_path.is_empty(),
+            can_write: can_write,
+            current_path: "spaces",
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    )
+}
+
+/// GET /spaces/<space_id>/partial?<path> — HTMX partial for space file list swap
+#[get("/spaces/<space_id>/partial?<path>")]
+pub async fn space_browser_partial(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    reader: SessionSpaceReader,
+    space_id: &str,
+    path: Option<String>,
+) -> Result<Template, Status> {
+    let user_path = path.as_deref().unwrap_or("");
+
+    let entries = fs_service::list_space_directory(
+        config.inner(),
+        unlock_state.inner(),
+        space_id,
+        user_path,
+        false,
+    )
+    .await
+    .unwrap_or_default();
+
+    let breadcrumbs = build_space_breadcrumbs(&reader.space.space.name, user_path);
+
+    let display_entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+                "is_dir": e.is_dir,
+                "size": e.size.map(format_bytes),
+                "raw_size": e.size.unwrap_or(0),
+                "disk_size": e.disk_size.map(format_bytes),
+                "mime_type": e.mime_type,
+                "modified": e.modified.as_deref().map(format_timestamp),
+                "raw_modified": e.modified,
+                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
+            })
+        })
+        .collect();
+
+    let can_write =
+        reader.space.user_permission == "write" || reader.space.user_permission == "admin";
+
+    Ok(Template::render(
+        "partials/space_file_list",
+        context! {
+            space_id: space_id,
+            path: user_path,
+            entries: display_entries,
+            breadcrumbs: breadcrumbs,
+            is_root: user_path.is_empty(),
+            can_write: can_write,
+        },
+    ))
+}
+
+/// GET /spaces/<space_id>/folders?<path> — session-auth folder listing for move modal
+#[get("/spaces/<space_id>/folders?<path>")]
+pub async fn space_folders(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _reader: SessionSpaceReader,
+    space_id: &str,
+    path: Option<String>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let user_path = path.as_deref().unwrap_or("");
+
+    let entries = fs_service::list_space_directory(
+        config.inner(),
+        unlock_state.inner(),
+        space_id,
+        user_path,
+        false,
+    )
+    .await
+    .map_err(|_| {
+        (
+            Status::InternalServerError,
+            rocket::serde::json::Json(serde_json::json!({"error": "Failed to list directory."})),
+        )
+    })?;
+
+    let folders: Vec<serde_json::Value> = entries
+        .iter()
+        .filter(|e| e.is_dir)
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+            })
+        })
+        .collect();
+
+    Ok(rocket::serde::json::Json(
+        serde_json::json!({ "path": user_path, "entries": folders }),
+    ))
+}
+
+/// GET /spaces/<space_id>/settings — space settings & access management
+#[get("/spaces/<space_id>/settings")]
+pub async fn space_settings_page(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    reader: SessionSpaceReader,
+    space_id: &str,
+    flash: Option<FlashMessage<'_>>,
+) -> Template {
+    let access_entries = space_service::list_access(pool.inner(), &reader.user.id, space_id)
+        .await
+        .unwrap_or_default();
+
+    let access_display: Vec<serde_json::Value> = access_entries
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({
+                "grantee_type": a.grantee_type,
+                "grantee_id": a.grantee_id,
+                "grantee_name": a.grantee_name,
+                "permission": a.permission,
+                "granted_at": format_timestamp(&a.granted_at),
+            })
+        })
+        .collect();
+
+    let is_admin = reader.space.user_permission == "admin";
+
+    Template::render(
+        "spaces/settings",
+        context! {
+            user: &reader.user.username,
+            csrf_token: ensure_csrf_token(cookies),
+            current_path: "spaces",
+            space: serde_json::json!({
+                "id": reader.space.space.id,
+                "name": reader.space.space.name,
+                "owner_type": reader.space.space.owner_type,
+                "owner_id": reader.space.space.owner_id,
+                "created_at": format_timestamp(&reader.space.space.created_at),
+                "grantee_count": reader.space.grantee_count,
+            }),
+            space_id: space_id,
+            user_permission: &reader.space.user_permission,
+            is_admin: is_admin,
+            access_entries: access_display,
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+        },
+    )
+}
+
+/// POST /spaces/<space_id>/settings/rename
+#[post("/spaces/<space_id>/settings/rename", data = "<form>")]
+pub async fn space_rename_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    _admin: SessionSpaceAdmin,
+    space_id: &str,
+    form: Form<RenameSpaceForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redir_url = format!("/spaces/{}/settings", space_id);
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    match space_service::update_space(pool.inner(), &_admin.user.id, space_id, &form.name).await {
+        Ok(s) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            format!("Space renamed to \"{}\".", s.name),
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to rename space.")),
+    }
+}
+
+/// POST /spaces/<space_id>/settings/delete
+#[post("/spaces/<space_id>/settings/delete", data = "<form>")]
+pub async fn space_delete_submit(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    cookies: &CookieJar<'_>,
+    admin: SessionSpaceAdmin,
+    space_id: &str,
+    form: Form<CsrfOnlyForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(format!("/spaces/{}/settings", space_id)),
+            "Invalid request. Please try again.",
+        )
+    })?;
+
+    match space_service::delete_space(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        &admin.user.id,
+        space_id,
+    )
+    .await
+    {
+        Ok(()) => Ok(Flash::success(
+            Redirect::to(uri!(spaces_page)),
+            "Space deleted.",
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(format!("/spaces/{}/settings", space_id)),
+            "Failed to delete space.",
+        )),
+    }
+}
+
+/// POST /spaces/<space_id>/settings/grant
+#[post("/spaces/<space_id>/settings/grant", data = "<form>")]
+pub async fn space_grant_access_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    admin: SessionSpaceAdmin,
+    space_id: &str,
+    form: Form<GrantAccessForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redir_url = format!("/spaces/{}/settings", space_id);
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    let result = match form.grantee_type.as_str() {
+        "user" => {
+            space_service::grant_user_access(
+                pool.inner(),
+                &admin.user.id,
+                space_id,
+                &form.grantee_name,
+                &form.permission,
+            )
+            .await
+        }
+        "group" => {
+            space_service::grant_group_access(
+                pool.inner(),
+                &admin.user.id,
+                space_id,
+                &form.grantee_name,
+                &form.permission,
+            )
+            .await
+        }
+        _ => return Err(Flash::error(Redirect::to(redir_url.clone()), "Invalid grantee type.")),
+    };
+
+    match result {
+        Ok(_) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Access granted.")),
+        Err(AppError::NotFound) => Err(Flash::error(Redirect::to(redir_url.clone()), "User or group not found.")),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to grant access.")),
+    }
+}
+
+/// POST /spaces/<space_id>/access/revoke
+#[post("/spaces/<space_id>/access/revoke", data = "<form>")]
+pub async fn space_revoke_access_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    admin: SessionSpaceAdmin,
+    space_id: &str,
+    form: Form<RevokeAccessForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redir_url = format!("/spaces/{}/settings", space_id);
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    match space_service::revoke_access(
+        pool.inner(),
+        &admin.user.id,
+        space_id,
+        &form.grantee_type,
+        &form.grantee_id,
+    )
+    .await
+    {
+        Ok(()) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Access revoked.")),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to revoke access.")),
+    }
+}
+
+/// POST /spaces/<space_id>/mkdir
+#[post("/spaces/<space_id>/mkdir", data = "<form>")]
+pub async fn space_mkdir_submit(
+    config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    form: Form<MkdirForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let return_path = form.path.clone();
+    let redir_url = if return_path.is_empty() {
+        format!("/spaces/{}", space_id)
+    } else {
+        format!("/spaces/{}?path={}", space_id, return_path)
+    };
+
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    let full_path = if form.path.is_empty() {
+        form.name.clone()
+    } else {
+        format!("{}/{}", form.path, form.name)
+    };
+
+    match fs_service::create_space_directory(config.inner(), space_id, &full_path).await {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            format!("Folder \"{}\" created.", form.name),
+        )),
+        Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to create folder.")),
+    }
+}
+
+/// POST /spaces/<space_id>/rename (file/dir rename within space)
+#[post("/spaces/<space_id>/rename", data = "<form>")]
+pub async fn space_rename_entry_submit(
+    config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    form: Form<RenameForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let return_parent = parent_path(&form.old_path);
+    let redir_url = if return_parent.is_empty() {
+        format!("/spaces/{}", space_id)
+    } else {
+        format!("/spaces/{}?path={}", space_id, return_parent)
+    };
+
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    let parent = parent_path(&form.old_path);
+    let new_path = if parent.is_empty() {
+        form.new_name.clone()
+    } else {
+        format!("{}/{}", parent, form.new_name)
+    };
+
+    match fs_service::rename_space_entry(config.inner(), space_id, &form.old_path, &new_path).await
+    {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            format!("Renamed to \"{}\".", form.new_name),
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Rename failed.")),
+    }
+}
+
+/// POST /spaces/<space_id>/move
+#[post("/spaces/<space_id>/move", data = "<form>")]
+pub async fn space_move_entry_submit(
+    config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    form: Form<MoveForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redir_url = format!("/spaces/{}", space_id);
+
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    let name = file_name_from_path(&form.old_path);
+    if name.is_empty() {
+        return Err(Flash::error(Redirect::to(redir_url), "Invalid source path."));
+    }
+
+    let target_dir = normalize_dir_path(&form.target_dir);
+    let new_path = join_dir_and_name(&target_dir, &name);
+
+    match fs_service::rename_space_entry(config.inner(), space_id, &form.old_path, &new_path).await
+    {
+        Ok(_) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Moved successfully.")),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Move failed.")),
+    }
+}
+
+/// POST /spaces/<space_id>/delete (file/dir delete within space)
+#[post("/spaces/<space_id>/delete", data = "<form>")]
+pub async fn space_delete_entry_submit(
+    config: &State<AppConfig>,
+    cookies: &CookieJar<'_>,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    form: Form<DeleteForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let parent = parent_path(&form.path);
+    let redir_url = if parent.is_empty() {
+        format!("/spaces/{}", space_id)
+    } else {
+        format!("/spaces/{}?path={}", space_id, parent)
+    };
+
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    match fs_service::delete_space_entry(config.inner(), space_id, &form.path).await {
+        Ok(()) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Deleted successfully.")),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Delete failed.")),
+    }
+}
+
+/// POST /spaces/<space_id>/bulk-delete — XHR JSON endpoint
+#[post("/spaces/<space_id>/bulk-delete", data = "<data>")]
+pub async fn space_bulk_delete(
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    data: rocket::serde::json::Json<BulkDeleteRequest>,
+) -> rocket::serde::json::Json<serde_json::Value> {
+    let mut deleted = 0u64;
+    let mut errors: Vec<String> = Vec::new();
+
+    for path in &data.paths {
+        match fs_service::delete_space_entry(config.inner(), space_id, path).await {
+            Ok(()) => deleted += 1,
+            Err(e) => errors.push(format!("{}: {}", path, e)),
+        }
+    }
+
+    rocket::serde::json::Json(serde_json::json!({
+        "deleted": deleted,
+        "errors": errors,
+    }))
+}
+
+/// POST /spaces/<space_id>/bulk-move — XHR JSON endpoint
+#[post("/spaces/<space_id>/bulk-move", data = "<data>")]
+pub async fn space_bulk_move(
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    data: rocket::serde::json::Json<BulkMoveRequest>,
+) -> rocket::serde::json::Json<serde_json::Value> {
+    let target_dir = normalize_dir_path(&data.target_dir);
+    let mut moved = 0u64;
+    let mut errors: Vec<String> = Vec::new();
+
+    for path in &data.paths {
+        let name = file_name_from_path(path);
+        if name.is_empty() {
+            errors.push(format!("{}: invalid path", path));
+            continue;
+        }
+        let new_path = join_dir_and_name(&target_dir, &name);
+        match fs_service::rename_space_entry(config.inner(), space_id, path, &new_path).await {
+            Ok(_) => moved += 1,
+            Err(e) => errors.push(format!("{}: {}", path, e)),
+        }
+    }
+
+    rocket::serde::json::Json(serde_json::json!({
+        "moved": moved,
+        "errors": errors,
+    }))
+}
+
+/// POST /spaces/<space_id>/upload — single-file upload
+#[post("/spaces/<space_id>/upload?<path>", data = "<data>")]
+pub async fn space_upload_file(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _csrf: CsrfXhr,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    path: String,
+    data: rocket::data::Data<'_>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    use rocket::data::ToByteUnit;
+
+    let allowed = (config.max_upload_bytes + 1).bytes();
+    let stream = data.open(allowed).into_bytes().await.map_err(|e| {
+        (
+            Status::InternalServerError,
+            rocket::serde::json::Json(
+                serde_json::json!({"error": format!("Failed to read upload data: {e}")}),
+            ),
+        )
+    })?;
+
+    if !stream.is_complete() {
+        return Err((
+            Status::PayloadTooLarge,
+            rocket::serde::json::Json(serde_json::json!({
+                "error": format!("Upload exceeds the maximum size of {} bytes.", config.max_upload_bytes)
+            })),
+        ));
+    }
+
+    let result = fs_service::upload_space_file(
+        config.inner(),
+        unlock_state.inner(),
+        space_id,
+        &path,
+        &stream.into_inner(),
+        true,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "success": true,
+        "path": result.path,
+        "size": result.size,
+        "disk_size": result.disk_size,
+        "checksum_sha256": result.checksum_sha256,
+        "mime_type": result.mime_type,
+    })))
+}
+
+/// GET /spaces/<space_id>/download?<path> — browser download
+#[get("/spaces/<space_id>/download?<path>")]
+pub async fn space_download_file(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _reader: SessionSpaceReader,
+    space_id: &str,
+    path: String,
+) -> Result<crate::routes::library::FileDownload, Flash<Redirect>> {
+    let result = fs_service::download_space_file(
+        config.inner(),
+        unlock_state.inner(),
+        space_id,
+        &path,
+    )
+    .await
+    .map_err(|_| {
+        Flash::error(
+            Redirect::to(format!("/spaces/{}", space_id)),
+            "Download failed.",
+        )
+    })?;
+
+    let content_type = result
+        .mime_type
+        .as_deref()
+        .and_then(|m| {
+            let parts: Vec<&str> = m.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                Some(rocket::http::ContentType::new(
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(rocket::http::ContentType::Binary);
+
+    Ok(crate::routes::library::FileDownload {
+        data: result.data,
+        filename: result.filename,
+        content_type,
+        checksum_sha256: result.checksum_sha256,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Space chunked upload / download
+// ---------------------------------------------------------------------------
+
+/// POST /spaces/<space_id>/chunked/init — start a chunked upload to a space.
+#[post("/spaces/<space_id>/chunked/init", data = "<body>")]
+pub async fn space_chunked_init_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    writer: SessionSpaceWriter,
+    space_id: &str,
+    body: rocket::serde::json::Json<ChunkedInitRequest>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let result = chunk_service::init_upload(
+        pool.inner(),
+        config.inner(),
+        chunk_service::InitUploadParams {
+            user_id: writer.user.id.clone(),
+            target_id: space_id.to_string(),
+            target_type: "space".to_string(),
+            target_path: body.path.clone(),
+            total_chunks: body.total_chunks,
+            total_bytes: body.total_bytes,
+            checksum_sha256: body.checksum_sha256.clone(),
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "upload_id": result.upload_id,
+        "chunk_size_bytes": result.chunk_size_bytes,
+        "total_chunks": result.total_chunks,
+        "total_bytes": result.total_bytes,
+        "expires_at": result.expires_at,
+    })))
+}
+
+/// PUT /spaces/<space_id>/chunked/upload/<upload_id>/<chunk_index> — receive one chunk.
+#[put("/spaces/<space_id>/chunked/upload/<upload_id>/<chunk_index>", data = "<data>")]
+pub async fn space_chunked_receive_chunk(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    writer: SessionSpaceWriter,
+    space_id: &str,
+    upload_id: &str,
+    chunk_index: u32,
+    data: rocket::data::Data<'_>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    use rocket::data::ToByteUnit;
+
+    let allowed = (config.chunk_size_bytes + 1).bytes();
+    let stream = data.open(allowed).into_bytes().await.map_err(|e| {
+        (
+            Status::InternalServerError,
+            rocket::serde::json::Json(
+                serde_json::json!({"error": format!("Failed to read chunk data: {e}")}),
+            ),
+        )
+    })?;
+
+    if !stream.is_complete() {
+        return Err((
+            Status::PayloadTooLarge,
+            rocket::serde::json::Json(serde_json::json!({
+                "error": format!("Chunk exceeds the maximum chunk size of {} bytes.", config.chunk_size_bytes)
+            })),
+        ));
+    }
+
+    let result = chunk_service::receive_chunk(
+        pool.inner(),
+        config.inner(),
+        &writer.user.id,
+        space_id,
+        "space",
+        upload_id,
+        chunk_index,
+        &stream.into_inner(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "upload_id": result.upload_id,
+        "chunk_index": result.chunk_index,
+        "received_chunks": result.received_chunks,
+        "total_chunks": result.total_chunks,
+    })))
+}
+
+/// POST /spaces/<space_id>/chunked/complete — assemble chunked upload in a space.
+#[post("/spaces/<space_id>/chunked/complete", data = "<body>")]
+pub async fn space_chunked_complete_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _csrf: CsrfXhr,
+    writer: SessionSpaceWriter,
+    space_id: &str,
+    body: rocket::serde::json::Json<ChunkedCompleteRequest>,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let result = chunk_service::complete_upload(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        &writer.user.id,
+        space_id,
+        "space",
+        &body.upload_id,
+        body.verify.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "success": true,
+        "path": result.path,
+        "size": result.size,
+        "disk_size": result.disk_size,
+        "checksum_sha256": result.checksum_sha256,
+        "mime_type": result.mime_type,
+    })))
+}
+
+/// DELETE /spaces/<space_id>/chunked/cancel?upload_id=<id> — cancel chunked upload in a space.
+#[delete("/spaces/<space_id>/chunked/cancel?<upload_id>")]
+pub async fn space_chunked_cancel_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    writer: SessionSpaceWriter,
+    space_id: &str,
+    upload_id: String,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    chunk_service::cancel_upload(
+        pool.inner(),
+        config.inner(),
+        &writer.user.id,
+        space_id,
+        "space",
+        &upload_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "success": true,
+        "upload_id": upload_id,
+    })))
+}
+
+/// GET /spaces/<space_id>/chunked/download/init?<path> — initialize chunked download from space.
+#[get("/spaces/<space_id>/chunked/download/init?<path>")]
+pub async fn space_chunked_init_download(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    reader: SessionSpaceReader,
+    space_id: &str,
+    path: String,
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let result = chunk_service::init_download(
+        config.inner(),
+        unlock_state.inner(),
+        &reader.user.id,
+        space_id,
+        "space",
+        &path,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok(rocket::serde::json::Json(serde_json::json!({
+        "token": result.token,
+        "filename": result.filename,
+        "mime_type": result.mime_type,
+        "chunk_size_bytes": result.chunk_size_bytes,
+        "total_chunks": result.total_chunks,
+        "total_bytes": result.total_bytes,
+        "expires_at": result.expires_at,
+    })))
+}
+
+/// GET /spaces/<space_id>/chunked/download/chunk?<token>&<index> — stream one chunk from space.
+#[get("/spaces/<space_id>/chunked/download/chunk?<token>&<index>")]
+pub async fn space_chunked_download_chunk(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    reader: SessionSpaceReader,
+    #[allow(unused)] space_id: &str,
+    token: String,
+    index: u32,
+) -> Result<
+    crate::routes::library::FileChunkDownload,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
+    let result = chunk_service::serve_chunk(
+        config.inner(),
+        unlock_state.inner(),
+        &reader.user.id,
+        &token,
+        index,
+    )
+    .await
+    .map_err(|e| {
+        (
+            e.status(),
+            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    let content_type = result
+        .mime_type
+        .as_deref()
+        .and_then(|m| {
+            let parts: Vec<&str> = m.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                Some(rocket::http::ContentType::new(
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(rocket::http::ContentType::Binary);
+
+    Ok(crate::routes::library::FileChunkDownload {
+        data: result.data,
+        content_type,
+        checksum_sha256: result.checksum_sha256,
+        chunk_index: result.chunk_index,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Route collection
 // ---------------------------------------------------------------------------
 
@@ -1890,5 +2961,29 @@ pub fn routes() -> Vec<Route> {
         group_delete_submit,
         group_add_member_submit,
         group_remove_member_submit,
+        spaces_page,
+        spaces_create_submit,
+        space_browser_page,
+        space_browser_partial,
+        space_folders,
+        space_settings_page,
+        space_rename_submit,
+        space_delete_submit,
+        space_grant_access_submit,
+        space_revoke_access_submit,
+        space_mkdir_submit,
+        space_rename_entry_submit,
+        space_move_entry_submit,
+        space_delete_entry_submit,
+        space_bulk_delete,
+        space_bulk_move,
+        space_upload_file,
+        space_download_file,
+        space_chunked_init_upload,
+        space_chunked_receive_chunk,
+        space_chunked_complete_upload,
+        space_chunked_cancel_upload,
+        space_chunked_init_download,
+        space_chunked_download_chunk,
     ]
 }

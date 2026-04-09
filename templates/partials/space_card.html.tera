@@ -1,0 +1,28 @@
+<!-- Reusable space card — expects: space (object), in loop context -->
+<a href="/spaces/{{ space.id }}" class="card p-5 hover:shadow-md transition-shadow group">
+  <div class="flex items-start justify-between mb-3">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="flex items-center justify-center w-10 h-10 bg-purple-50 dark:bg-purple-900/30 rounded-xl flex-shrink-0">
+        <svg class="w-5 h-5 text-purple-600 dark:text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+      </div>
+      <h2 class="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">{{ space.name }}</h2>
+    </div>
+    <span class="inline-flex px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0
+      {% if space.user_permission == 'admin' %}
+        bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300
+      {% elif space.user_permission == 'write' %}
+        bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300
+      {% else %}
+        bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400
+      {% endif %}
+    ">{{ space.user_permission }}</span>
+  </div>
+
+  <div class="flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
+    <span class="flex items-center gap-1">
+      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+      {{ space.grantee_count }} shared
+    </span>
+    <span>{{ space.created_at }}</span>
+  </div>
+</a>

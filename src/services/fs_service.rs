@@ -517,6 +517,57 @@ pub async fn upload_file_streaming(
     })
 }
 
+/// Streaming chunked upload into a space (mirrors `upload_file_streaming` for libraries).
+pub async fn upload_space_file_streaming(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    space_id: &str,
+    user_path: &str,
+    chunk_paths: &[std::path::PathBuf],
+    total_plaintext_bytes: u64,
+    write_verify: bool,
+) -> Result<UploadResult, AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation("File path must not be empty.".into()));
+    }
+
+    let data_key = require_space_key(unlock_state, space_id)?;
+    let root = space_root(config, space_id);
+    let target = safe_join_async(root, user_path.to_string()).await?;
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
+    }
+
+    stream_encrypt_chunks_to_file(
+        &data_key,
+        chunk_paths,
+        total_plaintext_bytes,
+        &target,
+        write_verify,
+    )
+    .await?;
+
+    let disk_meta = fs::metadata(&target)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to stat written file: {e}")))?;
+
+    let filename = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    Ok(UploadResult {
+        path: user_path.to_string(),
+        size: total_plaintext_bytes,
+        disk_size: disk_meta.len(),
+        checksum_sha256: String::new(),
+        mime_type: mime_from_filename(&filename),
+    })
+}
+
 /// Download (read and decrypt) a file from a library.
 ///
 /// Returns the decrypted plaintext along with integrity metadata.

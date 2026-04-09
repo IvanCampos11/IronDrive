@@ -23,7 +23,8 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Clone)]
 pub struct InitUploadParams {
     pub user_id: String,
-    pub library_id: String,
+    pub target_id: String,
+    pub target_type: String,
     pub target_path: String,
     pub total_chunks: u32,
     pub total_bytes: u64,
@@ -74,6 +75,8 @@ pub struct ChunkDownloadResult {
 #[derive(Debug, Clone)]
 struct ChunkedUploadRow {
     user_id: String,
+    #[allow(dead_code)]
+    target_type: String,
     target_id: String,
     target_path: String,
     total_chunks: i64,
@@ -89,6 +92,12 @@ struct DownloadTokenPayload {
     path: String,
     exp: i64,
     nonce: String,
+    #[serde(default = "default_target_type")]
+    typ: String,
+}
+
+fn default_target_type() -> String {
+    "library".to_string()
 }
 
 /// Validate that an upload_id is a well-formed UUID.  Defence-in-depth:
@@ -140,18 +149,21 @@ fn is_valid_sha256_hex(s: &str) -> bool {
 async fn load_upload_row(
     pool: &DbPool,
     upload_id: &str,
+    target_type: &str,
 ) -> Result<Option<ChunkedUploadRow>, AppError> {
     let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, String)>(
         "SELECT id, user_id, target_id, target_path, total_chunks, received_chunks, total_bytes, expires_at
          FROM chunked_uploads
-         WHERE id = ? AND target_type = 'library'",
+         WHERE id = ? AND target_type = ?",
     )
     .bind(upload_id)
+    .bind(target_type)
     .fetch_optional(pool)
     .await?;
 
     Ok(row.map(|r| ChunkedUploadRow {
         user_id: r.1,
+        target_type: target_type.to_string(),
         target_id: r.2,
         target_path: r.3,
         total_chunks: r.4,
@@ -202,7 +214,8 @@ fn sign_payload(secret_key: &str, payload_b64: &str) -> Result<String, AppError>
 fn build_download_token(
     secret_key: &str,
     user_id: &str,
-    library_id: &str,
+    target_id: &str,
+    target_type: &str,
     path: &str,
 ) -> Result<(String, String), AppError> {
     let expires_at = Utc::now() + Duration::minutes(DOWNLOAD_TOKEN_TTL_MINUTES);
@@ -210,10 +223,11 @@ fn build_download_token(
     let payload = DownloadTokenPayload {
         v: DOWNLOAD_TOKEN_VERSION.to_string(),
         uid: user_id.to_string(),
-        lib: library_id.to_string(),
+        lib: target_id.to_string(),
         path: path.to_string(),
         exp: expires_at.timestamp(),
         nonce: Uuid::new_v4().to_string(),
+        typ: target_type.to_string(),
     };
 
     let payload_json = serde_json::to_vec(&payload)
@@ -333,11 +347,12 @@ pub async fn init_upload(
     sqlx::query(
         "INSERT INTO chunked_uploads
          (id, user_id, target_type, target_id, target_path, filename, total_chunks, received_chunks, total_bytes, checksum, expires_at)
-         VALUES (?, ?, 'library', ?, ?, ?, ?, 0, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
     )
     .bind(&upload_id)
     .bind(&params.user_id)
-    .bind(&params.library_id)
+    .bind(&params.target_type)
+    .bind(&params.target_id)
     .bind(&params.target_path)
     .bind(&filename)
     .bind(params.total_chunks as i64)
@@ -360,17 +375,18 @@ pub async fn receive_chunk(
     pool: &DbPool,
     config: &AppConfig,
     user_id: &str,
-    library_id: &str,
+    target_id: &str,
+    target_type: &str,
     upload_id: &str,
     chunk_index: u32,
     data: &[u8],
 ) -> Result<ReceiveChunkResult, AppError> {
     validate_upload_id(upload_id)?;
-    let row = load_upload_row(pool, upload_id)
+    let row = load_upload_row(pool, upload_id, target_type)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if row.user_id != user_id || row.target_id != library_id {
+    if row.user_id != user_id || row.target_id != target_id {
         return Err(AppError::NotFound);
     }
     if is_expired(&row.expires_at) {
@@ -449,16 +465,17 @@ pub async fn complete_upload(
     config: &AppConfig,
     unlock_state: &UnlockState,
     user_id: &str,
-    library_id: &str,
+    target_id: &str,
+    target_type: &str,
     upload_id: &str,
     write_verify: bool,
 ) -> Result<UploadResult, AppError> {
     validate_upload_id(upload_id)?;
-    let row = load_upload_row(pool, upload_id)
+    let row = load_upload_row(pool, upload_id, target_type)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if row.user_id != user_id || row.target_id != library_id {
+    if row.user_id != user_id || row.target_id != target_id {
         return Err(AppError::NotFound);
     }
     if is_expired(&row.expires_at) {
@@ -482,16 +499,29 @@ pub async fn complete_upload(
 
     // Streaming encrypt: reads each chunk file, encrypts segment-by-segment,
     // and writes the STREAM format. RAM stays bounded to one chunk.
-    let upload = fs_service::upload_file_streaming(
-        config,
-        unlock_state,
-        library_id,
-        &row.target_path,
-        &chunk_paths,
-        total_bytes,
-        write_verify,
-    )
-    .await?;
+    let upload = if target_type == "space" {
+        fs_service::upload_space_file_streaming(
+            config,
+            unlock_state,
+            target_id,
+            &row.target_path,
+            &chunk_paths,
+            total_bytes,
+            write_verify,
+        )
+        .await?
+    } else {
+        fs_service::upload_file_streaming(
+            config,
+            unlock_state,
+            target_id,
+            &row.target_path,
+            &chunk_paths,
+            total_bytes,
+            write_verify,
+        )
+        .await?
+    };
 
     let _ = tokio::fs::remove_dir_all(staging_dir(config, upload_id)).await;
     let _ = sqlx::query("DELETE FROM chunked_uploads WHERE id = ?")
@@ -506,15 +536,16 @@ pub async fn cancel_upload(
     pool: &DbPool,
     config: &AppConfig,
     user_id: &str,
-    library_id: &str,
+    target_id: &str,
+    target_type: &str,
     upload_id: &str,
 ) -> Result<(), AppError> {
     validate_upload_id(upload_id)?;
-    let row = load_upload_row(pool, upload_id)
+    let row = load_upload_row(pool, upload_id, target_type)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if row.user_id != user_id || row.target_id != library_id {
+    if row.user_id != user_id || row.target_id != target_id {
         return Err(AppError::NotFound);
     }
 
@@ -531,13 +562,18 @@ pub async fn init_download(
     config: &AppConfig,
     unlock_state: &UnlockState,
     user_id: &str,
-    library_id: &str,
+    target_id: &str,
+    target_type: &str,
     path: &str,
 ) -> Result<InitDownloadResult, AppError> {
-    let download = fs_service::download_file(config, unlock_state, library_id, path).await?;
+    let download = if target_type == "space" {
+        fs_service::download_space_file(config, unlock_state, target_id, path).await?
+    } else {
+        fs_service::download_file(config, unlock_state, target_id, path).await?
+    };
     let total_bytes = download.data.len() as u64;
     let total_chunks = expected_total_chunks(total_bytes.max(1), config.chunk_size_bytes);
-    let (token, expires_at) = build_download_token(&config.secret_key, user_id, library_id, path)?;
+    let (token, expires_at) = build_download_token(&config.secret_key, user_id, target_id, target_type, path)?;
 
     Ok(InitDownloadResult {
         token,
@@ -567,7 +603,11 @@ pub async fn serve_chunk(
         checksum_sha256,
         mime_type,
         filename: _,
-    } = fs_service::download_file(config, unlock_state, &payload.lib, &payload.path).await?;
+    } = if payload.typ == "space" {
+        fs_service::download_space_file(config, unlock_state, &payload.lib, &payload.path).await?
+    } else {
+        fs_service::download_file(config, unlock_state, &payload.lib, &payload.path).await?
+    };
 
     let total_bytes = data.len() as u64;
     let total_chunks = expected_total_chunks(total_bytes.max(1), config.chunk_size_bytes);

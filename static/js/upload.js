@@ -47,6 +47,19 @@
     return Math.min(parsed, 16);
   }
 
+  // Returns the space ID if we are inside a space browser, or '' for personal library.
+  function getSpaceId() {
+    var root = document.getElementById('file-browser-content');
+    if (!root) return '';
+    return root.getAttribute('data-space-id') || '';
+  }
+
+  // Build URL prefix: '/spaces/<id>' for spaces, '/files' for personal library.
+  function getUrlPrefix() {
+    var spaceId = getSpaceId();
+    return spaceId ? '/spaces/' + encodeURIComponent(spaceId) : '/files';
+  }
+
   function parseErrorMessage(payload, fallback) {
     if (!payload) return fallback;
     if (typeof payload === 'string') return payload;
@@ -260,7 +273,7 @@
   function uploadFileSingle(id, file, fullPath) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', '/files/upload?path=' + encodeURIComponent(fullPath), true);
+      xhr.open('POST', getUrlPrefix() + '/upload?path=' + encodeURIComponent(fullPath), true);
       xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
 
       xhr.upload.addEventListener('progress', function (e) {
@@ -302,7 +315,7 @@
   function uploadChunkXhr(uploadId, chunkIndex, chunkBlob, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
-      xhr.open('PUT', '/files/chunked/upload/' + encodeURIComponent(uploadId) + '/' + chunkIndex, true);
+      xhr.open('PUT', getUrlPrefix() + '/chunked/upload/' + encodeURIComponent(uploadId) + '/' + chunkIndex, true);
       xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
 
       xhr.upload.addEventListener('progress', function (e) {
@@ -354,7 +367,7 @@
     var maxParallel = Math.min(getMaxParallelChunks(), totalChunks);
     var uploadId = '';
 
-    return jsonRequest('POST', '/files/chunked/init', {
+    return jsonRequest('POST', getUrlPrefix() + '/chunked/init', {
       path: fullPath,
       total_chunks: totalChunks,
       total_bytes: file.size
@@ -411,7 +424,7 @@
       return Promise.all(workers);
     }).then(function () {
       markUploadProcessing(id);
-      return jsonRequest('POST', '/files/chunked/complete', {
+      return jsonRequest('POST', getUrlPrefix() + '/chunked/complete', {
         upload_id: uploadId,
         verify: false
       });
@@ -420,7 +433,7 @@
         throw err;
       }
 
-      return fetch('/files/chunked/cancel?upload_id=' + encodeURIComponent(uploadId), {
+      return fetch(getUrlPrefix() + '/chunked/cancel?upload_id=' + encodeURIComponent(uploadId), {
         method: 'DELETE',
         headers: { 'X-CSRF-Token': getCsrfToken() }
       }).catch(function () {
@@ -481,7 +494,8 @@
     var container = document.getElementById('file-browser-content');
     if (container && window.htmx) {
       var path = getCurrentPath();
-      var url = '/files/partial' + (path ? '?path=' + encodeURIComponent(path) : '');
+      var prefix = getUrlPrefix();
+      var url = prefix + '/partial' + (path ? '?path=' + encodeURIComponent(path) : '');
       window.htmx.ajax('GET', url, { target: '#file-browser-content', swap: 'innerHTML' });
     }
   }

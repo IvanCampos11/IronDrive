@@ -19,6 +19,19 @@
     return parsed;
   }
 
+  // Returns the space ID if we are inside a space browser, or '' for personal library.
+  function getSpaceId() {
+    var root = document.getElementById('file-browser-content');
+    if (!root) return '';
+    return root.getAttribute('data-space-id') || '';
+  }
+
+  // Build URL prefix: '/spaces/<id>' for spaces, '/files' for personal library.
+  function getUrlPrefix() {
+    var spaceId = getSpaceId();
+    return spaceId ? '/spaces/' + encodeURIComponent(spaceId) : '/files';
+  }
+
   function parseErrorMessage(payload, fallback) {
     if (!payload) return fallback;
     if (typeof payload === 'string') return payload;
@@ -167,7 +180,7 @@
     var dlId = createDownloadRow(filename);
     updateDownloadRow(dlId, 0, 'Preparing\u2026');
 
-    return jsonFetch('/files/chunked/download/init?path=' + encodeURIComponent(path))
+    return jsonFetch(getUrlPrefix() + '/chunked/download/init?path=' + encodeURIComponent(path))
       .then(function (initPayload) {
         var totalChunks = initPayload.total_chunks || 0;
         var token = initPayload.token;
@@ -181,7 +194,7 @@
         for (var i = 0; i < totalChunks; i++) {
           (function (idx) {
             chain = chain.then(function () {
-              return arrayBufferFetch('/files/chunked/download/chunk?token=' + encodeURIComponent(token) + '&index=' + idx)
+              return arrayBufferFetch(getUrlPrefix() + '/chunked/download/chunk?token=' + encodeURIComponent(token) + '&index=' + idx)
                 .then(function (ab) {
                   parts.push(new Uint8Array(ab));
                   var pct = Math.round(((idx + 1) / totalChunks) * 100);
@@ -208,7 +221,7 @@
     var dlId = createDownloadRow(filename);
     updateDownloadRow(dlId, 0, 'Downloading\u2026');
 
-    return fetch('/files/download?path=' + encodeURIComponent(path), {
+    return fetch(getUrlPrefix() + '/download?path=' + encodeURIComponent(path), {
       headers: { 'X-CSRF-Token': getCsrfToken() }
     }).then(function (resp) {
       if (!resp.ok) {
@@ -422,7 +435,7 @@
   function refreshCurrentFileList() {
     if (window.htmx) {
       var path = getCurrentViewerPath();
-      var url = '/files/partial' + (path ? '?path=' + encodeURIComponent(path) : '');
+      var url = getUrlPrefix() + '/partial' + (path ? '?path=' + encodeURIComponent(path) : '');
       window.htmx.ajax('GET', url, { target: '#file-browser-content', swap: 'innerHTML' });
       return;
     }
@@ -535,7 +548,7 @@
   }
 
   function moveFetchFolders(path) {
-    var url = '/files/folders?path=' + encodeURIComponent(path || '');
+    var url = getUrlPrefix() + '/folders?path=' + encodeURIComponent(path || '');
     return fetch(url, {
       headers: { 'X-CSRF-Token': getCsrfToken() }
     }).then(function (resp) {
@@ -826,8 +839,11 @@
 
   // Intercept ALL file download links so we can show the progress toast.
   document.addEventListener('click', function (e) {
-    var link = e.target.closest('a[href^="/files/download?path="]');
+    var link = e.target.closest('a[href*="/download?path="]');
     if (!link) return;
+    // Only intercept personal library or space download links
+    var href = link.getAttribute('href') || '';
+    if (href.indexOf('/files/download?path=') !== 0 && href.indexOf('/spaces/') !== 0) return;
 
     var row = link.closest('tr[data-path]');
     if (!row) return;
@@ -883,7 +899,7 @@
       pendingBulkDeletePaths = null;
       closeAllModals();
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', '/files/bulk-delete', true);
+      xhr.open('POST', getUrlPrefix() + '/bulk-delete', true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
       xhr.addEventListener('load', function () { window.location.reload(); });
@@ -896,7 +912,7 @@
     if (!pendingDeletePath) return;
     var form = document.createElement('form');
     form.method = 'POST';
-    form.action = '/files/delete';
+    form.action = getUrlPrefix() + '/delete';
     var csrfInput = document.createElement('input');
     csrfInput.type = 'hidden';
     csrfInput.name = 'csrf_token';
@@ -933,7 +949,7 @@
 
       closeAllModals();
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', '/files/bulk-move', true);
+      xhr.open('POST', getUrlPrefix() + '/bulk-move', true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
       xhr.addEventListener('load', function () { refreshCurrentFileList(); });
@@ -978,7 +994,7 @@
   function executeBulkMove(paths, targetDir) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', '/files/bulk-move', true);
+      xhr.open('POST', getUrlPrefix() + '/bulk-move', true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
 
