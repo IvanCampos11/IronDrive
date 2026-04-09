@@ -17,8 +17,6 @@
     </div>
   </div>
 
-  {% include "partials/flash" %}
-
   <!-- Space info card -->
   <section class="card p-5 mb-6">
     <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
@@ -131,16 +129,29 @@
       </div>
       <form method="post" action="/spaces/{{ space.id }}/settings/grant" id="grant-access-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="mb-4">
-          <label for="grant-type" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Type</label>
-          <select name="grantee_type" id="grant-type" class="input-field">
-            <option value="user" selected>User</option>
-            <option value="group">Group</option>
-          </select>
-        </div>
-        <div class="mb-4">
-          <label for="grant-name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Username or Group ID</label>
-          <input type="text" name="grantee_name" id="grant-name" required placeholder="Enter username or group ID" class="input-field">
+        <input type="hidden" name="grantee_type" id="grant-grantee-type" value="">
+        <input type="hidden" name="grantee_id" id="grant-grantee-id" value="">
+        <div class="mb-4 relative">
+          <label for="grant-search" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">User or Group</label>
+          <input
+            type="text"
+            id="grant-search"
+            autocomplete="off"
+            placeholder="Start typing a username or group name…"
+            class="input-field"
+          >
+          <!-- Selected pill (shown after selection) -->
+          <div id="grant-selected" class="hidden mt-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300">
+            <span id="grant-selected-icon"></span>
+            <span id="grant-selected-name"></span>
+            <button type="button" id="grant-clear-selection" class="ml-1 text-purple-400 hover:text-purple-600 dark:hover:text-purple-200" aria-label="Clear selection">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <!-- Dropdown -->
+          <div id="grant-dropdown" class="hidden absolute left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-xl border border-gray-200/70 dark:border-gray-700/70 bg-white dark:bg-gray-800 shadow-elevated z-50">
+            <ul id="grant-results" class="py-1" role="listbox"></ul>
+          </div>
         </div>
         <div class="mb-5">
           <label for="grant-permission" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Permission</label>
@@ -152,7 +163,7 @@
         </div>
         <div class="flex justify-end gap-3">
           <button type="button" data-modal-close class="btn-secondary">Cancel</button>
-          <button type="submit" class="btn-primary">Grant Access</button>
+          <button type="submit" id="grant-submit-btn" class="btn-primary" disabled>Grant Access</button>
         </div>
       </form>
     </div>
@@ -162,5 +173,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/spaces.js?v=0.3.0" defer></script>
+<script src="/static/js/spaces.js?v=0.5.0" defer></script>
 {% endblock %}

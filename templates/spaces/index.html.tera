@@ -13,8 +13,6 @@
     </button>
   </div>
 
-  {% include "partials/flash" %}
-
   {% if spaces | length == 0 %}
   <!-- Empty state -->
   <div class="card text-center py-20 px-6">

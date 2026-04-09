@@ -125,6 +125,20 @@ impl Group {
         Ok(group)
     }
 
+    /// Search groups whose name starts with `prefix`. Returns at most `limit` results.
+    pub async fn search_by_name_prefix(pool: &DbPool, prefix: &str, limit: i64) -> Result<Vec<Group>, AppError> {
+        let pattern = format!("{}%", prefix);
+        let groups = sqlx::query_as::<_, Group>(
+            "SELECT id, name, description, created_by, created_at FROM groups WHERE name LIKE ? ORDER BY name ASC LIMIT ?",
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(groups)
+    }
+
     /// Single group with meta for a specific user. Returns `None` if the user
     /// is not a member. Preferred over `find_all_for_user` + filter when you
     /// only need one group.

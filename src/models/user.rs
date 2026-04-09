@@ -133,6 +133,21 @@ impl User {
         Ok(row)
     }
 
+    /// Search users whose username starts with `prefix`. Returns at most `limit` results.
+    pub async fn search_by_prefix(pool: &DbPool, prefix: &str, limit: i64) -> Result<Vec<User>, AppError> {
+        let pattern = format!("{}%", prefix);
+        let users = sqlx::query_as::<_, User>(
+            "SELECT id, username, email, role, quota_bytes, is_active, setup_complete, created_at, updated_at
+             FROM users WHERE username LIKE ? AND is_active = 1 ORDER BY username ASC LIMIT ?",
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(users)
+    }
+
     pub async fn mark_setup_complete(pool: &DbPool, user_id: &str) -> Result<(), AppError> {
         let result = sqlx::query(
             "UPDATE users SET setup_complete = 1, updated_at = datetime('now') WHERE id = ?",

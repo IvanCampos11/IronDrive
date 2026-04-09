@@ -13,6 +13,8 @@ use crate::errors::AppError;
 use crate::guards::csrf_guard::{ensure_csrf_token, validate_csrf, CsrfXhr};
 use crate::guards::session_guard::{SessionSetupComplete, SessionUser, COOKIE_NAME};
 use crate::models::library::PersonalLibrary;
+use crate::models::group::Group;
+use crate::models::user::User;
 use crate::guards::space_guard::{SessionSpaceAdmin, SessionSpaceReader, SessionSpaceWriter};
 use crate::services::crypto_service::MasterKey;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
@@ -135,7 +137,15 @@ pub struct RenameSpaceForm {
 #[derive(FromForm)]
 pub struct GrantAccessForm {
     pub grantee_type: String,
-    pub grantee_name: String,
+    pub grantee_id: String,
+    pub permission: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct UpdateAccessForm {
+    pub grantee_type: String,
+    pub grantee_id: String,
     pub permission: String,
     pub csrf_token: String,
 }
@@ -144,6 +154,12 @@ pub struct GrantAccessForm {
 pub struct RevokeAccessForm {
     pub grantee_type: String,
     pub grantee_id: String,
+    pub csrf_token: String,
+}
+
+#[derive(FromForm)]
+pub struct UpdateMemberRoleForm {
+    pub role: String,
     pub csrf_token: String,
 }
 
@@ -1798,6 +1814,40 @@ pub async fn group_remove_member_submit(
     }
 }
 
+/// POST /groups/<id>/members/<user_id>/role
+#[post("/groups/<id>/members/<user_id>/role", data = "<form>")]
+pub async fn group_update_member_role_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    user: SessionSetupComplete,
+    id: &str,
+    user_id: &str,
+    form: Form<UpdateMemberRoleForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redirect_to = uri!(group_detail_page(id = id));
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+    })?;
+
+    match group_service::update_member_role(pool.inner(), &user.0.id, id, user_id, &form.role)
+        .await
+    {
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redirect_to),
+            "Role updated.",
+        )),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
+        Err(AppError::Forbidden) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "Only the group owner can change roles.",
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redirect_to),
+            "Failed to update role.",
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
@@ -2036,6 +2086,7 @@ pub async fn space_browser_page(
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
+    let is_admin = reader.space.user_permission == "admin";
 
     let csrf_token = ensure_csrf_token(cookies);
 
@@ -2053,6 +2104,7 @@ pub async fn space_browser_page(
             breadcrumbs: breadcrumbs,
             is_root: user_path.is_empty(),
             can_write: can_write,
+            is_admin: is_admin,
             current_path: "spaces",
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
@@ -2103,6 +2155,7 @@ pub async fn space_browser_partial(
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
+    let is_admin = reader.space.user_permission == "admin";
 
     Ok(Template::render(
         "partials/space_file_list",
@@ -2113,6 +2166,7 @@ pub async fn space_browser_partial(
             breadcrumbs: breadcrumbs,
             is_root: user_path.is_empty(),
             can_write: can_write,
+            is_admin: is_admin,
         },
     ))
 }
@@ -2162,16 +2216,55 @@ pub async fn space_folders(
     ))
 }
 
+/// GET /search/grantees?q=<query> — search users and groups by name prefix (for typeahead)
+#[get("/search/grantees?<q>")]
+pub async fn search_grantees(
+    pool: &State<DbPool>,
+    _session: SessionSetupComplete,
+    q: &str,
+) -> Result<rocket::serde::json::Json<serde_json::Value>, Status> {
+    let q = q.trim();
+    if q.is_empty() || q.len() > 100 {
+        return Ok(rocket::serde::json::Json(serde_json::json!({ "results": [] })));
+    }
+
+    let users = User::search_by_prefix(pool.inner(), q, 5)
+        .await
+        .unwrap_or_default();
+    let groups = Group::search_by_name_prefix(pool.inner(), q, 5)
+        .await
+        .unwrap_or_default();
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    for u in users {
+        results.push(serde_json::json!({
+            "type": "user",
+            "id": u.id,
+            "name": u.username,
+        }));
+    }
+    for g in groups {
+        results.push(serde_json::json!({
+            "type": "group",
+            "id": g.id,
+            "name": g.name,
+        }));
+    }
+
+    Ok(rocket::serde::json::Json(serde_json::json!({ "results": results })))
+}
+
 /// GET /spaces/<space_id>/settings — space settings & access management
 #[get("/spaces/<space_id>/settings")]
 pub async fn space_settings_page(
     pool: &State<DbPool>,
     cookies: &CookieJar<'_>,
-    reader: SessionSpaceReader,
+    admin: SessionSpaceAdmin,
     space_id: &str,
     flash: Option<FlashMessage<'_>>,
 ) -> Template {
-    let access_entries = space_service::list_access(pool.inner(), &reader.user.id, space_id)
+    let access_entries = space_service::list_access(pool.inner(), &admin.user.id, space_id)
         .await
         .unwrap_or_default();
 
@@ -2188,25 +2281,23 @@ pub async fn space_settings_page(
         })
         .collect();
 
-    let is_admin = reader.space.user_permission == "admin";
-
     Template::render(
         "spaces/settings",
         context! {
-            user: &reader.user.username,
+            user: &admin.user.username,
             csrf_token: ensure_csrf_token(cookies),
             current_path: "spaces",
             space: serde_json::json!({
-                "id": reader.space.space.id,
-                "name": reader.space.space.name,
-                "owner_type": reader.space.space.owner_type,
-                "owner_id": reader.space.space.owner_id,
-                "created_at": format_timestamp(&reader.space.space.created_at),
-                "grantee_count": reader.space.grantee_count,
+                "id": admin.space.space.id,
+                "name": admin.space.space.name,
+                "owner_type": admin.space.space.owner_type,
+                "owner_id": admin.space.space.owner_id,
+                "created_at": format_timestamp(&admin.space.space.created_at),
+                "grantee_count": admin.space.grantee_count,
             }),
             space_id: space_id,
-            user_permission: &reader.space.user_permission,
-            is_admin: is_admin,
+            user_permission: &admin.space.user_permission,
+            is_admin: true,
             access_entries: access_display,
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
@@ -2290,21 +2381,28 @@ pub async fn space_grant_access_submit(
 
     let result = match form.grantee_type.as_str() {
         "user" => {
-            space_service::grant_user_access(
-                pool.inner(),
-                &admin.user.id,
-                space_id,
-                &form.grantee_name,
-                &form.permission,
-            )
-            .await
+            // Look up username from ID for the service call
+            match User::find_by_id(pool.inner(), &form.grantee_id).await {
+                Ok(Some(target)) => {
+                    space_service::grant_user_access(
+                        pool.inner(),
+                        &admin.user.id,
+                        space_id,
+                        &target.username,
+                        &form.permission,
+                    )
+                    .await
+                }
+                Ok(None) => Err(AppError::NotFound),
+                Err(e) => Err(e),
+            }
         }
         "group" => {
             space_service::grant_group_access(
                 pool.inner(),
                 &admin.user.id,
                 space_id,
-                &form.grantee_name,
+                &form.grantee_id,
                 &form.permission,
             )
             .await
@@ -2317,6 +2415,35 @@ pub async fn space_grant_access_submit(
         Err(AppError::NotFound) => Err(Flash::error(Redirect::to(redir_url.clone()), "User or group not found.")),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
         Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to grant access.")),
+    }
+}
+
+/// POST /spaces/<space_id>/access/update
+#[post("/spaces/<space_id>/access/update", data = "<form>")]
+pub async fn space_update_access_submit(
+    pool: &State<DbPool>,
+    cookies: &CookieJar<'_>,
+    admin: SessionSpaceAdmin,
+    space_id: &str,
+    form: Form<UpdateAccessForm>,
+) -> Result<Flash<Redirect>, Flash<Redirect>> {
+    let redir_url = format!("/spaces/{}/settings", space_id);
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+
+    match space_service::update_access_permission(
+        pool.inner(),
+        &admin.user.id,
+        space_id,
+        &form.grantee_type,
+        &form.grantee_id,
+        &form.permission,
+    )
+    .await
+    {
+        Ok(_) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Permission updated.")),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
+        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to update permission.")),
     }
 }
 
@@ -2961,8 +3088,10 @@ pub fn routes() -> Vec<Route> {
         group_delete_submit,
         group_add_member_submit,
         group_remove_member_submit,
+        group_update_member_role_submit,
         spaces_page,
         spaces_create_submit,
+        search_grantees,
         space_browser_page,
         space_browser_partial,
         space_folders,
@@ -2970,6 +3099,7 @@ pub fn routes() -> Vec<Route> {
         space_rename_submit,
         space_delete_submit,
         space_grant_access_submit,
+        space_update_access_submit,
         space_revoke_access_submit,
         space_mkdir_submit,
         space_rename_entry_submit,
