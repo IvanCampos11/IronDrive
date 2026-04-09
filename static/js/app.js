@@ -451,6 +451,26 @@
     }
   }
 
+  function positionRowMenu(btn, menu) {
+    // Temporarily show off-screen to measure height
+    menu.style.visibility = 'hidden';
+    menu.style.top = '0';
+    menu.style.left = '0';
+    menu.classList.remove('hidden');
+    var rect = btn.getBoundingClientRect();
+    var menuH = menu.offsetHeight;
+    var spaceBelow = window.innerHeight - rect.bottom;
+    // Open upward if not enough room below
+    if (spaceBelow < menuH + 8 && rect.top > menuH + 8) {
+      menu.style.top = (rect.top - menuH - 4) + 'px';
+    } else {
+      menu.style.top = (rect.bottom + 4) + 'px';
+    }
+    // Align right edge to button right edge
+    menu.style.left = Math.max(8, rect.right - 160) + 'px';
+    menu.style.visibility = '';
+  }
+
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('.row-actions-btn');
     if (btn) {
@@ -459,7 +479,7 @@
       var wasHidden = menu.classList.contains('hidden');
       closeAllRowMenus();
       if (wasHidden) {
-        menu.classList.remove('hidden');
+        positionRowMenu(btn, menu);
       }
       e.stopPropagation();
       return;
@@ -478,6 +498,10 @@
       closeAllRowMenus();
     }
   });
+
+  // Close fixed-position row menus on scroll or resize
+  window.addEventListener('scroll', function () { closeAllRowMenus(); });
+  window.addEventListener('resize', function () { closeAllRowMenus(); });
 
   // -----------------------------------------------------------------------
   // User menu panel

@@ -1,3 +1,6 @@
+// IronDrive – spaces.js
+// Space settings UI: create/delete modals, grant-access typeahead,
+// permission-level dropdown menus.
 (function() {
   // --- Spaces index: create space modal ---
   function setupModal(btnId, modalId, focusId) {

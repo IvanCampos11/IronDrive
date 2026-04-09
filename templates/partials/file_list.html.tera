@@ -86,9 +86,8 @@
 {% if entries | length == 0 %}
   {% include "partials/empty_state" %}
 {% else %}
-<div class="card overflow-hidden">
-  <div class="overflow-x-auto">
-    <table class="w-full text-sm" id="file-table">
+<div class="card overflow-hidden" style="backdrop-filter:none">
+    <table class="w-full table-fixed text-sm" id="file-table">
       <thead>
         <tr class="border-b border-gray-200 dark:border-gray-700 text-left text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider bg-gray-50/50 dark:bg-gray-800/50">
           <th class="py-3 pl-3 pr-1 w-8">
@@ -122,21 +121,21 @@
           <td class="py-2.5 pl-3 pr-1 w-8">
             <input type="checkbox" class="file-select-cb file-checkbox" data-path="{{ entry.path }}" aria-label="Select {{ entry.name }}">
           </td>
-          <td class="py-2.5 pl-2 pr-4">
+          <td class="py-2.5 pl-2 pr-4 max-w-0">
             <div class="flex items-center gap-3 min-w-0">
               {% include "partials/file_icon" %}
               {% if entry.is_dir %}
                 <a
-                  href="/files?path={{ entry.path }}"
+                  href="/files?path={{ entry.path | urlencode }}"
                   class="truncate text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400 font-medium transition-colors"
-                  hx-get="/files/partial?path={{ entry.path }}"
+                  hx-get="/files/partial?path={{ entry.path | urlencode }}"
                   hx-target="#file-browser-content"
                   hx-swap="innerHTML"
-                  hx-push-url="/files?path={{ entry.path }}"
+                  hx-push-url="/files?path={{ entry.path | urlencode }}"
                 >{{ entry.name }}</a>
               {% else %}
                 <a
-                  href="/files/download?path={{ entry.path }}"
+                  href="/files/download?path={{ entry.path | urlencode }}"
                   class="truncate text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
                 >{{ entry.name }}</a>
               {% endif %}
@@ -153,9 +152,9 @@
               <button type="button" class="row-actions-btn p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors" aria-label="Actions for {{ entry.name }}">
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"/></svg>
               </button>
-              <div class="row-actions-menu hidden absolute right-0 top-full mt-1 w-40 rounded-xl border border-gray-200/70 dark:border-gray-700/70 bg-white dark:bg-gray-800 shadow-elevated z-50 p-1 animate-fade-in">
+              <div class="row-actions-menu hidden fixed w-40 rounded-xl border border-gray-200/70 dark:border-gray-700/70 bg-white dark:bg-gray-800 shadow-elevated z-50 p-1 animate-fade-in">
                 {% if not entry.is_dir %}
-                <a href="/files/download?path={{ entry.path }}" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                <a href="/files/download?path={{ entry.path | urlencode }}" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                   <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                   Download
                 </a>
@@ -180,7 +179,6 @@
         {% endfor %}
       </tbody>
     </table>
-  </div>
 </div>
 
 

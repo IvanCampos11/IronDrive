@@ -6,12 +6,12 @@
       {% else %}
         <li>
           <a
-            href="/spaces/{{ space_id }}{% if crumb.path %}?path={{ crumb.path }}{% endif %}"
+            href="/spaces/{{ space_id }}{% if crumb.path %}?path={{ crumb.path | urlencode }}{% endif %}"
             class="hover:text-gray-900 dark:hover:text-white transition-colors"
-            hx-get="/spaces/{{ space_id }}/partial{% if crumb.path %}?path={{ crumb.path }}{% endif %}"
+            hx-get="/spaces/{{ space_id }}/partial{% if crumb.path %}?path={{ crumb.path | urlencode }}{% endif %}"
             hx-target="#file-browser-content"
             hx-swap="innerHTML"
-            hx-push-url="/spaces/{{ space_id }}{% if crumb.path %}?path={{ crumb.path }}{% endif %}"
+            hx-push-url="/spaces/{{ space_id }}{% if crumb.path %}?path={{ crumb.path | urlencode }}{% endif %}"
           >{{ crumb.name }}</a>
         </li>
         <li aria-hidden="true" class="text-gray-300 dark:text-gray-600">

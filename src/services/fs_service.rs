@@ -1,3 +1,13 @@
+//! Encrypted filesystem operations for libraries and spaces.
+//!
+//! Every file operation resolves a safe path (via [`safe_join`]), fetches
+//! the data key from [`UnlockState`], then delegates to [`crypto_service`]
+//! for encrypt/decrypt. Spaces and personal libraries share the same
+//! underlying functions — they just differ in root directory and key lookup.
+//!
+//! The `*_space_*` functions mirror the personal-library functions but
+//! operate on `<data_dir>/spaces/<uuid>/` roots.
+
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;

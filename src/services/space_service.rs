@@ -1,3 +1,20 @@
+//! Shared-space business logic.
+//!
+//! Spaces are collaborative file containers with per-user/group permissions.
+//! Every space has an encrypted data key (server-mode only, for now) and
+//! an on-disk directory under `<data_dir>/spaces/<uuid>/`.
+//!
+//! # Permission model
+//!
+//! | Level   | Can do                                              |
+//! |---------|-----------------------------------------------------|
+//! | `read`  | List files, download, view usage                    |
+//! | `write` | All of read + upload, rename, move, delete files    |
+//! | `admin` | All of write + manage access, rename/delete space   |
+//!
+//! The space *owner* (a user or group) always has implicit `admin` access.
+//! Grants are additive — the highest permission from any matching grant wins.
+
 use std::path::Path;
 
 use tokio::fs;
@@ -481,6 +498,12 @@ fn validate_name(name: &str) -> Result<String, AppError> {
         return Err(AppError::Validation(format!(
             "Space name must be between {NAME_MIN_LEN} and {NAME_MAX_LEN} characters."
         )));
+    }
+    // Reject null bytes and ASCII control characters (0x00–0x1F, 0x7F).
+    if name.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return Err(AppError::Validation(
+            "Space name contains invalid control characters.".into(),
+        ));
     }
     Ok(name)
 }
@@ -1201,5 +1224,31 @@ mod tests {
             .await
             .unwrap();
         assert!(entries.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Name validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_name_rejects_control_characters() {
+        assert!(validate_name("My Space\0").is_err()); // null byte
+        assert!(validate_name("Space\tName").is_err()); // tab
+        assert!(validate_name("Space\nName").is_err()); // newline
+        assert!(validate_name("My\x7FSpace").is_err()); // DEL
+    }
+
+    #[test]
+    fn validate_name_accepts_normal_names() {
+        assert_eq!(validate_name("Engineering").unwrap(), "Engineering");
+        assert_eq!(validate_name("  Trimmed  ").unwrap(), "Trimmed");
+        assert_eq!(validate_name("Héllo Wörld").unwrap(), "Héllo Wörld");
+    }
+
+    #[test]
+    fn validate_name_rejects_empty_and_oversized() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("   ").is_err()); // whitespace-only after trim
+        assert!(validate_name(&"x".repeat(101)).is_err());
     }
 }

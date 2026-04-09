@@ -1,3 +1,10 @@
+//! API routes for space file operations (`/api/v1/spaces/<id>/files/…`).
+//!
+//! These mirror the personal library file routes but use space permission
+//! guards ([`SpaceReader`], [`SpaceWriter`], [`SpaceAdmin`]) instead of
+//! library ownership. Each guard extracts the space ID from the URI and
+//! verifies the caller's permission level before the handler runs.
+
 use rocket::data::{Data, ToByteUnit};
 use rocket::http::{ContentType, Header};
 use rocket::response::{self, Responder, Response};

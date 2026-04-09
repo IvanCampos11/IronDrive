@@ -1,3 +1,6 @@
+// IronDrive – group_detail.js
+// Group detail page UI: member management modals, add-member typeahead,
+// role dropdowns, confirmation dialogs.
 (function() {
   function setupModal(btnId, modalId, focusId) {
     var btn = document.getElementById(btnId);

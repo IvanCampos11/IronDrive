@@ -1,3 +1,9 @@
+//! Database models and queries for spaces and space access grants.
+//!
+//! Tables: `spaces` (metadata + encrypted key), `space_access` (permission grants).
+//! Permission resolution uses CTEs that check ownership (user/group),
+//! direct user grants, and group-membership grants, then picks the highest.
+
 use serde::Serialize;
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -112,6 +118,11 @@ impl Space {
     /// All spaces that a user can access — via ownership (user or group)
     /// or via explicit grants (direct user or group membership).
     /// Returns each space with grantee count and the user's effective permission.
+    ///
+    /// The query uses three CTEs:
+    /// 1. `user_groups` — group IDs the user belongs to
+    /// 2. `accessible_spaces` — union of all ownership/grant paths
+    /// 3. `best_perm` — collapse multiple grants into the highest permission
     pub async fn find_all_for_user(
         pool: &DbPool,
         user_id: &str,
