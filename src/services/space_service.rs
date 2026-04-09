@@ -378,6 +378,7 @@ pub async fn list_access(
 
 /// Resolve the effective permission a user has on a space.
 /// Returns `None` if the user has no access.
+#[cfg(test)]
 pub async fn resolve_permission(
     pool: &DbPool,
     user_id: &str,

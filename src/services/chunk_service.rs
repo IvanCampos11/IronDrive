@@ -371,6 +371,7 @@ pub async fn init_upload(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn receive_chunk(
     pool: &DbPool,
     config: &AppConfig,
@@ -460,6 +461,7 @@ pub async fn receive_chunk(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn complete_upload(
     pool: &DbPool,
     config: &AppConfig,

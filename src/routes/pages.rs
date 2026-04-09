@@ -2816,6 +2816,7 @@ pub async fn space_chunked_init_upload(
 }
 
 /// PUT /spaces/<space_id>/chunked/upload/<upload_id>/<chunk_index> — receive one chunk.
+#[allow(clippy::too_many_arguments)]
 #[put("/spaces/<space_id>/chunked/upload/<upload_id>/<chunk_index>", data = "<data>")]
 pub async fn space_chunked_receive_chunk(
     pool: &State<DbPool>,

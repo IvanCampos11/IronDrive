@@ -95,7 +95,7 @@ impl Space {
         .bind(&params.encrypted_data_key)
         .execute(pool)
         .await
-        .map_err(|e| AppError::Sqlx(e))?;
+        .map_err(AppError::Sqlx)?;
 
         Self::find_by_id(pool, &id).await?.ok_or_else(|| {
             AppError::Internal("Space was inserted but could not be read back".into())
