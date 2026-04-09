@@ -473,7 +473,8 @@ pub async fn chunked_init_upload(
         config.inner(),
         chunk_service::InitUploadParams {
             user_id: user.0.id.clone(),
-            library_id: lib.id,
+            target_id: lib.id,
+            target_type: "library".to_string(),
             target_path: body.path.clone(),
             total_chunks: body.total_chunks,
             total_bytes: body.total_bytes,
@@ -528,6 +529,7 @@ pub async fn chunked_receive_chunk(
         config.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         upload_id,
         chunk_index,
         &stream.into_inner(),
@@ -563,6 +565,7 @@ pub async fn chunked_complete_upload(
         unlock_state.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         &body.upload_id,
         write_verify,
     )
@@ -595,6 +598,7 @@ pub async fn chunked_cancel_upload(
         config.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         &upload_id,
     )
     .await?;
@@ -623,6 +627,7 @@ pub async fn chunked_init_download(
         unlock_state.inner(),
         &user.0.id,
         &lib.id,
+        "library",
         &path,
     )
     .await?;

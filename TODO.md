@@ -28,7 +28,7 @@
 | **M5.6** | Data Integrity | New on-disk format (file hash), key-free `verify_file_hash()`, two-tier integrity, corruption detection | ✅ Complete |
 | **M5.7** | Background Services | `BackgroundRunner`, integrity scanner, session cleanup, chunk cleanup | ✅ Complete |
 | **M6** | Groups | Group CRUD + membership + group management UI | ✅ Complete |
-| **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) + space browser & sharing UI | ⬜ Not started |
+| **M7** | Spaces | Space CRUD, access control, filesystem routes (reuses `fs_service`) + space browser & sharing UI | 🔨 In progress |
 | **M8** | User Encryption Tiers | Passphrase-derived keys, lock/unlock, recovery, audit log + setup wizard modes, lock/unlock UI, recovery alerts | ⬜ Not started |
 | **M9** | Quotas | Disk usage calculation + enforcement on upload + quota display, usage breakdown, warning banners | ⬜ Not started |
 | **M10** | Polish | CORS, request logging, error consistency, integration tests + UI/UX audit, responsive/a11y/dark mode pass | ⬜ Not started |
@@ -403,35 +403,35 @@ Server-rendered UI served directly by Rocket. Stack: `rocket_dyn_templates` (Ter
 
 ### M7 — Spaces
 
-- [ ] `src/models/space.rs` — Space, SpaceAccess structs + queries
-- [ ] `src/services/space_service.rs`:
-  - [ ] Create space (DB row + dir + data key, server mode)
-  - [ ] Delete space (DB row + dir)
-  - [ ] Permission resolution (owner → group → direct grant)
-  - [ ] Grant/revoke access
-  - [ ] Load all server-mode space keys into `UnlockState` at boot
-- [ ] `src/guards/space_guard.rs` — permission check guard
-- [ ] `src/routes/spaces.rs` — all space endpoints (CRUD + filesystem + access)
-- [ ] **Frontend**
-  - [ ] `templates/spaces/index.html.tera` — space list page (cards showing name, owner, member count, usage)
-  - [ ] `templates/spaces/browser.html.tera` — space file browser (reuse `file_list.html.tera` partial with space context)
-  - [ ] `templates/spaces/settings.html.tera` — space settings (rename, delete, manage access)
-  - [ ] `templates/partials/space_card.html.tera` — reusable space card component
-  - [ ] `templates/partials/access_list.html.tera` — member/group access list with role badges
-  - [ ] `GET /spaces` page route — list all spaces the user has access to
-  - [ ] `GET /spaces/:id` page route — space file browser (same UX as personal library browser)
-  - [ ] `GET /spaces/:id/settings` page route — space settings & access management
-  - [ ] Create space modal (name) → `POST /spaces` → redirect to new space browser
-  - [ ] Delete space → confirmation modal → `POST /spaces/:id/delete` → redirect with flash
-  - [ ] Share space: grant access to user or group → role selector (viewer/editor/admin) → HTMX swap access list
-  - [ ] Revoke access → confirmation modal → HTMX swap access list
-  - [ ] Space file operations: reuse upload, download, mkdir, rename, delete UI (same partials, scoped to space)
-  - [ ] Breadcrumb shows space name as root instead of "My Library"
-  - [ ] Update sidebar nav: add "Spaces" link with icon + list of user's spaces
-  - [ ] Empty state for no spaces
-  - [ ] Permission-aware UI: hide edit/delete/upload buttons if user is viewer-only
-  - [ ] Responsive layout for space pages
-- [ ] Integration tests
+- [x] `src/models/space.rs` — Space, SpaceAccess structs + queries
+- [x] `src/services/space_service.rs`:
+  - [x] Create space (DB row + dir + data key, server mode)
+  - [x] Delete space (DB row + dir)
+  - [x] Permission resolution (owner → group → direct grant)
+  - [x] Grant/revoke access
+  - [x] Load all server-mode space keys into `UnlockState` at boot
+- [x] `src/guards/space_guard.rs` — permission check guard
+- [x] `src/routes/spaces.rs` — all space endpoints (CRUD + filesystem + access)
+- [x] **Frontend**
+  - [x] `templates/spaces/index.html.tera` — space list page (cards showing name, owner, member count, usage)
+  - [x] `templates/spaces/browser.html.tera` — space file browser (reuse `file_list.html.tera` partial with space context)
+  - [x] `templates/spaces/settings.html.tera` — space settings (rename, delete, manage access)
+  - [x] `templates/partials/space_card.html.tera` — reusable space card component
+  - [x] `templates/partials/access_list.html.tera` — member/group access list with role badges
+  - [x] `GET /spaces` page route — list all spaces the user has access to
+  - [x] `GET /spaces/:id` page route — space file browser (same UX as personal library browser)
+  - [x] `GET /spaces/:id/settings` page route — space settings & access management
+  - [x] Create space modal (name) → `POST /spaces` → redirect to new space browser
+  - [x] Delete space → confirmation modal → `POST /spaces/:id/delete` → redirect with flash
+  - [x] Share space: grant access to user or group → role selector (viewer/editor/admin) → HTMX swap access list
+  - [x] Revoke access → confirmation modal → HTMX swap access list
+  - [x] Space file operations: reuse upload, download, mkdir, rename, delete UI (same partials, scoped to space)
+  - [x] Breadcrumb shows space name as root instead of "My Library"
+  - [x] Update sidebar nav: add "Spaces" link with icon + list of user's spaces
+  - [x] Empty state for no spaces
+  - [x] Permission-aware UI: hide edit/delete/upload buttons if user is viewer-only
+  - [x] Responsive layout for space pages
+- [x] Integration tests
 
 ### M8 — User Encryption Tiers
 

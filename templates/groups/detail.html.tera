@@ -153,9 +153,22 @@
     </div>
     <form method="post" action="/groups/{{ group.id }}/members/add" id="add-member-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="username" id="member-username-hidden" value="">
       <div class="mb-4">
-        <label for="member-username" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Username</label>
-        <input type="text" name="username" id="member-username" required placeholder="Enter username" class="input-field">
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">User</label>
+        <!-- Selected user pill (hidden until selection) -->
+        <div id="member-selected-pill" class="hidden flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+          <div class="flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 text-xs font-bold uppercase flex-shrink-0" id="member-pill-avatar"></div>
+          <span class="text-sm font-medium text-gray-900 dark:text-gray-100 flex-1" id="member-pill-name"></span>
+          <button type="button" id="member-clear-selection" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-0.5 rounded transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <!-- Search input (hidden after selection) -->
+        <div id="member-search-wrapper" class="relative">
+          <input type="text" id="member-search-input" autocomplete="off" placeholder="Search by username…" class="input-field">
+          <div id="member-search-dropdown" class="hidden absolute left-0 right-0 mt-1 rounded-lg border border-gray-200/70 dark:border-gray-700/70 bg-white dark:bg-gray-800 shadow-elevated z-50 max-h-48 overflow-y-auto"></div>
+        </div>
       </div>
       <div class="mb-5">
         <label for="member-role" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Role</label>
@@ -166,7 +179,7 @@
       </div>
       <div class="flex justify-end gap-3">
         <button type="button" data-modal-close class="btn-secondary">Cancel</button>
-        <button type="submit" class="btn-primary">Add Member</button>
+        <button type="submit" id="add-member-submit" class="btn-primary" disabled>Add Member</button>
       </div>
     </form>
   </div>
@@ -175,5 +188,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/group_detail.js?v=0.3.0" defer></script>
+<script src="/static/js/group_detail.js?v=0.5.0" defer></script>
 {% endblock %}

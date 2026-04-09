@@ -22,3 +22,8 @@ CREATE TABLE space_access (
     granted_at   TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (space_id, grantee_type, grantee_id)
 );
+
+-- Reverse lookup: find all spaces a specific user or group can access.
+-- Covers the permission-resolution CTEs in models/space.rs.
+CREATE INDEX idx_space_access_grantee
+    ON space_access(grantee_type, grantee_id);
