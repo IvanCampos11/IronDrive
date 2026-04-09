@@ -94,6 +94,13 @@ fn library_root(config: &AppConfig, library_id: &str) -> PathBuf {
         .join(library_id)
 }
 
+/// Resolve the on-disk root directory for a space.
+fn space_root(config: &AppConfig, space_id: &str) -> PathBuf {
+    PathBuf::from(&config.data_dir)
+        .join("spaces")
+        .join(space_id)
+}
+
 /// Retrieve the data key for a library from [`UnlockState`], returning
 /// [`AppError::Locked`] if it's not available.
 fn require_data_key(unlock_state: &UnlockState, library_id: &str) -> Result<DataKey, AppError> {
@@ -107,6 +114,18 @@ fn require_data_key(unlock_state: &UnlockState, library_id: &str) -> Result<Data
 /// to key-free mode.
 fn try_data_key(unlock_state: &UnlockState, library_id: &str) -> Option<DataKey> {
     unlock_state.get_library_key(library_id)
+}
+
+/// Retrieve the data key for a space from [`UnlockState`].
+fn require_space_key(unlock_state: &UnlockState, space_id: &str) -> Result<DataKey, AppError> {
+    unlock_state
+        .get_space_key(space_id)
+        .ok_or(AppError::Locked)
+}
+
+/// Like `require_space_key` but returns `None` instead of erroring.
+fn try_space_key(unlock_state: &UnlockState, space_id: &str) -> Option<DataKey> {
+    unlock_state.get_space_key(space_id)
 }
 
 /// Turn a canonical on-disk path back into a user-facing relative path
@@ -817,6 +836,503 @@ pub async fn calculate_usage(
                 disk_bytes = disk_bytes.saturating_add(entry_meta.len());
             }
             // Symlinks and other types are silently skipped.
+        }
+    }
+
+    Ok(UsageResult {
+        disk_bytes,
+        file_count,
+        dir_count,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Space-specific public API
+// ---------------------------------------------------------------------------
+// These mirror the library functions above but resolve the root directory
+// under `data_dir/spaces/<id>` and use space keys from `UnlockState`.
+// ---------------------------------------------------------------------------
+
+/// List the contents of a directory inside a space.
+pub async fn list_space_directory(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    space_id: &str,
+    user_path: &str,
+    check_integrity: bool,
+) -> Result<Vec<FsEntry>, AppError> {
+    let data_key = if check_integrity {
+        try_space_key(unlock_state, space_id)
+    } else {
+        None
+    };
+
+    let root = space_root(config, space_id);
+
+    let canonical_root = canonicalize_async(root.clone()).await?;
+    let target = if user_path.is_empty() {
+        canonical_root.clone()
+    } else {
+        safe_join_async(root, user_path.to_string()).await?
+    };
+
+    let meta = fs::metadata(&target).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Internal(format!("Cannot read directory metadata: {e}"))
+        }
+    })?;
+
+    if !meta.is_dir() {
+        return Err(AppError::Validation(
+            "The specified path is not a directory.".into(),
+        ));
+    }
+
+    let mut entries = Vec::new();
+    let mut read_dir = fs::read_dir(&target)
+        .await
+        .map_err(|e| AppError::Internal(format!("Cannot read directory: {e}")))?;
+
+    while let Some(dir_entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(|e| AppError::Internal(format!("Error reading directory entry: {e}")))?
+    {
+        let file_name = dir_entry.file_name();
+        let name = file_name.to_string_lossy().to_string();
+
+        if is_internal_file(&name) || name.starts_with('.') {
+            continue;
+        }
+
+        let entry_meta = dir_entry
+            .metadata()
+            .await
+            .map_err(|e| AppError::Internal(format!("Cannot read metadata for '{name}': {e}")))?;
+
+        let is_dir = entry_meta.is_dir();
+        let disk_size = if is_dir { None } else { Some(entry_meta.len()) };
+        let size = if is_dir {
+            None
+        } else {
+            Some(plaintext_size_from_disk(entry_meta.len()))
+        };
+        let mime_type = if is_dir {
+            None
+        } else {
+            mime_from_filename(&name)
+        };
+        let modified = entry_meta.modified().ok().map(format_system_time);
+        let entry_path = dir_entry.path();
+        let rel_path = relative_display_path(&canonical_root, &entry_path);
+
+        let integrity = if check_integrity && !is_dir {
+            let status = verify_file_integrity_async(data_key.as_ref(), &entry_path).await;
+            Some(format_integrity_status(&status))
+        } else {
+            None
+        };
+
+        entries.push(FsEntry {
+            name,
+            path: rel_path,
+            is_dir,
+            size,
+            disk_size,
+            mime_type,
+            modified,
+            integrity,
+        });
+    }
+
+    entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
+    Ok(entries)
+}
+
+/// Create a directory (with parents) inside a space.
+pub async fn create_space_directory(
+    config: &AppConfig,
+    space_id: &str,
+    user_path: &str,
+) -> Result<String, AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation(
+            "Directory path must not be empty.".into(),
+        ));
+    }
+
+    let root = space_root(config, space_id);
+    let target = safe_join_async(root, user_path.to_string()).await?;
+
+    match fs::create_dir_all(&target).await {
+        Ok(()) => {}
+        Err(e) => {
+            if let Ok(meta) = fs::metadata(&target).await {
+                if !meta.is_dir() {
+                    return Err(AppError::Conflict(
+                        "A file already exists at this path.".into(),
+                    ));
+                }
+            } else {
+                return Err(AppError::Internal(format!(
+                    "Failed to create directory: {e}"
+                )));
+            }
+        }
+    }
+
+    Ok(user_path.to_string())
+}
+
+/// Upload (encrypt and write) a file into a space.
+pub async fn upload_space_file(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    space_id: &str,
+    user_path: &str,
+    data: &[u8],
+    write_verify: bool,
+) -> Result<UploadResult, AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation("File path must not be empty.".into()));
+    }
+
+    let data_key = require_space_key(unlock_state, space_id)?;
+    let root = space_root(config, space_id);
+    let target = safe_join_async(root, user_path.to_string()).await?;
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
+    }
+
+    let checksum = crypto_service::sha256_bytes(data);
+    let checksum_hex = hex::encode(checksum);
+    let plaintext_size = data.len() as u64;
+
+    match encrypt_and_write_file_owned(&data_key, data.to_vec(), &target, write_verify).await {
+        Ok(()) => {}
+        Err(e) => {
+            if let Ok(meta) = fs::metadata(&target).await {
+                if meta.is_dir() {
+                    return Err(AppError::Conflict(
+                        "A directory already exists at this path.".into(),
+                    ));
+                }
+            }
+            return Err(e);
+        }
+    }
+
+    let disk_meta = fs::metadata(&target)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to stat written file: {e}")))?;
+
+    let filename = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    Ok(UploadResult {
+        path: user_path.to_string(),
+        size: plaintext_size,
+        disk_size: disk_meta.len(),
+        checksum_sha256: checksum_hex,
+        mime_type: mime_from_filename(&filename),
+    })
+}
+
+/// Download (read and decrypt) a file from a space.
+pub async fn download_space_file(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    space_id: &str,
+    user_path: &str,
+) -> Result<DownloadResult, AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation("File path must not be empty.".into()));
+    }
+
+    let data_key = require_space_key(unlock_state, space_id)?;
+    let root = space_root(config, space_id);
+    let target = safe_join_async(root, user_path.to_string()).await?;
+
+    let meta = fs::metadata(&target).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Internal(format!("Cannot read file metadata: {e}"))
+        }
+    })?;
+
+    if meta.is_dir() {
+        return Err(AppError::Validation(
+            "The specified path is a directory, not a file.".into(),
+        ));
+    }
+
+    let plaintext = read_and_decrypt_file(&data_key, &target).await?;
+
+    let checksum = crypto_service::sha256_bytes(&plaintext);
+    let checksum_hex = hex::encode(checksum);
+
+    let filename = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    Ok(DownloadResult {
+        data: plaintext,
+        checksum_sha256: checksum_hex,
+        mime_type: mime_from_filename(&filename),
+        filename,
+    })
+}
+
+/// Delete a file or directory (recursively) from a space.
+pub async fn delete_space_entry(
+    config: &AppConfig,
+    space_id: &str,
+    user_path: &str,
+) -> Result<(), AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation(
+            "Cannot delete the space root.".into(),
+        ));
+    }
+
+    let root = space_root(config, space_id);
+    let target = safe_join_async(root.clone(), user_path.to_string()).await?;
+
+    let meta = fs::metadata(&target).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Internal(format!("Cannot read entry metadata: {e}"))
+        }
+    })?;
+
+    let canonical_root = canonicalize_async(root).await?;
+    let canonical_target = canonicalize_async(target.clone()).await?;
+    if !canonical_target.starts_with(&canonical_root) || canonical_target == canonical_root {
+        return Err(AppError::Validation(
+            "Path escapes the space root.".into(),
+        ));
+    }
+
+    tracing::info!(
+        space_id = space_id,
+        path = user_path,
+        is_dir = meta.is_dir(),
+        "Deleting space entry"
+    );
+
+    if meta.is_dir() {
+        fs::remove_dir_all(&target)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to remove directory: {e}")))?;
+    } else {
+        fs::remove_file(&target)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to remove file: {e}")))?;
+    }
+
+    Ok(())
+}
+
+/// Rename or move an entry within a space.
+pub async fn rename_space_entry(
+    config: &AppConfig,
+    space_id: &str,
+    old_path: &str,
+    new_path: &str,
+) -> Result<RenameResult, AppError> {
+    if old_path.is_empty() {
+        return Err(AppError::Validation(
+            "Cannot rename the space root.".into(),
+        ));
+    }
+    if new_path.is_empty() {
+        return Err(AppError::Validation("New path must not be empty.".into()));
+    }
+
+    let root = space_root(config, space_id);
+    let source = safe_join_async(root.clone(), old_path.to_string()).await?;
+    let dest = safe_join_async(root, new_path.to_string()).await?;
+
+    if !fs::try_exists(&source).await.unwrap_or(false) {
+        return Err(AppError::NotFound);
+    }
+
+    if fs::try_exists(&dest).await.unwrap_or(false) {
+        return Err(AppError::Conflict(
+            "An entry already exists at the destination path.".into(),
+        ));
+    }
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).await.map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to create destination parent directories: {e}"
+            ))
+        })?;
+    }
+
+    fs::rename(&source, &dest)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to rename entry: {e}")))?;
+
+    Ok(RenameResult {
+        old_path: old_path.to_string(),
+        new_path: new_path.to_string(),
+    })
+}
+
+/// Get info about a single file or directory in a space.
+pub async fn get_space_entry_info(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    space_id: &str,
+    user_path: &str,
+    check_integrity: bool,
+) -> Result<FsEntry, AppError> {
+    let root = space_root(config, space_id);
+
+    let canonical_root = canonicalize_async(root.clone()).await?;
+    let target = if user_path.is_empty() {
+        canonical_root.clone()
+    } else {
+        safe_join_async(root, user_path.to_string()).await?
+    };
+
+    let meta = fs::metadata(&target).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Internal(format!("Cannot read entry metadata: {e}"))
+        }
+    })?;
+
+    let is_dir = meta.is_dir();
+    let disk_size = if is_dir { None } else { Some(meta.len()) };
+    let size = if is_dir {
+        None
+    } else {
+        Some(plaintext_size_from_disk(meta.len()))
+    };
+
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let mime_type = if is_dir {
+        None
+    } else {
+        mime_from_filename(&name)
+    };
+
+    let modified = meta.modified().ok().map(format_system_time);
+    let rel_path = relative_display_path(&canonical_root, &target);
+
+    let integrity = if check_integrity && !is_dir {
+        let dk = try_space_key(unlock_state, space_id);
+        let status = verify_file_integrity_async(dk.as_ref(), &target).await;
+        Some(format_integrity_status(&status))
+    } else {
+        None
+    };
+
+    Ok(FsEntry {
+        name,
+        path: rel_path,
+        is_dir,
+        size,
+        disk_size,
+        mime_type,
+        modified,
+        integrity,
+    })
+}
+
+/// Calculate disk usage for a space or subtree.
+pub async fn calculate_space_usage(
+    config: &AppConfig,
+    space_id: &str,
+    user_path: &str,
+) -> Result<UsageResult, AppError> {
+    let root = space_root(config, space_id);
+
+    let target = if user_path.is_empty() {
+        canonicalize_async(root.clone()).await?
+    } else {
+        safe_join_async(root, user_path.to_string()).await?
+    };
+
+    let meta = fs::metadata(&target).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Internal(format!("Cannot read entry metadata: {e}"))
+        }
+    })?;
+
+    if !meta.is_dir() {
+        return Ok(UsageResult {
+            disk_bytes: meta.len(),
+            file_count: 1,
+            dir_count: 0,
+        });
+    }
+
+    let mut stack = vec![target];
+    let mut disk_bytes: u64 = 0;
+    let mut file_count: u64 = 0;
+    let mut dir_count: u64 = 0;
+
+    while let Some(dir) = stack.pop() {
+        let mut read_dir = match fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(e) => {
+                tracing::warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "Skipping unreadable directory during usage calculation"
+                );
+                continue;
+            }
+        };
+
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            if is_internal_file(&name_str) || name_str.starts_with('.') {
+                continue;
+            }
+
+            let entry_meta = match entry.metadata().await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        error = %e,
+                        "Skipping unreadable entry during usage calculation"
+                    );
+                    continue;
+                }
+            };
+
+            if entry_meta.is_dir() {
+                dir_count = dir_count.saturating_add(1);
+                stack.push(entry.path());
+            } else if entry_meta.is_file() {
+                file_count = file_count.saturating_add(1);
+                disk_bytes = disk_bytes.saturating_add(entry_meta.len());
+            }
         }
     }
 

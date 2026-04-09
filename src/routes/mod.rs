@@ -4,6 +4,7 @@ pub mod health;
 pub mod integrity;
 pub mod library;
 pub mod pages;
+pub mod spaces;
 
 use rocket::fs::FileServer;
 use rocket::Route;
@@ -15,6 +16,7 @@ pub fn all_routes() -> Vec<Route> {
     routes.extend(library::routes());
     routes.extend(integrity::routes());
     routes.extend(groups::routes());
+    routes.extend(spaces::routes());
     routes.extend(pages::routes());
     routes
 }
