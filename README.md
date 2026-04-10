@@ -1,111 +1,121 @@
 # IronDrive
 
-Self-hosted encrypted cloud file storage. Nextcloud/Google Drive but written in Rust.
+Self-hosted encrypted file storage in Rust.
 
-> **Heads up:** This is a work in progress. I'm building this for myself and learning a ton along the way. Don't put anything important on it yet.
+IronDrive is a web app that gives you personal libraries, shared spaces, groups, and encrypted-at-rest file handling with integrity checks.
 
-## What works right now
+## What Works Today
 
-- User registration and login (session-based auth, Argon2 password hashing)
-- Personal libraries — each user gets their own encrypted storage space on setup
-- File operations — upload, download, browse, mkdir, rename, delete
-- Everything encrypted with AES-256-GCM before it touches disk
-- SHA-256 integrity checks on every file
-- Multi-user support (each user's files are fully isolated)
-- Server-rendered frontend with Tera templates + HTMX (in progress)
-
-## What's planned but not done yet
-
-- Chunked uploads for large files
-- Shared spaces (like shared folders with permissions)
+- Auth and sessions
+  - Register, login, logout
+  - Session token model with hashed token storage
+  - Setup gating for first login
+- Personal libraries
+  - One library per user
+  - Browse, upload, download, mkdir, rename/move, delete
+  - Chunked upload/download
+- Spaces
+  - Space CRUD
+  - Access control for users and groups (`read`, `write`, `admin`)
+  - File operation parity with personal libraries
+  - Chunked upload/download in page flows
 - Groups
-- User encryption tiers (passphrase-protected libraries where even the server admin can't read your files)
-- Background integrity scanning
-- Quotas
-- Eventually, full client-side E2EE — the architecture is designed to support it later without rewriting everything
+  - Group CRUD
+  - Membership and role management
+- Integrity and background services
+  - File hash checks and integrity events
+  - User notifications endpoint for integrity events
+  - Background workers for integrity scan, expired sessions, and chunk cleanup
+- Frontend
+  - Server-rendered pages with Tera + HTMX
+  - CSRF protection for state-changing actions
 
-See [TODO.md](TODO.md) for the full roadmap.
+## Not Done Yet
 
-## Tech stack
+- User-managed encryption tiers are not active in runtime setup/lock/unlock flows.
+- Quota enforcement is not complete on all write paths.
+- Space chunked API parity is incomplete (page flows exist; API route parity still pending).
 
-- **Rust** with **Rocket 0.5** for the web framework
-- **SQLite** via SQLx (no database server needed)
-- **AES-256-GCM** for file encryption, **SHA-256** for checksums
-- **Argon2** for password hashing
-- **Tera + HTMX + Tailwind** for the frontend (served by Rocket, no separate JS build)
+## Quick Start
 
-One binary, one SQLite file, one data directory. That's the whole deployment.
+### Requirements
 
-## Encryption
-
-Every file is encrypted at rest, always. The on-disk format is `nonce || ciphertext || checksum` — there's no plaintext on disk, ever.
-
-Right now only "server mode" is implemented: the server manages the keys automatically, and encryption is invisible to the user. This protects against disk theft, backup leaks, that kind of thing.
-
-Two more tiers are planned:
-
-| Mode | What it means |
-|---|---|
-| **Server** (current) | Automatic. Admin can read files. No passphrase needed. |
-| **Failsafe User** (planned) | User sets a passphrase. Admin can trigger recovery if the passphrase is lost, but the user gets notified. |
-| **Pure User** (planned) | User sets a passphrase. No recovery, period. Forget it and your data is gone. |
-
-The full encryption design is in [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Running it
-
-### You'll need
-
-- Rust stable (1.75+)
-- SQLite3
+- Rust (stable)
+- OpenSSL (for generating a secret key)
 
 ### Setup
 
-```sh
-git clone https://github.com/yourusername/irondrive.git
-cd irondrive
+```bash
+git clone https://github.com/IvanCampos11/IronDrive.git
+cd IronDrive
 cp .env.example .env
 
-# Generate a secret key. This protects all encryption keys.
-# Back this up somewhere safe — lose it and server-mode data is gone.
+# Required: root secret for server-managed encryption key material.
 echo "IRONDRIVE_SECRET_KEY=$(openssl rand -base64 44)" >> .env
 
+# Start the app
 cargo run
 ```
 
-First run creates the data directories, runs migrations, generates the master key, and starts listening on `http://localhost:8000`.
+Then open `http://localhost:8000`.
 
-### About `IRONDRIVE_SECRET_KEY`
+First boot will:
 
-This is the root of trust for all server-managed encryption. If you lose it, all server-mode files become unreadable. Generate it once, back it up, and don't lose it. I mean it.
+1. Create data directories.
+2. Initialize SQLite and run migrations.
+3. Bootstrap/load encryption key state.
+4. Start background workers.
 
-See `.env.example` for all config options.
+### Optional Dev Command
 
-## Project structure
+If you want Tailwind watch + server in one command:
 
+```bash
+make dev
 ```
+
+## Configuration
+
+See [.env.example](.env.example) for all settings.
+
+Most important variables:
+
+- `IRONDRIVE_SECRET_KEY` (required)
+- `IRONDRIVE_DATA_DIR`
+- `IRONDRIVE_DB_DIR`
+- `IRONDRIVE_MAX_UPLOAD`
+- `IRONDRIVE_DEFAULT_QUOTA`
+- `IRONDRIVE_CHUNK_SIZE`
+- `IRONDRIVE_INTEGRITY_SCAN_ENABLED`
+
+## Security Note
+
+`IRONDRIVE_SECRET_KEY` is the root secret for server-managed encryption state.
+
+- If you lose it, server-managed encrypted data becomes unreadable.
+- Back it up securely and separately from the server.
+
+## Project Layout
+
+```text
 src/
-  config.rs          — env/config loading
-  db.rs              — SQLite pool
-  errors.rs          — error types
-  main.rs            — Rocket launch
-  guards/            — request guards (auth, setup, admin)
-  models/            — database models (users, sessions, libraries)
-  routes/            — HTTP route handlers
-  services/          — business logic (auth, crypto, filesystem, etc.)
-  utils/             — path safety, MIME detection, crypto helpers
-migrations/          — SQLite migrations
-templates/           — Tera HTML templates
-static/              — CSS, JS, vendor files
-data/                — created at runtime (libraries, spaces, chunks)
+  routes/      HTTP routes (API + pages)
+  guards/      request guards (auth, setup, space permissions, csrf)
+  services/    business logic
+  models/      SQLx models/queries
+  utils/       shared helpers
+  tests/       integration tests
+migrations/    SQLite schema migrations
+templates/     Tera templates
+static/        CSS/JS/vendor assets
+data/          runtime storage (created automatically)
 ```
 
-## Docs
+## Documentation
 
-[ARCHITECTURE.md](ARCHITECTURE.md) has the full design — encryption model, key hierarchy, API surface, database schema, everything.
-
-[TODO.md](TODO.md) has the milestone tracker.
+- Architecture and current capability map: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Prioritized backlog: [TODO.md](TODO.md)
 
 ## License
 
-TBD
+AGPL-3.0

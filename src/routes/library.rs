@@ -17,9 +17,7 @@ use crate::utils::format_bytes;
 use crate::services::fs_service::{self, FsEntry};
 use crate::services::unlock_state::UnlockState;
 
-// ---------------------------------------------------------------------------
-// Request / Response types
-// ---------------------------------------------------------------------------
+// Request and response types.
 
 #[derive(Deserialize)]
 pub struct MkdirRequest {
@@ -195,9 +193,7 @@ impl<'r> Responder<'r, 'static> for FileDownload {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// Helpers.
 
 /// Look up the user's personal library, returning 404 if they haven't set one up.
 async fn require_library(pool: &DbPool, user_id: &str) -> Result<PersonalLibrary, AppError> {
@@ -220,9 +216,7 @@ fn parse_content_type(mime: Option<&str>) -> ContentType {
     .unwrap_or(ContentType::Binary)
 }
 
-// ---------------------------------------------------------------------------
-// Routes
-// ---------------------------------------------------------------------------
+// Routes.
 
 /// GET /api/v1/library/list?path=<path>&integrity=<bool>
 ///
@@ -675,9 +669,7 @@ pub async fn chunked_download_chunk(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Route collection
-// ---------------------------------------------------------------------------
+// Route collection.
 
 pub fn routes() -> Vec<Route> {
     routes![
