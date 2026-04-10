@@ -1,9 +1,4 @@
-//! API routes for space file operations (`/api/v1/spaces/<id>/files/…`).
-//!
-//! These mirror the personal library file routes but use space permission
-//! guards ([`SpaceReader`], [`SpaceWriter`], [`SpaceAdmin`]) instead of
-//! library ownership. Each guard extracts the space ID from the URI and
-//! verifies the caller's permission level before the handler runs.
+//! API routes for spaces, access control, and space file operations.
 
 use rocket::data::{Data, ToByteUnit};
 use rocket::http::{ContentType, Header};
@@ -25,9 +20,7 @@ use crate::services::space_service;
 use crate::services::unlock_state::UnlockState;
 use crate::utils::format_bytes;
 
-// ---------------------------------------------------------------------------
-// Request / Response DTOs
-// ---------------------------------------------------------------------------
+// Request and response DTOs.
 
 #[derive(Deserialize)]
 pub struct CreateSpaceRequest {
@@ -200,9 +193,7 @@ impl<'r> Responder<'r, 'static> for FileDownload {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// Helpers.
 
 fn parse_content_type(mime: Option<&str>) -> ContentType {
     mime.and_then(|m| {
@@ -231,9 +222,7 @@ fn space_response(
     }
 }
 
-// ===========================================================================
-// CRUD routes
-// ===========================================================================
+// CRUD routes.
 
 /// POST /api/v1/spaces — Create a new space.
 #[post("/api/v1/spaces", format = "json", data = "<body>")]
@@ -349,9 +338,7 @@ pub async fn delete_space(
     }))
 }
 
-// ===========================================================================
-// Access management routes
-// ===========================================================================
+// Access management routes.
 
 /// GET /api/v1/spaces/<_id>/access — List all access entries.
 #[get("/api/v1/spaces/<_id>/access")]
@@ -486,9 +473,7 @@ pub async fn revoke_access(
     }))
 }
 
-// ===========================================================================
-// Filesystem routes
-// ===========================================================================
+// Filesystem routes.
 
 /// GET /api/v1/spaces/<_id>/files/list?path=<path>&integrity=<bool>
 #[get("/api/v1/spaces/<_id>/files/list?<path>&<integrity>")]
@@ -698,9 +683,7 @@ pub async fn file_usage(
     }))
 }
 
-// ---------------------------------------------------------------------------
-// Route collection
-// ---------------------------------------------------------------------------
+// Route collection.
 
 pub fn routes() -> Vec<Route> {
     routes![
