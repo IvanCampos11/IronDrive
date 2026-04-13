@@ -2,6 +2,7 @@ services:
   irondrive:
     image: ghcr.io/ivancampos11/irondrive:${IRONDRIVE_IMAGE_TAG:-dev}
     container_name: irondrive
+    user: "${PUID:-1000}:${PGID:-1000}"
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -13,8 +14,8 @@ services:
       IRONDRIVE_DB_DIR: /var/lib/irondrive/db
       IRONDRIVE_SECRET_KEY: ${IRONDRIVE_SECRET_KEY:?Set IRONDRIVE_SECRET_KEY in your .env file}
     volumes:
-      - irondrive_data:/var/lib/irondrive/data
-      - irondrive_db:/var/lib/irondrive/db
+      - ${IRONDRIVE_DATA_HOST_PATH:-irondrive_data}:/var/lib/irondrive/data
+      - ${IRONDRIVE_DB_HOST_PATH:-irondrive_db}:/var/lib/irondrive/db
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
