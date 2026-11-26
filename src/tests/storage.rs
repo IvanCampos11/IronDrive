@@ -566,3 +566,98 @@ async fn zip_notes_damaged_files_and_records_an_alert() {
         .unwrap();
     assert!(bell.contains("bad.txt"), "{bell}");
 }
+
+// ---------------------------------------------------------------------------
+// Space chunked API
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn space_api_supports_chunked_upload_and_download() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let csrf = signed_in_with_library(&client).await;
+    let r = client
+        .post("/spaces/create")
+        .header(ContentType::Form)
+        .body(format!("name=Team&csrf_token={csrf}"))
+        .dispatch()
+        .await;
+    let space_id = r
+        .headers()
+        .get_one("Location")
+        .unwrap()
+        .trim_start_matches("/spaces/")
+        .to_string();
+    let auth = api_token(&client).await;
+    let api = format!("/api/v1/spaces/{space_id}/files");
+
+    // Two chunks: the test server uses 8 MiB chunks.
+    let chunk = 8 * 1024 * 1024;
+    let data: Vec<u8> = (0..chunk + 1000).map(|i| (i % 251) as u8).collect();
+    let r = client
+        .post(format!("{api}/chunked/init"))
+        .header(auth.clone())
+        .header(ContentType::JSON)
+        .body(
+            json!({ "path": "big.bin", "total_chunks": 2, "total_bytes": data.len() }).to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::Ok);
+    let init: Value = serde_json::from_str(&r.into_string().await.unwrap()).unwrap();
+    let upload_id = init["upload_id"].as_str().unwrap().to_string();
+
+    for (i, part) in data.chunks(chunk).enumerate() {
+        let r = client
+            .put(format!("{api}/chunked/upload/{upload_id}/{i}"))
+            .header(auth.clone())
+            .body(part)
+            .dispatch()
+            .await;
+        assert_eq!(r.status(), Status::Ok, "chunk {i}");
+    }
+    let r = client
+        .post(format!("{api}/chunked/complete"))
+        .header(auth.clone())
+        .header(ContentType::JSON)
+        .body(json!({ "upload_id": upload_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::Ok);
+
+    // Streamed range read across the chunk boundary.
+    let r = client
+        .get(format!("{api}/download?path=big.bin"))
+        .header(auth.clone())
+        .header(Header::new(
+            "Range",
+            format!("bytes={}-{}", chunk - 5, chunk + 4),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::PartialContent);
+    assert_eq!(r.into_bytes().await.unwrap(), &data[chunk - 5..chunk + 5]);
+
+    // Chunked download returns the same bytes.
+    let r = client
+        .get(format!("{api}/chunked/download/init?path=big.bin"))
+        .header(auth.clone())
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::Ok);
+    let init: Value = serde_json::from_str(&r.into_string().await.unwrap()).unwrap();
+    let token = init["token"].as_str().unwrap();
+    let mut got = Vec::new();
+    for i in 0..init["total_chunks"].as_u64().unwrap() {
+        let r = client
+            .get(format!(
+                "{api}/chunked/download/chunk?token={token}&index={i}"
+            ))
+            .header(auth.clone())
+            .dispatch()
+            .await;
+        assert_eq!(r.status(), Status::Ok);
+        got.extend(r.into_bytes().await.unwrap());
+    }
+    assert_eq!(got, data);
+}
