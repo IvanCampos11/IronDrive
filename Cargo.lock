@@ -370,7 +370,7 @@ dependencies = [
  "base64",
  "hkdf",
  "percent-encoding",
- "rand 0.8.5",
+ "rand 0.8.8",
  "sha2",
  "subtle",
  "time",
@@ -1303,7 +1303,7 @@ dependencies = [
  "hmac",
  "mime_guess",
  "proptest",
- "rand 0.8.5",
+ "rand 0.10.4",
  "rocket",
  "rocket_dyn_templates",
  "serde",
@@ -1590,7 +1590,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "smallvec",
  "zeroize",
 ]
@@ -1815,7 +1815,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
  "phf_shared",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -1987,9 +1987,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha",
@@ -2002,6 +2002,7 @@ version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f6fa277c67e6ea590466f04c3fe82cb509f0864fe470643e5570de9514a9b11"
 dependencies = [
+ "chacha20",
  "getrandom 0.4.2",
  "rand_core 0.10.1",
 ]
@@ -2128,7 +2129,7 @@ dependencies = [
  "num_cpus",
  "parking_lot",
  "pin-project-lite",
- "rand 0.8.5",
+ "rand 0.8.8",
  "ref-cast",
  "rocket_codegen",
  "rocket_http",
@@ -2582,7 +2583,7 @@ dependencies = [
  "memchr",
  "once_cell",
  "percent-encoding",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rsa",
  "serde",
  "sha1",
@@ -2622,7 +2623,7 @@ dependencies = [
  "md-5",
  "memchr",
  "once_cell",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2",
@@ -2762,7 +2763,7 @@ dependencies = [
  "percent-encoding",
  "pest",
  "pest_derive",
- "rand 0.8.5",
+ "rand 0.8.8",
  "regex",
  "serde",
  "serde_json",
