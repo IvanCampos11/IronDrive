@@ -23,7 +23,9 @@ pub struct IntegrityEvent {
     pub created_at: String,
 }
 
-/// Insert an integrity event.
+/// Record an integrity event, or return the open one already recorded for the
+/// same file and problem. Rescans must not pile up duplicate alerts; the
+/// partial unique index from migration 010 makes this safe under concurrency.
 pub async fn record_event(
     pool: &DbPool,
     target_type: &str,
@@ -33,40 +35,32 @@ pub async fn record_event(
     details: Option<&str>,
     detected_by: &str,
 ) -> Result<IntegrityEvent, AppError> {
-    // Rescans must not pile up duplicates: reuse an open event for the same
-    // file and problem.
-    if let Some(existing) = sqlx::query_as::<_, IntegrityEvent>(
-        "SELECT id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
-         FROM integrity_events
-         WHERE target_type = ? AND target_id = ? AND file_path = ? AND event_type = ? AND acknowledged = 0
-         LIMIT 1",
-    )
-    .bind(target_type)
-    .bind(target_id)
-    .bind(file_path)
-    .bind(event_type)
-    .fetch_optional(pool)
-    .await?
-    {
-        return Ok(existing);
-    }
-
-    let id = Uuid::new_v4().to_string();
-
-    let event = sqlx::query_as::<_, IntegrityEvent>(
+    sqlx::query(
         r#"
         INSERT INTO integrity_events (id, target_type, target_id, file_path, event_type, details, detected_by)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        RETURNING id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
+        ON CONFLICT (target_type, target_id, file_path, event_type) WHERE acknowledged = 0 DO NOTHING
         "#,
     )
-    .bind(&id)
+    .bind(Uuid::new_v4().to_string())
     .bind(target_type)
     .bind(target_id)
     .bind(file_path)
     .bind(event_type)
     .bind(details)
     .bind(detected_by)
+    .execute(pool)
+    .await?;
+
+    let event = sqlx::query_as::<_, IntegrityEvent>(
+        "SELECT id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
+         FROM integrity_events
+         WHERE target_type = ? AND target_id = ? AND file_path = ? AND event_type = ? AND acknowledged = 0",
+    )
+    .bind(target_type)
+    .bind(target_id)
+    .bind(file_path)
+    .bind(event_type)
     .fetch_one(pool)
     .await?;
 

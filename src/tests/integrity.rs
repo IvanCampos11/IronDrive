@@ -799,3 +799,108 @@ async fn acknowledge_nonexistent_event_returns_404() {
 
     assert_eq!(resp.status(), Status::NotFound);
 }
+
+// ---------------------------------------------------------------------------
+// Migration 010: duplicate alerts from older versions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn migration_010_dedupes_open_events_and_blocks_new_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", tmp.path().display());
+    let pool = db::init_pool(&db_url).await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+
+    // Recreate a pre-010 database: no unique index, repeated scan results.
+    sqlx::query("DROP INDEX idx_integrity_open_unique")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let insert = |id: &'static str, path: &'static str, event: &'static str, acked: i32| {
+        sqlx::query(
+            "INSERT INTO integrity_events (id, target_type, target_id, file_path, event_type, detected_by, acknowledged)
+             VALUES (?, 'library', 'lib1', ?, ?, 'background_scan', ?)",
+        )
+        .bind(id)
+        .bind(path)
+        .bind(event)
+        .bind(acked)
+    };
+    for (id, path, event, acked) in [
+        ("z-first", "a.txt", "checksum_mismatch", 0),
+        ("a-second", "a.txt", "checksum_mismatch", 0),
+        ("m-third", "a.txt", "checksum_mismatch", 0),
+        ("dismissed", "a.txt", "checksum_mismatch", 1),
+        ("other-problem", "a.txt", "decrypt_failed", 0),
+        ("other-file", "b.txt", "checksum_mismatch", 0),
+    ] {
+        insert(id, path, event, acked).execute(&pool).await.unwrap();
+    }
+
+    let sql = std::fs::read_to_string("migrations/010_dedupe_integrity_events.sql").unwrap();
+    sqlx::raw_sql(&sql).execute(&pool).await.unwrap();
+
+    let mut open: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM integrity_events WHERE acknowledged = 0")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    open.sort();
+    let open: Vec<&str> = open.iter().map(|(id,)| id.as_str()).collect();
+    // The first-recorded copy survives (insertion order, not id order).
+    assert_eq!(open, ["other-file", "other-problem", "z-first"]);
+
+    // The index now rejects a second open copy outright...
+    assert!(insert("dup", "a.txt", "checksum_mismatch", 0)
+        .execute(&pool)
+        .await
+        .is_err());
+
+    // ...and record_event reuses the open event, even when calls race.
+    let results = record_concurrently(&pool).await;
+    assert!(results.iter().all(|e| e.id == "other-file"));
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM integrity_events WHERE file_path = 'b.txt' AND acknowledged = 0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+
+    // Once dismissed, a new detection opens a fresh alert.
+    services::integrity_service::acknowledge_event(&pool, "other-file")
+        .await
+        .unwrap();
+    let fresh = record(&pool).await;
+    assert_ne!(fresh.id, "other-file");
+}
+
+async fn record(pool: &db::DbPool) -> services::integrity_service::IntegrityEvent {
+    services::integrity_service::record_event(
+        pool,
+        "library",
+        "lib1",
+        "b.txt",
+        "checksum_mismatch",
+        None,
+        "background_scan",
+    )
+    .await
+    .unwrap()
+}
+
+async fn record_concurrently(
+    pool: &db::DbPool,
+) -> Vec<services::integrity_service::IntegrityEvent> {
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let pool = pool.clone();
+            tokio::spawn(async move { record(&pool).await })
+        })
+        .collect();
+    let mut out = Vec::new();
+    for t in tasks {
+        out.push(t.await.unwrap());
+    }
+    out
+}
