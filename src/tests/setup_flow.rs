@@ -197,7 +197,7 @@ async fn happy_path_register_login_setup() {
     let (status, body) = setup_library(&client, &token).await;
     assert_eq!(status, Status::Ok);
     assert_eq!(body["encryption_mode"], "server");
-    assert!(body["library_id"].as_str().unwrap().len() > 0);
+    assert!(!body["library_id"].as_str().unwrap().is_empty());
     assert_eq!(body["message"], "Personal library created successfully.");
 
     // 4. Login again — setup_complete should now be true

@@ -460,7 +460,7 @@ async fn space_upload_download_delete() {
         ))
         .header(auth_header(&token))
         .header(ContentType::Binary)
-        .body(file_data.to_vec())
+        .body(file_data)
         .dispatch()
         .await;
 
@@ -528,7 +528,7 @@ async fn reader_cannot_upload_to_space() {
         ))
         .header(auth_header(&bob_token))
         .header(ContentType::Binary)
-        .body(b"data".to_vec())
+        .body(b"data")
         .dispatch()
         .await;
 
@@ -661,7 +661,7 @@ async fn space_rename_via_api() {
         ))
         .header(auth_header(&token))
         .header(ContentType::Binary)
-        .body(b"data".to_vec())
+        .body(b"data")
         .dispatch()
         .await;
 
