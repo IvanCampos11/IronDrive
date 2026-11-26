@@ -1,3 +1,8 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "Form handlers return Flash<Redirect> on both arms; Rocket sends either straight back as the response, so boxing the error buys nothing."
+)]
+
 use rocket::form::Form;
 use rocket::http::{Cookie, CookieJar, SameSite, Status};
 use rocket::request::FlashMessage;
