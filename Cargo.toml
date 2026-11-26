@@ -44,3 +44,4 @@ async_zip = { version = "0.0.19", default-features = false, features = ["tokio"]
 
 [dev-dependencies]
 tempfile = "3"
+proptest = { version = "1", default-features = false, features = ["std"] }

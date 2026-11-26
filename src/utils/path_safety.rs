@@ -811,4 +811,116 @@ mod tests {
     fn component_accept_dashes_underscores() {
         assert!(validate_component("my-file_v2").is_ok());
     }
+
+    // ── Property tests ────────────────────────────────────────────────────
+
+    mod properties {
+        use super::super::*;
+        use proptest::prelude::*;
+        use std::path::{Component, Path, PathBuf};
+
+        /// Pieces that have caused traversal bugs elsewhere, plus ordinary names.
+        fn piece() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("a".to_string()),
+                Just("docs".to_string()),
+                Just("..".to_string()),
+                Just(".".to_string()),
+                Just(String::new()),
+                Just(".hidden".to_string()),
+                Just(".trash".to_string()),
+                Just("link-out".to_string()),
+                Just("a b".to_string()),
+                Just(" lead".to_string()),
+                Just("trail ".to_string()),
+                Just("ünï".to_string()),
+                Just("x\0y".to_string()),
+                Just("c:d".to_string()),
+                Just("%2e%2e".to_string()),
+                Just("..a".to_string()),
+                "[a-z]{1,8}",
+            ]
+        }
+
+        fn user_path() -> impl Strategy<Value = String> {
+            (
+                prop::collection::vec(piece(), 1..6),
+                prop::collection::vec(prop_oneof![Just("/"), Just("\\")], 6),
+                any::<bool>(),
+            )
+                .prop_map(|(parts, seps, leading)| {
+                    let mut out = String::new();
+                    if leading {
+                        out.push('/');
+                    }
+                    for (i, p) in parts.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(seps[i - 1]);
+                        }
+                        out.push_str(p);
+                    }
+                    out
+                })
+        }
+
+        /// A root containing a folder, a file, and a symlink pointing outside it.
+        fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("root");
+            let outside = tmp.path().join("outside");
+            std::fs::create_dir_all(root.join("docs")).unwrap();
+            std::fs::create_dir_all(root.join("a")).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(root.join("docs/file.txt"), b"x").unwrap();
+            std::fs::write(outside.join("secret"), b"s").unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&outside, root.join("link-out")).unwrap();
+            let root = std::fs::canonicalize(&root).unwrap();
+            let outside = std::fs::canonicalize(&outside).unwrap();
+            (tmp, root, outside)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
+
+            /// Whatever the input, an accepted path stays inside the root:
+            /// lexically (no `..`, no root/prefix components) and after
+            /// resolving symlinks on the existing part of the path.
+            #[test]
+            fn accepted_paths_never_escape_the_root(input in user_path()) {
+                let (_tmp, root, outside) = fixture();
+                if let Ok(joined) = safe_join(&root, &input) {
+                    prop_assert!(joined.starts_with(&root), "{input:?} -> {joined:?}");
+                    let rel = joined.strip_prefix(&root).unwrap();
+                    prop_assert!(rel.components().all(|c| matches!(c, Component::Normal(_))),
+                        "{input:?} -> {joined:?}");
+
+                    // Resolve the longest existing prefix; it must not leave the root.
+                    let mut existing: &Path = &joined;
+                    while !existing.exists() {
+                        existing = existing.parent().unwrap();
+                    }
+                    let resolved = std::fs::canonicalize(existing).unwrap();
+                    prop_assert!(resolved.starts_with(&root), "{input:?} resolves to {resolved:?}");
+                    prop_assert!(!resolved.starts_with(&outside));
+                }
+            }
+
+            /// Anything with a traversal, hidden, empty or absolute component is refused.
+            #[test]
+            fn suspicious_components_are_rejected(input in user_path()) {
+                let (_tmp, root, _outside) = fixture();
+                let suspicious = input.starts_with('/')
+                    || input.starts_with('\\')
+                    || input.contains(':')
+                    || input.split(['/', '\\']).any(|c| {
+                        c.is_empty() || c == "." || c == ".." || c.starts_with('.')
+                            || c.contains('\0') || c != c.trim()
+                    });
+                if suspicious {
+                    prop_assert!(safe_join(&root, &input).is_err(), "accepted {input:?}");
+                }
+            }
+        }
+    }
 }

@@ -348,3 +348,279 @@ pub async fn purge_expired(
     }
     Ok(removed)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Model-based test: random sequences of writes, deletes, restores and
+    //! permanent deletes, checked after every step against a plain in-memory
+    //! model of what should be on disk and in the trash.
+
+    use super::*;
+    use crate::services::crypto_service::{generate_data_key, read_and_decrypt_file};
+    use crate::services::unlock_state::UnlockState;
+    use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const LIB: &str = "lib-under-test";
+    /// Files the test writes; "d" doubles as a folder that can be trashed.
+    const PATHS: [&str; 5] = ["a.txt", "b.txt", "d/a.txt", "d/c.txt", "d"];
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Write(usize, u8),
+        Trash(usize),
+        Restore(usize),
+        Forget(usize),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            3 => (0..4usize, any::<u8>()).prop_map(|(i, b)| Op::Write(i, b)),
+            3 => (0..5usize).prop_map(Op::Trash),
+            2 => (0..4usize).prop_map(Op::Restore),
+            1 => (0..4usize).prop_map(Op::Forget),
+        ]
+    }
+
+    struct Env {
+        _tmp: tempfile::TempDir,
+        config: AppConfig,
+        unlock: UnlockState,
+        pool: DbPool,
+        root: PathBuf,
+    }
+
+    async fn env() -> Env {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = AppConfig {
+            secret_key: "dGVzdC1rZXk=".into(),
+            data_dir: tmp.path().to_string_lossy().to_string(),
+            db_dir: tmp.path().to_string_lossy().to_string(),
+            default_quota_bytes: 1 << 30,
+            max_upload_bytes: 1 << 30,
+            session_expiry_hours: 1,
+            chunk_size_bytes: 1 << 20,
+            chunk_upload_expiry_hours: 1,
+            max_parallel_chunks: 1,
+            integrity_scan_enabled: false,
+            integrity_scan_interval_hours: 1,
+            registration_enabled: true,
+            secure_cookies: false,
+            trash_retention_days: 30,
+        };
+        let root = tmp.path().join("libraries").join(LIB);
+        fs::create_dir_all(&root).await.unwrap();
+        let root = fs::canonicalize(&root).await.unwrap();
+        let unlock = UnlockState::new();
+        unlock.insert_library_key(LIB, &generate_data_key());
+        let url = format!("sqlite:{}/t.db?mode=rwc", tmp.path().display());
+        let pool = crate::db::init_pool(&url).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        Env {
+            _tmp: tmp,
+            config,
+            unlock,
+            pool,
+            root,
+        }
+    }
+
+    /// A trashed item in the model: (trash id, original path, files under it
+    /// keyed relative to it, folders likewise).
+    type TrashedItem = (String, String, BTreeMap<String, Vec<u8>>, BTreeSet<String>);
+
+    #[derive(Default, Debug)]
+    struct Model {
+        files: BTreeMap<String, Vec<u8>>,
+        dirs: BTreeSet<String>,
+        trash: Vec<TrashedItem>,
+    }
+
+    impl Model {
+        fn exists(&self, path: &str) -> bool {
+            self.files.contains_key(path) || self.dirs.contains(path)
+        }
+
+        /// Take everything at `path` (a file, or a folder and its contents)
+        /// out of the tree, keyed relative to `path`.
+        fn take(&mut self, path: &str) -> (BTreeMap<String, Vec<u8>>, BTreeSet<String>) {
+            let prefix = format!("{path}/");
+            let mut files = BTreeMap::new();
+            for k in self.files.keys().cloned().collect::<Vec<_>>() {
+                if k == path {
+                    files.insert(String::new(), self.files.remove(&k).unwrap());
+                } else if let Some(rest) = k.strip_prefix(&prefix) {
+                    files.insert(rest.to_string(), self.files.remove(&k).unwrap());
+                }
+            }
+            let mut dirs = BTreeSet::new();
+            for d in self.dirs.iter().cloned().collect::<Vec<_>>() {
+                if d == path {
+                    self.dirs.remove(&d);
+                    dirs.insert(String::new());
+                } else if let Some(rest) = d.strip_prefix(&prefix) {
+                    self.dirs.remove(&d);
+                    dirs.insert(rest.to_string());
+                }
+            }
+            (files, dirs)
+        }
+
+        fn put(&mut self, at: &str, files: BTreeMap<String, Vec<u8>>, dirs: BTreeSet<String>) {
+            let join = |rel: &str| {
+                if rel.is_empty() {
+                    at.to_string()
+                } else {
+                    format!("{at}/{rel}")
+                }
+            };
+            for (rel, data) in files {
+                self.files.insert(join(&rel), data);
+            }
+            for rel in dirs {
+                self.dirs.insert(join(&rel));
+            }
+            // Parents of whatever was put back exist again.
+            let mut p = at;
+            while let Some((parent, _)) = p.rsplit_once('/') {
+                self.dirs.insert(parent.to_string());
+                p = parent;
+            }
+        }
+    }
+
+    /// What's actually on disk (hidden entries skipped), decrypted.
+    async fn snapshot(env: &Env) -> (BTreeMap<String, Vec<u8>>, BTreeSet<String>) {
+        let key = env.unlock.get_library_key(LIB).unwrap();
+        let mut files = BTreeMap::new();
+        let mut dirs = BTreeSet::new();
+        let mut stack = vec![(env.root.clone(), String::new())];
+        while let Some((dir, rel)) = stack.pop() {
+            let mut rd = fs::read_dir(&dir).await.unwrap();
+            while let Some(e) = rd.next_entry().await.unwrap() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let child = if rel.is_empty() {
+                    name
+                } else {
+                    format!("{rel}/{name}")
+                };
+                if e.file_type().await.unwrap().is_dir() {
+                    dirs.insert(child.clone());
+                    stack.push((e.path(), child));
+                } else {
+                    let data = read_and_decrypt_file(&key, &e.path()).await.unwrap();
+                    files.insert(child, data);
+                }
+            }
+        }
+        (files, dirs)
+    }
+
+    async fn run(ops: Vec<Op>) -> Result<(), TestCaseError> {
+        let env = env().await;
+        let mut model = Model::default();
+        let kind = TargetKind::Library;
+
+        for op in ops {
+            match op {
+                Op::Write(i, b) => {
+                    let path = PATHS[i];
+                    // Can't write a file where a folder of that name exists.
+                    if model.dirs.contains(path) {
+                        continue;
+                    }
+                    let data = vec![b; b as usize + 1];
+                    fs_service::upload_file_owned(
+                        &env.config,
+                        &env.unlock,
+                        LIB,
+                        path,
+                        data.clone(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                    model.put(
+                        path,
+                        BTreeMap::from([(String::new(), data)]),
+                        BTreeSet::new(),
+                    );
+                }
+                Op::Trash(i) => {
+                    let path = PATHS[i];
+                    let result = move_to_trash(&env.pool, &env.config, kind, LIB, path, None).await;
+                    if model.exists(path) {
+                        let item = result.unwrap();
+                        let (files, dirs) = model.take(path);
+                        model.trash.push((item.id, path.to_string(), files, dirs));
+                    } else {
+                        prop_assert!(matches!(result, Err(AppError::NotFound)), "{result:?}");
+                    }
+                }
+                Op::Restore(k) => {
+                    if k >= model.trash.len() {
+                        continue;
+                    }
+                    let (id, original, files, dirs) = model.trash.remove(k);
+                    let restored = restore(&env.pool, &env.config, kind, LIB, &id)
+                        .await
+                        .unwrap();
+
+                    // Same folder; same name unless that name was taken.
+                    let parent = |p: &str| {
+                        p.rsplit_once('/')
+                            .map(|(a, _)| a.to_string())
+                            .unwrap_or_default()
+                    };
+                    prop_assert_eq!(parent(&restored), parent(&original));
+                    if restored != original {
+                        prop_assert!(
+                            model.exists(&original),
+                            "renamed although {original} was free"
+                        );
+                        prop_assert!(restored.contains("(restored"), "{restored}");
+                    }
+                    prop_assert!(!model.exists(&restored), "restored over {restored}");
+                    model.put(&restored, files, dirs);
+                }
+                Op::Forget(k) => {
+                    if k >= model.trash.len() {
+                        continue;
+                    }
+                    let (id, ..) = model.trash.remove(k);
+                    delete_forever(&env.pool, &env.config, kind, LIB, &id)
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let (files, dirs) = snapshot(&env).await;
+            prop_assert_eq!(&files, &model.files);
+            prop_assert_eq!(&dirs, &model.dirs);
+            let mut listed: Vec<String> = list(&env.pool, kind, LIB)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+            let mut expected: Vec<String> = model.trash.iter().map(|t| t.0.clone()).collect();
+            listed.sort();
+            expected.sort();
+            prop_assert_eq!(listed, expected);
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+        #[test]
+        fn trash_matches_model(ops in prop::collection::vec(op(), 1..30)) {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(run(ops))?;
+        }
+    }
+}
