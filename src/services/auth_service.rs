@@ -31,6 +31,12 @@ pub async fn register(
     email: &str,
     password: &str,
 ) -> Result<RegisterResult, AppError> {
+    // The first account can always be created (it becomes the admin);
+    // after that, self-service sign-up follows IRONDRIVE_REGISTRATION_ENABLED.
+    if !config.registration_enabled && !is_first_user(pool).await? {
+        return Err(AppError::RegistrationClosed);
+    }
+
     let username = normalize_username(username)?;
     let email = normalize_email(email)?;
     validate_password(password)?;
@@ -41,23 +47,38 @@ pub async fn register(
         .map_err(|e| AppError::Internal(format!("Password hashing task failed: {e}")))?
         .map_err(AppError::Internal)?;
 
-    let role = if is_first_user(pool).await? {
-        "admin"
-    } else {
-        "user"
-    };
-
     let user = User::create(
         pool,
         CreateUserParams {
             username: username.clone(),
             email: email.clone(),
             password_hash,
-            role: role.to_string(),
+            role: "user".to_string(),
             quota_bytes: config.default_quota_bytes as i64,
         },
     )
     .await?;
+
+    // Promote to admin only if this is the earliest row in `users`. Doing it
+    // in one statement after the insert (instead of "count, then insert")
+    // means two concurrent first registrations can't both become admin.
+    let promoted = sqlx::query(
+        "UPDATE users SET role = 'admin'
+         WHERE id = ? AND rowid = (SELECT MIN(rowid) FROM users)",
+    )
+    .bind(&user.id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0;
+
+    let user = if promoted {
+        User::find_by_id(pool, &user.id)
+            .await?
+            .ok_or_else(|| AppError::Internal("Registered user disappeared".into()))?
+    } else {
+        user
+    };
 
     tracing::info!(
         user_id = %user.id,
@@ -291,6 +312,8 @@ mod tests {
             max_parallel_chunks: 4,
             integrity_scan_enabled: false,
             integrity_scan_interval_hours: 168,
+            registration_enabled: true,
+            secure_cookies: false,
         }
     }
 
@@ -320,6 +343,38 @@ mod tests {
     }
 
     // ── Registration Tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn closed_registration_still_allows_first_admin_only() {
+        let pool = test_pool().await;
+        let config = AppConfig {
+            registration_enabled: false,
+            ..test_config()
+        };
+
+        let first = register(&pool, &config, "alice", "alice@example.com", alice_password())
+            .await
+            .expect("first account must be allowed even when registration is closed");
+        assert_eq!(first.user.role, "admin");
+
+        let second = register(&pool, &config, "bob", "bob@example.com", bob_password()).await;
+        assert!(matches!(second, Err(AppError::RegistrationClosed)));
+    }
+
+    #[tokio::test]
+    async fn only_earliest_user_is_promoted_to_admin() {
+        let pool = test_pool().await;
+        let config = test_config();
+
+        let a = register(&pool, &config, "alice", "alice@example.com", alice_password())
+            .await
+            .unwrap();
+        let b = register(&pool, &config, "bob", "bob@example.com", bob_password())
+            .await
+            .unwrap();
+        assert_eq!(a.user.role, "admin");
+        assert_eq!(b.user.role, "user");
+    }
 
     #[tokio::test]
     async fn register_first_user_becomes_admin() {

@@ -17,6 +17,7 @@ argon2 = "0.5"                   # Password hashing + key derivation
 aes-gcm = { version = "0.10", features = ["stream"] }  # AES-256-GCM file encryption + key wrapping
 sha2 = "0.10"                    # SHA-256 checksums for data integrity
 hmac = "0.12"                    # HMAC-SHA256 signing for download tokens
+hkdf = "0.12"                    # Derive purpose-specific subkeys from IRONDRIVE_SECRET_KEY
 hex = "0.4"                      # Hex encoding for token hashes
 rand = "0.8"                     # Secure random generation
 base64 = "0.22"                  # Base64 encoding for key material

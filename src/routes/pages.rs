@@ -167,9 +167,10 @@ pub struct UpdateMemberRoleForm {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn set_session_cookie(cookies: &CookieJar<'_>, token: &str) {
+fn set_session_cookie(cookies: &CookieJar<'_>, token: &str, secure: bool) {
     let mut cookie = Cookie::new(COOKIE_NAME, token.to_string());
     cookie.set_http_only(true);
+    cookie.set_secure(secure);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
     cookies.add(cookie);
@@ -272,7 +273,7 @@ pub async fn login_submit(
 
     match result {
         Ok(login_result) => {
-            set_session_cookie(cookies, &login_result.token);
+            set_session_cookie(cookies, &login_result.token, config.secure_cookies);
             if login_result.setup_complete {
                 Ok(Redirect::to(uri!(files_page(
                     path = Option::<String>::None
@@ -355,6 +356,10 @@ pub async fn register_submit(
         )),
         Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(uri!(register_page)), msg)),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(uri!(register_page)), msg)),
+        Err(AppError::RegistrationClosed) => Err(Flash::error(
+            Redirect::to(uri!(register_page)),
+            "Registration is disabled on this server. Ask an administrator for an account.",
+        )),
         Err(_) => Err(Flash::error(
             Redirect::to(uri!(register_page)),
             "Registration failed. Please try again.",
@@ -1280,7 +1285,7 @@ pub async fn chunked_init_download(
         unlock_state.inner(),
         &user.0.id,
         &lib.id,
-        "library",
+        fs_service::TargetKind::Library,
         &path,
     )
     .await
@@ -1305,6 +1310,7 @@ pub async fn chunked_init_download(
 /// GET /files/chunked/download/chunk?<token>&<index> — stream one chunk for browser download.
 #[get("/files/chunked/download/chunk?<token>&<index>")]
 pub async fn chunked_download_chunk(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     user: SessionSetupComplete,
@@ -1314,10 +1320,21 @@ pub async fn chunked_download_chunk(
     crate::routes::library::FileChunkDownload,
     (Status, rocket::serde::json::Json<serde_json::Value>),
 > {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
     let result = chunk_service::serve_chunk(
         config.inner(),
         unlock_state.inner(),
         &user.0.id,
+        fs_service::TargetKind::Library,
+        &lib.id,
         &token,
         index,
     )
@@ -1329,25 +1346,8 @@ pub async fn chunked_download_chunk(
         )
     })?;
 
-    let content_type = result
-        .mime_type
-        .as_deref()
-        .and_then(|m| {
-            let parts: Vec<&str> = m.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                Some(rocket::http::ContentType::new(
-                    parts[0].to_string(),
-                    parts[1].to_string(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(rocket::http::ContentType::Binary);
-
     Ok(crate::routes::library::FileChunkDownload {
         data: result.data,
-        content_type,
         checksum_sha256: result.checksum_sha256,
         chunk_index: result.chunk_index,
         total_chunks: result.total_chunks,
@@ -2972,7 +2972,7 @@ pub async fn space_chunked_init_download(
         unlock_state.inner(),
         &reader.user.id,
         space_id,
-        "space",
+        fs_service::TargetKind::Space,
         &path,
     )
     .await
@@ -3000,17 +3000,21 @@ pub async fn space_chunked_download_chunk(
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     reader: SessionSpaceReader,
-    #[allow(unused)] space_id: &str,
+    space_id: &str,
     token: String,
     index: u32,
 ) -> Result<
     crate::routes::library::FileChunkDownload,
     (Status, rocket::serde::json::Json<serde_json::Value>),
 > {
+    // `reader` has just re-checked access to `space_id`; serve_chunk rejects
+    // tokens minted for any other target.
     let result = chunk_service::serve_chunk(
         config.inner(),
         unlock_state.inner(),
         &reader.user.id,
+        fs_service::TargetKind::Space,
+        space_id,
         &token,
         index,
     )
@@ -3022,25 +3026,8 @@ pub async fn space_chunked_download_chunk(
         )
     })?;
 
-    let content_type = result
-        .mime_type
-        .as_deref()
-        .and_then(|m| {
-            let parts: Vec<&str> = m.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                Some(rocket::http::ContentType::new(
-                    parts[0].to_string(),
-                    parts[1].to_string(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(rocket::http::ContentType::Binary);
-
     Ok(crate::routes::library::FileChunkDownload {
         data: result.data,
-        content_type,
         checksum_sha256: result.checksum_sha256,
         chunk_index: result.chunk_index,
         total_chunks: result.total_chunks,

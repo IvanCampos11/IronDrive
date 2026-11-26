@@ -197,6 +197,105 @@ fn plaintext_size_from_disk(disk_size: u64) -> u64 {
     disk_size.saturating_sub(ENCRYPTION_OVERHEAD)
 }
 
+/// Plaintext size of an encrypted file, correct for both single-shot and
+/// STREAM formats. Falls back to the single-shot estimate if the file can't
+/// be parsed (e.g. corrupt), so listings still render.
+async fn plaintext_size_of(path: &Path, disk_size: u64) -> u64 {
+    match crypto_service::plaintext_size(path).await {
+        Ok(size) => size,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Could not read plaintext size");
+            plaintext_size_from_disk(disk_size)
+        }
+    }
+}
+
+/// Which kind of storage root a file lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind {
+    Library,
+    Space,
+}
+
+impl TargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TargetKind::Library => "library",
+            TargetKind::Space => "space",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "library" => Some(TargetKind::Library),
+            "space" => Some(TargetKind::Space),
+            _ => None,
+        }
+    }
+}
+
+/// An existing encrypted file, resolved and ready to read — nothing decrypted yet.
+pub struct ReadableFile {
+    pub path: PathBuf,
+    pub data_key: DataKey,
+    pub filename: String,
+    pub mime_type: Option<String>,
+    pub plaintext_size: u64,
+}
+
+/// Resolve `user_path` inside a library or space to an existing file and its
+/// data key, without reading or decrypting the file body.
+pub async fn resolve_readable_file(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    kind: TargetKind,
+    target_id: &str,
+    user_path: &str,
+) -> Result<ReadableFile, AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation("File path must not be empty.".into()));
+    }
+
+    let (data_key, root) = match kind {
+        TargetKind::Library => (
+            require_data_key(unlock_state, target_id)?,
+            library_root(config, target_id),
+        ),
+        TargetKind::Space => (
+            require_space_key(unlock_state, target_id)?,
+            space_root(config, target_id),
+        ),
+    };
+    let path = safe_join_async(root, user_path.to_string()).await?;
+
+    let meta = fs::metadata(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Internal(format!("Cannot read file metadata: {e}"))
+        }
+    })?;
+    if meta.is_dir() {
+        return Err(AppError::Validation(
+            "The specified path is a directory, not a file.".into(),
+        ));
+    }
+
+    let plaintext_size = crypto_service::plaintext_size(&path).await?;
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    Ok(ReadableFile {
+        mime_type: mime_from_filename(&filename),
+        filename,
+        path,
+        data_key,
+        plaintext_size,
+    })
+}
+
 /// Async wrapper for [`safe_join`] — moves the blocking path validation
 /// (which calls `std::fs::canonicalize` and `std::fs::symlink_metadata`)
 /// onto a blocking thread pool.
@@ -296,7 +395,7 @@ pub async fn list_directory(
         let size = if is_dir {
             None
         } else {
-            Some(plaintext_size_from_disk(entry_meta.len()))
+            Some(plaintext_size_of(&dir_entry.path(), entry_meta.len()).await)
         };
 
         let mime_type = if is_dir {
@@ -774,7 +873,7 @@ pub async fn get_entry_info(
     let size = if is_dir {
         None
     } else {
-        Some(plaintext_size_from_disk(meta.len()))
+        Some(plaintext_size_of(&target, meta.len()).await)
     };
 
     let name = target
@@ -978,7 +1077,7 @@ pub async fn list_space_directory(
         let size = if is_dir {
             None
         } else {
-            Some(plaintext_size_from_disk(entry_meta.len()))
+            Some(plaintext_size_of(&dir_entry.path(), entry_meta.len()).await)
         };
         let mime_type = if is_dir {
             None
@@ -1282,7 +1381,7 @@ pub async fn get_space_entry_info(
     let size = if is_dir {
         None
     } else {
-        Some(plaintext_size_from_disk(meta.len()))
+        Some(plaintext_size_of(&target, meta.len()).await)
     };
 
     let name = target
@@ -1441,6 +1540,8 @@ mod tests {
             max_parallel_chunks: 4,
             integrity_scan_enabled: false,
             integrity_scan_interval_hours: 168,
+            registration_enabled: true,
+            secure_cookies: false,
         }
     }
 

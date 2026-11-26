@@ -14,7 +14,7 @@ use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
 use crate::services::chunk_service;
 use crate::utils::format_bytes;
-use crate::services::fs_service::{self, FsEntry};
+use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::unlock_state::UnlockState;
 
 // Request and response types.
@@ -130,10 +130,13 @@ pub struct InitChunkDownloadResponse {
     pub expires_at: String,
 }
 
+/// One plaintext chunk of a file. Always sent as an opaque attachment: the
+/// browser JS reassembles chunks into a Blob, so the real MIME type is never
+/// needed here, and serving it would let uploaded HTML/SVG render inline on
+/// our origin.
 pub struct FileChunkDownload {
     pub data: Vec<u8>,
-    pub content_type: ContentType,
-    /// Plaintext SHA-256 hex digest for the `X-IronDrive-Integrity` header.
+    /// SHA-256 hex digest of this chunk, sent as `X-IronDrive-Chunk-Sha256`.
     pub checksum_sha256: String,
     pub chunk_index: u32,
     pub total_chunks: u32,
@@ -145,8 +148,10 @@ impl<'r> Responder<'r, 'static> for FileChunkDownload {
         let len = self.data.len();
 
         Response::build()
-            .header(self.content_type)
-            .header(Header::new("X-IronDrive-Integrity", self.checksum_sha256))
+            .header(ContentType::Binary)
+            .header(Header::new("Content-Disposition", "attachment"))
+            .header(Header::new("Content-Security-Policy", DOWNLOAD_CSP))
+            .header(Header::new("X-IronDrive-Chunk-Sha256", self.checksum_sha256))
             .header(Header::new(
                 "X-IronDrive-Chunk-Index",
                 self.chunk_index.to_string(),
@@ -163,6 +168,10 @@ impl<'r> Responder<'r, 'static> for FileChunkDownload {
             .ok()
     }
 }
+
+/// CSP for user file content: if a browser ever does render it, it runs in
+/// an opaque origin with no scripts, so it can't touch the app's cookies or DOM.
+pub const DOWNLOAD_CSP: &str = "sandbox; default-src 'none'";
 
 /// Custom responder for file downloads. Sends the decrypted body with
 /// `X-IronDrive-Integrity` (plaintext SHA-256, computed on the fly).
@@ -183,14 +192,39 @@ impl<'r> Responder<'r, 'static> for FileDownload {
             .header(Header::new("X-IronDrive-Integrity", self.checksum_sha256))
             .header(Header::new(
                 "Content-Disposition",
-                format!(
-                    "attachment; filename=\"{}\"",
-                    self.filename.replace('\"', "\\\"")
-                ),
+                content_disposition_attachment(&self.filename),
             ))
+            .header(Header::new("Content-Security-Policy", DOWNLOAD_CSP))
             .sized_body(len, std::io::Cursor::new(self.data))
             .ok()
     }
+}
+
+/// Build an RFC 6266 `attachment` header value: a plain-ASCII `filename`
+/// fallback plus an RFC 5987 `filename*` with the exact UTF-8 name. Control
+/// characters, quotes and backslashes never reach the header verbatim.
+pub fn content_disposition_attachment(filename: &str) -> String {
+    let fallback: String = filename
+        .chars()
+        .map(|c| {
+            if (c.is_ascii_graphic() && c != '"' && c != '\\') || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let mut encoded = String::with_capacity(filename.len() * 3);
+    for b in filename.bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
+            encoded.push(b as char);
+        } else {
+            encoded.push_str(&format!("%{b:02X}"));
+        }
+    }
+
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
 }
 
 // Helpers.
@@ -621,7 +655,7 @@ pub async fn chunked_init_download(
         unlock_state.inner(),
         &user.0.id,
         &lib.id,
-        "library",
+        TargetKind::Library,
         &path,
     )
     .await?;
@@ -642,26 +676,28 @@ pub async fn chunked_init_download(
 /// Download one plaintext chunk from a token-authorized file.
 #[get("/api/v1/library/chunked/download/chunk?<token>&<index>")]
 pub async fn chunked_download_chunk(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     user: SetupComplete,
     token: String,
     index: u32,
 ) -> Result<FileChunkDownload, AppError> {
+    let lib = require_library(pool.inner(), &user.0.id).await?;
+
     let result = chunk_service::serve_chunk(
         config.inner(),
         unlock_state.inner(),
         &user.0.id,
+        TargetKind::Library,
+        &lib.id,
         &token,
         index,
     )
     .await?;
 
-    let content_type = parse_content_type(result.mime_type.as_deref());
-
     Ok(FileChunkDownload {
         data: result.data,
-        content_type,
         checksum_sha256: result.checksum_sha256,
         chunk_index: result.chunk_index,
         total_chunks: result.total_chunks,

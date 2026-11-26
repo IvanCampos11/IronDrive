@@ -51,7 +51,7 @@ cd IronDrive
 cp .env.example .env
 
 # Required: root secret for server-managed encryption key material.
-echo "IRONDRIVE_SECRET_KEY=$(openssl rand -base64 44)" >> .env
+echo "IRONDRIVE_SECRET_KEY=$(openssl rand -base64 32)" >> .env
 
 # Start the app
 cargo run

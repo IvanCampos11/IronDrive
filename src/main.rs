@@ -115,7 +115,7 @@ fn rocket_figment(app_config: &config::AppConfig) -> rocket::figment::Figment {
     rocket::figment::Figment::from(rocket::Config::default())
         .merge(Toml::file("Rocket.toml").nested())
         .merge(Env::prefixed("ROCKET_").global())
-        .merge(Serialized::default("secret_key", &app_config.secret_key))
+        .merge(Serialized::default("secret_key", app_config.rocket_secret_key()))
 }
 
 /// Attach security headers to every response.
@@ -133,10 +133,14 @@ pub fn security_headers_fairing() -> AdHoc {
                 "Permissions-Policy",
                 "camera=(), microphone=(), geolocation=()",
             ));
-            res.set_header(Header::new(
-                "Content-Security-Policy",
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-            ));
+            // Responders serving user file content set a stricter sandbox CSP;
+            // don't overwrite it with the app-page policy.
+            if !res.headers().contains("Content-Security-Policy") {
+                res.set_header(Header::new(
+                    "Content-Security-Policy",
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+                ));
+            }
         })
     })
 }

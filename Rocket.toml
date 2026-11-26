@@ -3,6 +3,11 @@ address = "0.0.0.0"
 port = 8000
 cli_colors = false
 template_dir = "templates"
+# Don't trust any client-supplied IP header by default: if the server is
+# reachable directly, a client could set X-Real-IP to dodge login rate limits.
+# Behind a reverse proxy that sets the header, enable it with
+# ROCKET_IP_HEADER=X-Real-IP (see .env.example).
+ip_header = false
 
 [default.limits]
 file = "50 GB"

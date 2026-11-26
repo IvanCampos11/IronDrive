@@ -5,7 +5,7 @@ use std::path::Path;
 use rand::RngCore;
 
 /// Application configuration loaded from environment variables.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct AppConfig {
     pub secret_key: String,
@@ -19,6 +19,32 @@ pub struct AppConfig {
     pub max_parallel_chunks: u32,
     pub integrity_scan_enabled: bool,
     pub integrity_scan_interval_hours: u64,
+    /// Allow self-service registration. The very first account can always
+    /// register (it becomes the admin), regardless of this setting.
+    pub registration_enabled: bool,
+    /// Mark session/CSRF cookies `Secure`. Enable when served over HTTPS.
+    pub secure_cookies: bool,
+}
+
+/// Hand-written so `{:?}` (e.g. in logs or panics) never prints the secret.
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("secret_key", &"<redacted>")
+            .field("data_dir", &self.data_dir)
+            .field("db_dir", &self.db_dir)
+            .field("default_quota_bytes", &self.default_quota_bytes)
+            .field("max_upload_bytes", &self.max_upload_bytes)
+            .field("session_expiry_hours", &self.session_expiry_hours)
+            .field("chunk_size_bytes", &self.chunk_size_bytes)
+            .field("chunk_upload_expiry_hours", &self.chunk_upload_expiry_hours)
+            .field("max_parallel_chunks", &self.max_parallel_chunks)
+            .field("integrity_scan_enabled", &self.integrity_scan_enabled)
+            .field("integrity_scan_interval_hours", &self.integrity_scan_interval_hours)
+            .field("registration_enabled", &self.registration_enabled)
+            .field("secure_cookies", &self.secure_cookies)
+            .finish()
+    }
 }
 
 const PLACEHOLDER_KEY: &str = "CHANGE-ME-generate-a-random-256-bit-key-here";
@@ -47,6 +73,8 @@ impl AppConfig {
                 "IRONDRIVE_INTEGRITY_SCAN_INTERVAL_HOURS",
                 168,
             ),
+            registration_enabled: env_parse("IRONDRIVE_REGISTRATION_ENABLED", true),
+            secure_cookies: env_parse("IRONDRIVE_SECURE_COOKIES", false),
         }
     }
 
@@ -64,6 +92,28 @@ impl AppConfig {
 
     pub fn db_url(&self) -> String {
         format!("sqlite:{}/irondrive.db?mode=rwc", self.db_dir)
+    }
+
+    /// Derive a 32-byte subkey for one purpose from `IRONDRIVE_SECRET_KEY`
+    /// (HKDF-SHA256). Each purpose gets an independent key, so e.g. a leaked
+    /// cookie secret reveals nothing about the master-key wrapping key.
+    pub fn derive_subkey(&self, purpose: &str) -> [u8; 32] {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"irondrive-v1"), self.secret_key.as_bytes());
+        let mut out = [0u8; 32];
+        hk.expand(purpose.as_bytes(), &mut out)
+            .expect("32 bytes is a valid HKDF-SHA256 output length");
+        out
+    }
+
+    /// HMAC key for signing chunked-download tokens.
+    pub fn download_token_key(&self) -> [u8; 32] {
+        self.derive_subkey("download-token-hmac")
+    }
+
+    /// Rocket `secret_key` (private cookies, flash messages), base64-encoded.
+    pub fn rocket_secret_key(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(self.derive_subkey("rocket-cookie-secret"))
     }
 }
 

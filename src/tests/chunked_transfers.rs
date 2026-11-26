@@ -58,6 +58,8 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         max_parallel_chunks: 4,
         integrity_scan_enabled: false,
         integrity_scan_interval_hours: 168,
+        registration_enabled: true,
+        secure_cookies: false,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());
@@ -223,6 +225,8 @@ async fn chunked_upload_download_roundtrip() {
     let dl_json: Value = serde_json::from_str(&dl_init_resp.into_string().await.unwrap()).unwrap();
     let dl_token = dl_json["token"].as_str().unwrap().to_string();
     let dl_chunks = dl_json["total_chunks"].as_u64().unwrap() as u32;
+    // Size comes from the STREAM segment table, not a full decrypt.
+    assert_eq!(dl_json["total_bytes"].as_u64().unwrap(), payload.len() as u64);
 
     let mut downloaded = Vec::new();
     for index in 0..dl_chunks {
@@ -235,7 +239,22 @@ async fn chunked_upload_download_roundtrip() {
             .dispatch()
             .await;
         assert_eq!(resp.status(), Status::Ok);
-        downloaded.extend_from_slice(&resp.into_bytes().await.unwrap());
+        // User content is never served with its real MIME type or inline.
+        assert_eq!(resp.content_type(), Some(ContentType::Binary));
+        assert_eq!(resp.headers().get_one("Content-Disposition"), Some("attachment"));
+        assert!(resp
+            .headers()
+            .get_one("Content-Security-Policy")
+            .unwrap()
+            .starts_with("sandbox"));
+        let chunk_hash = resp
+            .headers()
+            .get_one("X-IronDrive-Chunk-Sha256")
+            .unwrap()
+            .to_string();
+        let bytes = resp.into_bytes().await.unwrap();
+        assert_eq!(chunk_hash, checksum_hex(&bytes));
+        downloaded.extend_from_slice(&bytes);
     }
 
     assert_eq!(downloaded, payload);

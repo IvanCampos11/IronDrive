@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::errors::AppError;
-use crate::services::fs_service::{self, DownloadResult, UploadResult};
+use crate::services::crypto_service;
+use crate::services::fs_service::{self, TargetKind, UploadResult};
 use crate::services::unlock_state::UnlockState;
 use crate::utils::format_bytes;
 
@@ -64,8 +65,7 @@ pub struct InitDownloadResult {
 #[derive(Debug)]
 pub struct ChunkDownloadResult {
     pub data: Vec<u8>,
-    pub mime_type: Option<String>,
-    /// Plaintext SHA-256 hex digest for the `X-IronDrive-Integrity` header.
+    /// SHA-256 hex digest of this chunk's plaintext bytes.
     pub checksum_sha256: String,
     pub chunk_index: u32,
     pub total_chunks: u32,
@@ -204,15 +204,15 @@ fn is_expired(expires_at: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn sign_payload(secret_key: &str, payload_b64: &str) -> Result<String, AppError> {
-    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
+fn sign_payload(signing_key: &[u8], payload_b64: &str) -> Result<String, AppError> {
+    let mut mac = HmacSha256::new_from_slice(signing_key)
         .map_err(|e| AppError::Internal(format!("Failed to initialize HMAC signer: {e}")))?;
     mac.update(payload_b64.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 fn build_download_token(
-    secret_key: &str,
+    signing_key: &[u8],
     user_id: &str,
     target_id: &str,
     target_type: &str,
@@ -233,7 +233,7 @@ fn build_download_token(
     let payload_json = serde_json::to_vec(&payload)
         .map_err(|e| AppError::Internal(format!("Failed to serialize token payload: {e}")))?;
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json);
-    let sig = sign_payload(secret_key, &payload_b64)?;
+    let sig = sign_payload(signing_key, &payload_b64)?;
 
     Ok((
         format!("{payload_b64}.{sig}"),
@@ -241,7 +241,7 @@ fn build_download_token(
     ))
 }
 
-fn verify_download_token(secret_key: &str, token: &str) -> Result<DownloadTokenPayload, AppError> {
+fn verify_download_token(signing_key: &[u8], token: &str) -> Result<DownloadTokenPayload, AppError> {
     let mut parts = token.splitn(2, '.');
     let payload_b64 = parts
         .next()
@@ -253,7 +253,7 @@ fn verify_download_token(secret_key: &str, token: &str) -> Result<DownloadTokenP
     let provided_sig = hex::decode(normalize_hex(sig))
         .map_err(|_| AppError::Validation("Invalid download token signature.".into()))?;
 
-    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
+    let mut mac = HmacSha256::new_from_slice(signing_key)
         .map_err(|e| AppError::Internal(format!("Failed to initialize HMAC verifier: {e}")))?;
     mac.update(payload_b64.as_bytes());
     mac.verify_slice(&provided_sig)
@@ -565,22 +565,26 @@ pub async fn init_download(
     unlock_state: &UnlockState,
     user_id: &str,
     target_id: &str,
-    target_type: &str,
+    kind: TargetKind,
     path: &str,
 ) -> Result<InitDownloadResult, AppError> {
-    let download = if target_type == "space" {
-        fs_service::download_space_file(config, unlock_state, target_id, path).await?
-    } else {
-        fs_service::download_file(config, unlock_state, target_id, path).await?
-    };
-    let total_bytes = download.data.len() as u64;
-    let total_chunks = expected_total_chunks(total_bytes.max(1), config.chunk_size_bytes);
-    let (token, expires_at) = build_download_token(&config.secret_key, user_id, target_id, target_type, path)?;
+    // Resolve and size the file without decrypting it.
+    let file =
+        fs_service::resolve_readable_file(config, unlock_state, kind, target_id, path).await?;
+    let total_bytes = file.plaintext_size;
+    let total_chunks = expected_total_chunks(total_bytes, config.chunk_size_bytes);
+    let (token, expires_at) = build_download_token(
+        &config.download_token_key(),
+        user_id,
+        target_id,
+        kind.as_str(),
+        path,
+    )?;
 
     Ok(InitDownloadResult {
         token,
-        filename: download.filename,
-        mime_type: download.mime_type,
+        filename: file.filename,
+        mime_type: file.mime_type,
         chunk_size_bytes: config.chunk_size_bytes,
         total_chunks,
         total_bytes,
@@ -588,47 +592,49 @@ pub async fn init_download(
     })
 }
 
+/// Serve one plaintext chunk of a token-authorized file.
+///
+/// The token must have been issued to `user_id` *for this exact target*
+/// (`kind` + `target_id`). Callers pass the target they have just
+/// authorized (e.g. via a space-permission guard), so a token minted for one
+/// space can't be replayed through another space's route, and a user whose
+/// access was revoked is rejected by that guard on the very next chunk.
+///
+/// Only the encrypted segments overlapping the chunk are read and decrypted.
 pub async fn serve_chunk(
     config: &AppConfig,
     unlock_state: &UnlockState,
     user_id: &str,
+    kind: TargetKind,
+    target_id: &str,
     token: &str,
     chunk_index: u32,
 ) -> Result<ChunkDownloadResult, AppError> {
-    let payload = verify_download_token(&config.secret_key, token)?;
-    if payload.uid != user_id {
+    let payload = verify_download_token(&config.download_token_key(), token)?;
+    if payload.uid != user_id
+        || TargetKind::parse(&payload.typ) != Some(kind)
+        || payload.lib != target_id
+    {
         return Err(AppError::Forbidden);
     }
 
-    let DownloadResult {
-        data,
-        checksum_sha256,
-        mime_type,
-        filename: _,
-    } = if payload.typ == "space" {
-        fs_service::download_space_file(config, unlock_state, &payload.lib, &payload.path).await?
-    } else {
-        fs_service::download_file(config, unlock_state, &payload.lib, &payload.path).await?
-    };
-
-    let total_bytes = data.len() as u64;
-    let total_chunks = expected_total_chunks(total_bytes.max(1), config.chunk_size_bytes);
+    let file =
+        fs_service::resolve_readable_file(config, unlock_state, kind, target_id, &payload.path)
+            .await?;
+    let total_bytes = file.plaintext_size;
+    let total_chunks = expected_total_chunks(total_bytes, config.chunk_size_bytes);
 
     if chunk_index >= total_chunks {
         return Err(AppError::Validation("chunk_index out of range.".into()));
     }
 
-    let start = (chunk_index as u64).saturating_mul(config.chunk_size_bytes) as usize;
-    let end = std::cmp::min(start + config.chunk_size_bytes as usize, data.len());
-    let chunk = if start >= data.len() {
-        Vec::new()
-    } else {
-        data[start..end].to_vec()
-    };
+    let start = (chunk_index as u64).saturating_mul(config.chunk_size_bytes);
+    let end = start.saturating_add(config.chunk_size_bytes).min(total_bytes);
+    let data = crypto_service::read_plaintext_range(&file.data_key, &file.path, start, end).await?;
+    let checksum_sha256 = hex::encode(crypto_service::sha256_bytes(&data));
 
     Ok(ChunkDownloadResult {
-        data: chunk,
-        mime_type,
+        data,
         checksum_sha256,
         chunk_index,
         total_chunks,
@@ -667,4 +673,63 @@ pub async fn cleanup_expired_uploads(pool: &DbPool, config: &AppConfig) -> Resul
     }
 
     Ok(cleaned)
+}
+
+#[cfg(test)]
+mod token_binding_tests {
+    use super::*;
+
+    fn config() -> AppConfig {
+        AppConfig {
+            secret_key: "test-key-not-real".into(),
+            data_dir: "/nonexistent".into(),
+            db_dir: "/nonexistent".into(),
+            default_quota_bytes: 1,
+            max_upload_bytes: 1,
+            session_expiry_hours: 1,
+            chunk_size_bytes: 1024,
+            chunk_upload_expiry_hours: 1,
+            max_parallel_chunks: 1,
+            integrity_scan_enabled: false,
+            integrity_scan_interval_hours: 1,
+            registration_enabled: true,
+            secure_cookies: false,
+        }
+    }
+
+    fn token_for(cfg: &AppConfig, uid: &str, target: &str, kind: TargetKind) -> String {
+        build_download_token(&cfg.download_token_key(), uid, target, kind.as_str(), "f.bin")
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn token_rejected_for_other_target_or_kind() {
+        let cfg = config();
+        let unlock = UnlockState::new();
+        let token = token_for(&cfg, "u1", "space-a", TargetKind::Space);
+
+        // Same user, different space.
+        let r = serve_chunk(&cfg, &unlock, "u1", TargetKind::Space, "space-b", &token, 0).await;
+        assert!(matches!(r, Err(AppError::Forbidden)));
+
+        // Same id, but replayed through the library route.
+        let r = serve_chunk(&cfg, &unlock, "u1", TargetKind::Library, "space-a", &token, 0).await;
+        assert!(matches!(r, Err(AppError::Forbidden)));
+
+        // Different user.
+        let r = serve_chunk(&cfg, &unlock, "u2", TargetKind::Space, "space-a", &token, 0).await;
+        assert!(matches!(r, Err(AppError::Forbidden)));
+    }
+
+    #[test]
+    fn token_signed_with_raw_secret_is_rejected() {
+        // Tokens must be signed with the derived subkey, not the raw secret.
+        let cfg = config();
+        let forged =
+            build_download_token(cfg.secret_key.as_bytes(), "u1", "lib", "library", "f.bin")
+                .unwrap()
+                .0;
+        assert!(verify_download_token(&cfg.download_token_key(), &forged).is_err());
+    }
 }
