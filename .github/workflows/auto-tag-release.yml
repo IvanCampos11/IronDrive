@@ -32,7 +32,7 @@ jobs:
 
       - name: Checkout merge commit
         # Trusted: this is the already-merged commit on dev/main, not the PR head.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.merge_commit_sha }}
