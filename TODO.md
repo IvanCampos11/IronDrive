@@ -2,9 +2,9 @@
 
 ## Status Snapshot
 
-- Current version: 0.6.0
-- Working areas: auth, personal libraries, groups, spaces, integrity, background jobs, server-rendered UI
-- Biggest gaps: quota enforcement, user-managed encryption tiers, API/page parity for some chunked space flows
+- Current version: 0.7.0
+- Working areas: auth, personal libraries, groups, spaces, integrity, background jobs, server-rendered UI, quotas, trash, streaming downloads
+- Biggest gaps: user-managed encryption tiers, quotas for group-owned spaces
 
 ## Priority Rules
 
@@ -14,17 +14,16 @@
 
 ## (P0/P1)
 
-- [ ] Enforce quota checks server-side on all write paths.
-  - [ ] library upload
-  - [ ] space upload
-  - [ ] chunked complete (library + space)
-  - [ ] return consistent `QuotaExceeded` behavior and UI feedback
-- [ ] Add missing chunked space API endpoints or intentionally remove page/API split.
-  - [ ] decide contract
-  - [ ] implement or deprecate
-  - [ ] document one canonical path
-- [ ] Add focused fuzz/property tests around path safety and file operation edge cases.
-- [ ] Tighten upload memory behavior for large completes (reduce peak RAM where feasible).
+- [x] Enforce quota checks server-side on all write paths.
+  - [x] library upload
+  - [x] space upload
+  - [x] chunked init and complete (library + space); in-progress uploads reserve space
+  - [x] consistent `QuotaExceeded` (507) with a user-facing message
+- [x] Add missing chunked space API endpoints (canonical API documented in ARCHITECTURE.md §9).
+- [x] Property tests for path safety (random traversal inputs + symlink escape) and a model-based test for trash operations.
+- [x] Tighten memory for large transfers: downloads stream segment by segment, direct uploads share a 50 MiB cap without extra copies, chunked completes already stream.
+- [x] Trash with undo instead of permanent deletes.
+- [ ] Decide quotas for group-owned spaces (currently uncharged).
 
 ## (P2)
 
@@ -40,7 +39,7 @@
 
 ## (P3)
 
-- [ ] Full quota/admin management UI.
+- [x] Quota/admin management UI (admin page: users, quotas, enable/disable, scan).
 - [ ] API-level polish pass (consistent errors, docs, and status semantics).
 - [ ] Optional compression strategy for large responses.
 - [ ] Storage backend abstraction (local first, others later).
@@ -58,7 +57,7 @@
   - [ ] group + space sharing and revocation
   - [ ] chunked flows under permission boundaries
   - [ ] startup/restart behavior with key loading and cleanup
-- [ ] Add regressions for integrity event acknowledge + notifications.
+- [x] Add regressions for integrity event acknowledge + notifications.
 
 ## Done (Condensed)
 
