@@ -1,0 +1,41 @@
+name: PR release notes
+
+# Runs on description and label edits too, so the preview stays current.
+on:
+  pull_request:
+    branches: [dev, main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+concurrency:
+  group: pr-notes-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  preview:
+    name: Release notes preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version labels
+        shell: bash
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          count=$(jq '[.[] | capture("^(semver-)?(?<b>major|minor|patch)$").b] | unique | length' <<<"$LABELS")
+          if [ "$count" -gt 1 ]; then
+            echo "::error::Conflicting version labels: use at most one of major, minor or patch."
+            exit 1
+          fi
+          if [ "$count" -eq 0 ] && [ "${{ github.base_ref }}" = dev ]; then
+            echo "::notice::No semver label, so merging this PR won't cut a release."
+          fi
+      - name: Preview this PR's release notes entry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/release_notes.py --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" >> "$GITHUB_STEP_SUMMARY"

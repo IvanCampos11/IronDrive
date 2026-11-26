@@ -1,169 +1,77 @@
 name: Auto Tag Release
 
+# Merging a labelled PR into dev cuts a pre-release (vX.Y.Z-rc.N).
+# Merging dev into main promotes the pending version to a stable vX.Y.Z.
+# A hotfix PR straight into main with a semver label bumps the stable version.
 on:
   pull_request_target:
-    types:
-      - closed
-    branches:
-      - dev
+    types: [closed]
+    branches: [dev, main]
 
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
 
 jobs:
   tag:
-    name: Create release tag from PR label
-    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'dev'
+    name: Create release tag
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-
     steps:
-      - name: Determine version bump
+      - name: Read version label
         id: bump
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const labels = context.payload.pull_request.labels.map(label => label.name);
-            const normalized = new Set(labels);
-
-            const bumpLabels = [
-              ['semver-major', 'major'],
-              ['semver-minor', 'minor'],
-              ['semver-patch', 'patch'],
-              ['major', 'major'],
-              ['minor', 'minor'],
-              ['patch', 'patch'],
-            ];
-
-            const selected = [...new Set(
-              bumpLabels
-                .filter(([label]) => normalized.has(label))
-                .map(([, bump]) => bump)
-            )];
-
-            if (selected.length > 1) {
-              core.setFailed(
-                `PR has conflicting version labels: ${selected.join(', ')}. Use exactly one of semver-major, semver-minor, or semver-patch.`
-              );
-              return;
-            }
-
-            if (selected.length === 0) {
-              if (normalized.has('release')) {
-                core.setFailed(
-                  'PR has the release label but no semver label. Add exactly one of semver-major, semver-minor, or semver-patch.'
-                );
-                return;
-              }
-
-              core.info('No semver label found on merged PR. Skipping tag creation.');
-              core.setOutput('should_tag', 'false');
-              return;
-            }
-
-            core.setOutput('should_tag', 'true');
-            core.setOutput('bump', selected[0]);
-
-      - name: Ensure release token exists
-        if: steps.bump.outputs.should_tag == 'true'
         shell: bash
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
-          if [ -z "${{ secrets.RELEASE_TOKEN }}" ]; then
-            echo "Missing RELEASE_TOKEN secret."
-            echo "Create a classic PAT with repo scope, or a fine-grained token with Contents: Read and write, then save it as RELEASE_TOKEN."
+          bumps=$(jq -r '[.[] | capture("^(semver-)?(?<b>major|minor|patch)$").b] | unique | join(" ")' <<<"$LABELS")
+          if [ "$(wc -w <<<"$bumps")" -gt 1 ]; then
+            echo "::error::Conflicting version labels: $bumps"
             exit 1
           fi
+          echo "bump=$bumps" >> "$GITHUB_OUTPUT"
 
       - name: Checkout merge commit
-        if: steps.bump.outputs.should_tag == 'true'
+        # Trusted: this is the already-merged commit on dev/main, not the PR head.
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           token: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Determine next version tag
-        if: steps.bump.outputs.should_tag == 'true'
+      - name: Work out the next version
         id: version
-        shell: bash
         run: |
-          set -euo pipefail
+          python3 .github/scripts/next_version.py \
+            --mode "${{ github.event.pull_request.base.ref }}" \
+            --bump "${{ steps.bump.outputs.bump }}" | tee -a "$GITHUB_OUTPUT"
 
-          git fetch origin --tags --force
-
-          existing_tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-          if [ -n "$existing_tag" ]; then
-            echo "already_tagged=true" >> "$GITHUB_OUTPUT"
-            echo "tag=$existing_tag" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          latest_tag="$(git tag -l 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-
-          if [ -z "$latest_tag" ]; then
-            base_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
-            if [ -z "$base_version" ]; then
-              echo "Unable to determine base version from Cargo.toml"
-              exit 1
-            fi
-            latest_tag="v$base_version"
-          fi
-
-          version_core="${latest_tag#v}"
-          IFS='.' read -r major minor patch <<EOF
-          $version_core
-          EOF
-
-          case "${{ steps.bump.outputs.bump }}" in
-            major)
-              major=$((major + 1))
-              minor=0
-              patch=0
-              ;;
-            minor)
-              minor=$((minor + 1))
-              patch=0
-              ;;
-            patch)
-              patch=$((patch + 1))
-              ;;
-            *)
-              echo "Unsupported version bump: ${{ steps.bump.outputs.bump }}"
-              exit 1
-              ;;
-          esac
-
-          new_tag="v${major}.${minor}.${patch}"
-
-          if git rev-parse -q --verify "refs/tags/$new_tag" >/dev/null; then
-            echo "Tag $new_tag already exists"
+      - name: Check release token
+        if: steps.version.outputs.should_tag == 'true' && steps.version.outputs.already_tagged != 'true'
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          # Tags pushed with the default GITHUB_TOKEN don't trigger other workflows,
+          # so the release build needs a personal token.
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::Missing RELEASE_TOKEN secret (fine-grained PAT with Contents: read and write)."
             exit 1
           fi
 
-          echo "already_tagged=false" >> "$GITHUB_OUTPUT"
-          echo "tag=$new_tag" >> "$GITHUB_OUTPUT"
-
       - name: Create and push tag
-        if: steps.bump.outputs.should_tag == 'true' && steps.version.outputs.already_tagged != 'true'
-        shell: bash
+        if: steps.version.outputs.should_tag == 'true' && steps.version.outputs.already_tagged != 'true'
         run: |
-          set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git"
-
           tag="${{ steps.version.outputs.tag }}"
-          git tag -a "$tag" -m "Release $tag from PR #${{ github.event.pull_request.number }}"
+          git tag -a "$tag" -m "Release $tag (#${{ github.event.pull_request.number }})"
           git push origin "$tag"
 
-      - name: Job summary
-        shell: bash
+      - name: Summary
         run: |
-          if [ "${{ steps.bump.outputs.should_tag || 'false' }}" != 'true' ]; then
-            echo "No semver label found. No release tag was created." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "${{ steps.version.outputs.already_tagged || 'false' }}" = 'true' ]; then
-            echo "Commit already had release tag ${{ steps.version.outputs.tag }}." >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.version.outputs.should_tag }}" != true ]; then
+            echo "No release: the PR has no semver label and there is no pending pre-release to promote." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.version.outputs.already_tagged }}" = true ]; then
+            echo "Commit was already tagged ${{ steps.version.outputs.tag }}." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Created release tag ${{ steps.version.outputs.tag }} from PR #${{ github.event.pull_request.number }}." >> "$GITHUB_STEP_SUMMARY"
+            echo "Tagged **${{ steps.version.outputs.tag }}**; the Release workflow is building it now." >> "$GITHUB_STEP_SUMMARY"
           fi

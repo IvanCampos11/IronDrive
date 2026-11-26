@@ -30,3 +30,4 @@ db/
 
 # Auto-generated secret key (contains master encryption passphrase)
 .secret_key
+__pycache__/
