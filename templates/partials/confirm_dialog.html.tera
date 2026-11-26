@@ -1,0 +1,11 @@
+{# Generic confirmation dialog, driven by IronDrive.confirm() in core.js. #}
+<dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-dialog-title">
+  <form method="dialog">
+    <h2 id="confirm-dialog-title" class="dialog-title">Are you sure?</h2>
+    <p id="confirm-dialog-message" class="text-muted leading-relaxed"></p>
+    <div class="dialog-actions">
+      <button type="submit" value="cancel" class="btn-text">Cancel</button>
+      <button type="submit" value="ok" id="confirm-dialog-ok" class="btn-text">OK</button>
+    </div>
+  </form>
+</dialog>

@@ -1,68 +1,60 @@
 {% extends "base" %}
-
 {% block title %}Spaces – IronDrive{% endblock %}
 
 {% block content %}
-<div class="animate-fade-in">
-  <!-- Header -->
-  <div class="flex items-center justify-between mb-6">
-    <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">Spaces</h1>
-    <button type="button" id="create-space-btn" class="btn-primary text-sm">
-      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
-      New Space
-    </button>
-  </div>
+<div class="flex items-center gap-3 h-16 pl-6 pr-3 sm:pr-4 sticky top-0 bg-surface z-10 rounded-t-2xl">
+  <h1 class="page-title flex-1">Spaces</h1>
+  <button type="button" class="btn-tonal" data-dialog-open="create-space-dialog"><span class="ms">add</span>New space</button>
+</div>
 
-  {% if spaces | length == 0 %}
-  <!-- Empty state -->
-  <div class="card text-center py-20 px-6">
-    <div class="inline-flex items-center justify-center w-16 h-16 bg-gray-100 dark:bg-gray-800 rounded-2xl mb-5">
-      <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
-      </svg>
-    </div>
-    <p class="text-sm font-medium text-gray-600 dark:text-gray-400">No spaces yet</p>
-    <p class="mt-1.5 text-xs text-gray-400 dark:text-gray-500">Create a space to collaborate on files with others</p>
+{% if spaces | length == 0 %}
+<div class="flex flex-col items-center justify-center text-center px-6 py-20">
+  <div class="w-28 h-28 rounded-full bg-surface-2 flex items-center justify-center mb-6"><span class="ms text-muted" style="font-size:56px">workspaces</span></div>
+  <h2 class="text-lg">No spaces yet</h2>
+  <p class="mt-1.5 text-muted max-w-sm">Spaces are shared folders. Create one, then give people or groups access to it.</p>
+  <button type="button" class="btn-filled mt-6" data-dialog-open="create-space-dialog"><span class="ms">add</span>Create a space</button>
+</div>
+{% else %}
+<div class="px-2 sm:px-4 pb-4">
+  <div class="hidden md:grid grid-cols-[minmax(0,1fr)_120px_120px_150px_48px] items-center h-11 px-4 text-[13px] font-medium text-muted border-b border-outline">
+    <span>Name</span><span>Your access</span><span>Shared with</span><span>Created</span><span></span>
   </div>
-  {% else %}
-  <!-- Space cards grid -->
-  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+  <ul>
     {% for space in spaces %}
-      {% include "partials/space_card" %}
+    <li class="relative grid grid-cols-[minmax(0,1fr)_48px] md:grid-cols-[minmax(0,1fr)_120px_120px_150px_48px] items-center h-14 px-4 border-b border-outline/70 hover:bg-fg/[0.04]">
+      <a href="/spaces/{{ space.id }}" class="flex items-center gap-3 min-w-0 after:absolute after:inset-0">
+        <span class="ms ms-fill text-primary">workspaces</span>
+        <span class="truncate font-medium">{{ space.name }}</span>
+      </a>
+      <span class="hidden md:block">
+        <span class="{% if space.user_permission == 'admin' %}chip-primary{% elif space.user_permission == 'write' %}chip-warning{% else %}chip{% endif %}">
+          {% if space.user_permission == 'admin' %}Admin{% elif space.user_permission == 'write' %}Can edit{% else %}View only{% endif %}
+        </span>
+      </span>
+      <span class="hidden md:block text-muted text-[13px]">{% if space.grantee_count == 0 %}Only you{% else %}{{ space.grantee_count }} {% if space.grantee_count == 1 %}grant{% else %}grants{% endif %}{% endif %}</span>
+      <span class="hidden md:block text-muted text-[13px]"><time datetime="{{ space.created_at }}">{{ space.created_at }}</time></span>
+      <span class="relative z-10 flex justify-end">
+        {% if space.user_permission == 'admin' %}
+        <a href="/spaces/{{ space.id }}/settings" class="icon-btn-sm" title="Space settings" aria-label="Settings for {{ space.name }}"><span class="ms">settings</span></a>
+        {% endif %}
+      </span>
+    </li>
     {% endfor %}
-  </div>
-  {% endif %}
+  </ul>
 </div>
+{% endif %}
 
-<!-- Create Space modal -->
-<div id="create-space-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="create-space-modal-title">
-  <div class="card max-w-sm w-full mx-4 p-6 shadow-modal">
-    <div class="flex items-center gap-3 mb-5">
-      <div class="flex items-center justify-center w-9 h-9 bg-purple-50 dark:bg-purple-900/30 rounded-lg">
-        <svg class="w-5 h-5 text-purple-600 dark:text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
-      </div>
-      <h3 id="create-space-modal-title" class="text-lg font-semibold text-gray-900 dark:text-white">New Space</h3>
+<dialog id="create-space-dialog" class="dialog max-w-sm" aria-labelledby="create-space-title" data-new-dialog>
+  <form method="post" action="/spaces/create">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <h2 id="create-space-title" class="dialog-title">New space</h2>
+    <label for="space-name" class="field-label">Name</label>
+    <input type="text" id="space-name" name="name" class="field" required maxlength="100" placeholder="e.g. Family photos" autocomplete="off">
+    <p class="field-hint">You can share it with people and groups after it's created.</p>
+    <div class="dialog-actions">
+      <button type="button" class="btn-text" data-close>Cancel</button>
+      <button type="submit" class="btn-text">Create</button>
     </div>
-    <form method="post" action="/spaces/create" id="create-space-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <div class="mb-5">
-        <label for="space-name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Name</label>
-        <input
-          type="text" name="name" id="space-name" required
-          placeholder="e.g. Project Alpha"
-          maxlength="100"
-          class="input-field"
-        >
-      </div>
-      <div class="flex justify-end gap-3">
-        <button type="button" data-modal-close class="btn-secondary">Cancel</button>
-        <button type="submit" class="btn-primary">Create Space</button>
-      </div>
-    </form>
-  </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script src="/static/js/spaces.js?v=0.3.0" defer></script>
+  </form>
+</dialog>
 {% endblock %}

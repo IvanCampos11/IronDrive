@@ -8,7 +8,6 @@
 
 use rocket::http::Status;
 use rocket::local::asynchronous::Client;
-use rocket_dyn_templates::Template;
 
 use crate::config::AppConfig;
 use crate::db;
@@ -86,7 +85,7 @@ async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
         .manage(master_key)
         .manage(unlock_state)
         .manage(services::rate_limit::RateLimiter::new())
-        .attach(Template::fairing())
+        .attach(crate::templates_fairing())
         .attach(crate::security_headers_fairing())
         .attach(crate::cache_control_fairing())
         .mount("/", routes::all_routes())
@@ -361,4 +360,133 @@ async fn cache_control_static_assets() {
         "HTML pages should have no-cache, got: {}",
         cache
     );
+}
+
+/// Register + sign in through the page form + create the library.
+/// Returns the CSRF token for XHR calls.
+async fn signed_in_with_library(client: &Client) -> String {
+    let pw = alice_password();
+    let body = serde_json::json!({ "username": "alice", "email": "alice@example.com", "password": pw });
+    let r = client
+        .post("/api/v1/auth/register")
+        .header(rocket::http::ContentType::JSON)
+        .body(body.to_string())
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::Ok);
+
+    let csrf = get_csrf_token(client, "/login").await;
+    let r = client
+        .post("/login")
+        .header(rocket::http::ContentType::Form)
+        .body(format!("username=alice&password={pw}&csrf_token={csrf}"))
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::SeeOther);
+
+    let r = client
+        .post("/setup")
+        .header(rocket::http::ContentType::Form)
+        .body(format!("csrf_token={csrf}"))
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::SeeOther);
+    csrf
+}
+
+async fn xhr_json(client: &Client, csrf: &str, url: &str, body: serde_json::Value) -> (Status, serde_json::Value) {
+    let r = client
+        .post(url.to_string())
+        .header(rocket::http::ContentType::JSON)
+        .header(rocket::http::Header::new("X-CSRF-Token", csrf.to_string()))
+        .body(body.to_string())
+        .dispatch()
+        .await;
+    let status = r.status();
+    let text = r.into_string().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+async fn html_request_without_session_redirects_to_login() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+
+    let r = client
+        .get("/files")
+        .header(rocket::http::Accept::HTML)
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::SeeOther, "browsers should be sent to sign-in, not an error page");
+    assert_eq!(r.headers().get_one("Location"), Some("/login"));
+}
+
+#[tokio::test]
+async fn file_api_mkdir_and_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let csrf = signed_in_with_library(&client).await;
+
+    let (status, body) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "", "name": "Docs"})).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(body["path"], "Docs");
+
+    let (status, body) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "Docs", "name": "Inner"})).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(body["path"], "Docs/Inner");
+
+    // Duplicate name → 409 with a readable message.
+    let (status, body) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "", "name": "Docs"})).await;
+    assert_eq!(status, Status::Conflict);
+    assert!(body["error"].as_str().unwrap_or("").len() > 3);
+
+    // Names with slashes or a leading dot are rejected.
+    for bad in ["a/b", ".hidden", "  "] {
+        let (status, _) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "", "name": bad})).await;
+        assert_eq!(status, Status::BadRequest, "name {bad:?} should be rejected");
+    }
+
+    // Rename keeps the item in its parent folder.
+    let (status, body) = xhr_json(&client, &csrf, "/files/api/rename", serde_json::json!({"path": "Docs/Inner", "new_name": "Renamed"})).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(body["path"], "Docs/Renamed");
+
+    let page = client.get("/files/partial?path=Docs").dispatch().await.into_string().await.unwrap();
+    assert!(page.contains("data-name=\"Renamed\""), "renamed folder should be listed");
+
+    // Missing CSRF header is refused.
+    let r = client
+        .post("/files/api/mkdir")
+        .header(rocket::http::ContentType::JSON)
+        .body(serde_json::json!({"path": "", "name": "NoCsrf"}).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::Forbidden);
+}
+
+#[tokio::test]
+async fn bulk_errors_are_user_facing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let csrf = signed_in_with_library(&client).await;
+
+    let (status, body) = xhr_json(&client, &csrf, "/files/bulk-delete", serde_json::json!({"paths": ["nope/missing.txt"]})).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(body["deleted"], 0);
+    let err = body["errors"][0].as_str().unwrap();
+    assert!(err.starts_with("missing.txt: "), "error should name the file, got {err:?}");
+    assert!(!err.contains("internal"), "internal details must not leak: {err:?}");
+}
+
+#[tokio::test]
+async fn file_browser_page_renders_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    signed_in_with_library(&client).await;
+
+    let page = client.get("/files").dispatch().await.into_string().await.unwrap();
+    assert!(page.contains("id=\"file-browser-content\""));
+    assert!(page.contains("aria-current=\"page\"") && page.contains("My files"), "My files nav item should be active");
+    assert!(page.contains("/static/js/browser.js?v="), "assets should carry a cache-busting version");
+    assert!(!page.contains("/shares") && !page.contains("/trash"), "links to unimplemented pages must be gone");
 }

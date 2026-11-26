@@ -1,0 +1,10 @@
+{# Upload/download progress panel, bottom-right. Rows are rendered by core.js. #}
+<section id="transfers" class="fixed z-50 bottom-0 right-0 sm:right-6 w-full sm:w-[380px] bg-surface sm:rounded-t-xl shadow-3 border border-outline/60 overflow-hidden" hidden aria-label="Transfers">
+  <header class="flex items-center gap-1 h-14 pl-5 pr-2 bg-surface-2">
+    <h2 id="transfers-title" class="flex-1 text-[15px] font-medium truncate">Transfers</h2>
+    <button type="button" class="icon-btn" id="transfers-collapse" aria-label="Collapse" aria-expanded="true"><span class="ms">expand_more</span></button>
+    <button type="button" class="icon-btn" id="transfers-close" aria-label="Close"><span class="ms">close</span></button>
+  </header>
+  <div id="transfers-summary" class="hidden px-5 py-2 text-[13px] text-muted bg-surface-2/60 border-t border-outline/60"></div>
+  <ul id="transfers-list" class="max-h-72 overflow-y-auto"></ul>
+</section>

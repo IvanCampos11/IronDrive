@@ -86,7 +86,8 @@ impl AppError {
     }
 
     /// Client-safe description. Server errors return a generic message.
-    fn client_message(&self) -> String {
+    /// Message that is safe to show end users (no internal details).
+    pub fn client_message(&self) -> String {
         match self {
             AppError::NotFound => "The requested resource was not found.".into(),
             AppError::Unauthorized => "Authentication required.".into(),

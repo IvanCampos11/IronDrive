@@ -74,6 +74,12 @@ If you want Tailwind watch + server in one command:
 make dev
 ```
 
+Frontend notes:
+
+- Styles are Tailwind (`static/css/input.css` → `static/css/style.css`); rebuild with `make build-css`.
+- Fonts and icons are self-hosted. Icons are a subset of Material Symbols — if you use a new
+  icon name in a template or script, add it to `scripts/fetch-fonts.sh` and re-run it.
+
 ## Configuration
 
 See [.env.example](.env.example) for all settings.

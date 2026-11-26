@@ -234,6 +234,21 @@ impl TargetKind {
     }
 }
 
+/// Whether anything (file or folder) exists at `user_path` in a library or space.
+pub async fn entry_exists(
+    config: &AppConfig,
+    kind: TargetKind,
+    target_id: &str,
+    user_path: &str,
+) -> Result<bool, AppError> {
+    let root = match kind {
+        TargetKind::Library => library_root(config, target_id),
+        TargetKind::Space => space_root(config, target_id),
+    };
+    let path = safe_join_async(root, user_path.to_string()).await?;
+    Ok(fs::try_exists(&path).await.unwrap_or(false))
+}
+
 /// An existing encrypted file, resolved and ready to read — nothing decrypted yet.
 pub struct ReadableFile {
     pub path: PathBuf,

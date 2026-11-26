@@ -495,37 +495,25 @@ pub async fn files_page(
     let breadcrumbs = build_breadcrumbs(user_path);
 
     // Format entries for display
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
 
     let csrf_token = ensure_csrf_token(cookies);
 
     Ok(Template::render(
-        "files/browser",
+        "browser/page",
         context! {
             user: &user.0.username,
             csrf_token: csrf_token,
+            current_path: "files",
             chunk_size_bytes: config.chunk_size_bytes,
             max_parallel_chunks: config.max_parallel_chunks,
+            base_url: "/files",
+            root_name: "My files",
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
+            can_write: true,
+            is_admin: false,
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -559,31 +547,18 @@ pub async fn files_partial(
 
     let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
 
     Ok(Template::render(
-        "partials/file_list",
+        "browser/listing",
         context! {
+            base_url: "/files",
+            root_name: "My files",
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
+            can_write: true,
+            is_admin: false,
         },
     ))
 }
@@ -906,7 +881,7 @@ pub async fn bulk_delete(
     for path in &data.paths {
         match fs_service::delete_entry(config.inner(), &lib.id, path).await {
             Ok(_) => deleted += 1,
-            Err(e) => errors.push(format!("{}: {}", path, e)),
+            Err(e) => errors.push(bulk_error(path, &e)),
         }
     }
 
@@ -954,7 +929,7 @@ pub async fn bulk_move(
         let new_path = join_dir_and_name(&target_dir, &name);
         match fs_service::rename_entry(config.inner(), &lib.id, old_path, &new_path).await {
             Ok(_) => moved += 1,
-            Err(e) => errors.push(format!("{}: {}", old_path, e)),
+            Err(e) => errors.push(bulk_error(old_path, &e)),
         }
     }
 
@@ -1474,6 +1449,7 @@ pub async fn usage_page(
         "files/usage",
         context! {
             user: &user.0.username,
+            current_path: "usage",
             csrf_token: ensure_csrf_token(cookies),
             disk_bytes: usage.disk_bytes,
             disk_bytes_fmt: format_bytes(usage.disk_bytes),
@@ -1505,6 +1481,9 @@ pub async fn settings_page(
     Ok(Template::render(
         "settings/index",
         context! {
+            user: &user.0.username,
+            current_path: "settings",
+            version: env!("CARGO_PKG_VERSION"),
             user_id: &user.0.id,
             username: &user.0.username,
             csrf_token: ensure_csrf_token(cookies),
@@ -1542,7 +1521,7 @@ pub async fn groups_page(
                 "name": g.group.name,
                 "description": g.group.description,
                 "created_by": g.group.created_by,
-                "created_at": format_timestamp(&g.group.created_at),
+                "created_at": &g.group.created_at,
                 "member_count": g.member_count,
                 "user_role": g.user_role,
             })
@@ -1636,7 +1615,7 @@ pub async fn group_detail_page(
                 "username": m.username,
                 "email": m.email,
                 "role": m.role,
-                "joined_at": format_timestamp(&m.joined_at),
+                "joined_at": &m.joined_at,
             })
         })
         .collect();
@@ -1652,7 +1631,7 @@ pub async fn group_detail_page(
                 "name": group_meta.group.name,
                 "description": group_meta.group.description,
                 "created_by": group_meta.group.created_by,
-                "created_at": format_timestamp(&group_meta.group.created_at),
+                "created_at": &group_meta.group.created_at,
             }),
             group_id: &group_meta.group.id,
             user_role: &group_meta.user_role,
@@ -1853,22 +1832,14 @@ pub async fn group_update_member_role_submit(
 // ---------------------------------------------------------------------------
 
 fn build_breadcrumbs(path: &str) -> Vec<serde_json::Value> {
-    let mut crumbs = vec![serde_json::json!({ "name": "Files", "path": "" })];
-    if !path.is_empty() {
-        let mut accumulated = String::new();
-        for segment in path.split('/') {
-            if segment.is_empty() {
-                continue;
-            }
-            if !accumulated.is_empty() {
-                accumulated.push('/');
-            }
-            accumulated.push_str(segment);
-            crumbs.push(serde_json::json!({
-                "name": segment,
-                "path": accumulated.clone(),
-            }));
+    let mut crumbs = Vec::new();
+    let mut accumulated = String::new();
+    for segment in path.split('/').filter(|s| !s.is_empty()) {
+        if !accumulated.is_empty() {
+            accumulated.push('/');
         }
+        accumulated.push_str(segment);
+        crumbs.push(serde_json::json!({ "name": segment, "path": accumulated.clone() }));
     }
     crumbs
 }
@@ -1897,7 +1868,8 @@ fn join_dir_and_name(dir: &str, name: &str) -> String {
 }
 
 fn format_timestamp(ts: &str) -> String {
-    // ISO-8601 → "Mar 19, 2026 14:30"
+    // ISO-8601 → "Mar 19, 2026 14:30" (UTC; the browser re-renders it in local time)
+    let ts = ts.trim_end_matches('Z');
     match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
         Ok(dt) => dt.format("%b %d, %Y %H:%M").to_string(),
         Err(_) => match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
@@ -1934,30 +1906,185 @@ fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
     }
 }
 
+/// Material Symbols glyph for a `file_icon` kind.
+fn icon_glyph(kind: &str) -> &'static str {
+    match kind {
+        "folder" => "folder",
+        "image" => "image",
+        "video" => "movie",
+        "audio" => "music_note",
+        "pdf" => "picture_as_pdf",
+        "archive" => "folder_zip",
+        "code" => "code",
+        "text" => "description",
+        "document" => "article",
+        "spreadsheet" => "table_chart",
+        "presentation" => "slideshow",
+        _ => "draft",
+    }
+}
+
+/// Template view-model for one directory entry (see templates/browser/item).
+fn entry_view(e: &fs_service::FsEntry) -> serde_json::Value {
+    let icon = file_icon(&e.name, e.is_dir, e.mime_type.as_deref());
+    serde_json::json!({
+        "name": e.name,
+        "path": e.path,
+        "is_dir": e.is_dir,
+        "size": e.size.map(format_bytes),
+        "raw_size": e.size.unwrap_or(0),
+        "modified": e.modified.as_deref().map(format_timestamp),
+        "raw_modified": e.modified,
+        "icon": icon,
+        "glyph": icon_glyph(icon),
+    })
+}
+
+/// Validate a single file/folder name typed by the user.
+fn validate_entry_name(name: &str) -> Result<&str, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::Validation("Name can't be empty.".into()));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(AppError::Validation("Names can't contain slashes.".into()));
+    }
+    if name.starts_with('.') {
+        return Err(AppError::Validation("Names can't start with a dot.".into()));
+    }
+    if name.len() > 255 {
+        return Err(AppError::Validation("That name is too long.".into()));
+    }
+    Ok(name)
+}
+
+/// JSON error body for XHR endpoints: `{"error": "<user-facing message>"}`.
+fn json_error(e: AppError) -> (Status, rocket::serde::json::Json<serde_json::Value>) {
+    if matches!(e, AppError::Internal(_) | AppError::Sqlx(_) | AppError::Io(_)) {
+        tracing::error!(error = %e, "File operation failed");
+    }
+    (
+        e.status(),
+        rocket::serde::json::Json(serde_json::json!({ "error": e.client_message() })),
+    )
+}
+
+/// One line per failed item in bulk responses, e.g. `report.pdf: Not found.`
+fn bulk_error(path: &str, e: &AppError) -> String {
+    format!("{}: {}", file_name_from_path(path), e.client_message())
+}
+
+/// `create_directory` is idempotent (mkdir -p); the UI wants "name taken" instead.
+async fn ensure_name_free(
+    config: &AppConfig,
+    kind: fs_service::TargetKind,
+    target_id: &str,
+    path: &str,
+) -> Result<(), (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    if fs_service::entry_exists(config, kind, target_id, path)
+        .await
+        .map_err(json_error)?
+    {
+        return Err(json_error(AppError::Conflict(format!(
+            "“{}” already exists here.",
+            file_name_from_path(path)
+        ))));
+    }
+    Ok(())
+}
+
+type JsonResult = Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+>;
+
+#[derive(serde::Deserialize)]
+pub struct MkdirRequest {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct RenameRequest {
+    pub path: String,
+    pub new_name: String,
+}
+
+/// POST /files/api/mkdir — XHR: create a folder, returns `{"path"}`.
+#[post("/files/api/mkdir", data = "<body>")]
+pub async fn api_mkdir(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<MkdirRequest>,
+) -> JsonResult {
+    let lib = require_library(pool.inner(), &user.0.id).await.map_err(json_error)?;
+    let name = validate_entry_name(&body.name).map_err(json_error)?;
+    let full = join_dir_and_name(&normalize_dir_path(&body.path), name);
+    ensure_name_free(config.inner(), fs_service::TargetKind::Library, &lib.id, &full).await?;
+    fs_service::create_directory(config.inner(), &lib.id, &full)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(serde_json::json!({ "path": full })))
+}
+
+/// POST /files/api/rename — XHR: rename in place, returns `{"path"}`.
+#[post("/files/api/rename", data = "<body>")]
+pub async fn api_rename(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<RenameRequest>,
+) -> JsonResult {
+    let lib = require_library(pool.inner(), &user.0.id).await.map_err(json_error)?;
+    let name = validate_entry_name(&body.new_name).map_err(json_error)?;
+    let new_path = join_dir_and_name(&parent_path(&body.path), name);
+    fs_service::rename_entry(config.inner(), &lib.id, &body.path, &new_path)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(serde_json::json!({ "path": new_path })))
+}
+
+/// POST /spaces/<space_id>/api/mkdir — XHR: create a folder in a space.
+#[post("/spaces/<space_id>/api/mkdir", data = "<body>")]
+pub async fn space_api_mkdir(
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    body: rocket::serde::json::Json<MkdirRequest>,
+) -> JsonResult {
+    let name = validate_entry_name(&body.name).map_err(json_error)?;
+    let full = join_dir_and_name(&normalize_dir_path(&body.path), name);
+    ensure_name_free(config.inner(), fs_service::TargetKind::Space, space_id, &full).await?;
+    fs_service::create_space_directory(config.inner(), space_id, &full)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(serde_json::json!({ "path": full })))
+}
+
+/// POST /spaces/<space_id>/api/rename — XHR: rename an entry in a space.
+#[post("/spaces/<space_id>/api/rename", data = "<body>")]
+pub async fn space_api_rename(
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    body: rocket::serde::json::Json<RenameRequest>,
+) -> JsonResult {
+    let name = validate_entry_name(&body.new_name).map_err(json_error)?;
+    let new_path = join_dir_and_name(&parent_path(&body.path), name);
+    fs_service::rename_space_entry(config.inner(), space_id, &body.path, &new_path)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(serde_json::json!({ "path": new_path })))
+}
+
 // ---------------------------------------------------------------------------
 // Spaces — page routes
 // ---------------------------------------------------------------------------
-
-fn build_space_breadcrumbs(space_name: &str, path: &str) -> Vec<serde_json::Value> {
-    let mut crumbs = vec![serde_json::json!({ "name": space_name, "path": "" })];
-    if !path.is_empty() {
-        let mut accumulated = String::new();
-        for segment in path.split('/') {
-            if segment.is_empty() {
-                continue;
-            }
-            if !accumulated.is_empty() {
-                accumulated.push('/');
-            }
-            accumulated.push_str(segment);
-            crumbs.push(serde_json::json!({
-                "name": segment,
-                "path": accumulated.clone(),
-            }));
-        }
-    }
-    crumbs
-}
 
 /// GET /spaces — list all spaces the user can access
 #[get("/spaces")]
@@ -1979,7 +2106,7 @@ pub async fn spaces_page(
                 "name": s.space.name,
                 "owner_type": s.space.owner_type,
                 "owner_id": s.space.owner_id,
-                "created_at": format_timestamp(&s.space.created_at),
+                "created_at": &s.space.created_at,
                 "grantee_count": s.grantee_count,
                 "user_permission": s.user_permission,
             })
@@ -2064,25 +2191,9 @@ pub async fn space_browser_page(
     .await
     .unwrap_or_default();
 
-    let breadcrumbs = build_space_breadcrumbs(&reader.space.space.name, user_path);
+    let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
@@ -2091,21 +2202,21 @@ pub async fn space_browser_page(
     let csrf_token = ensure_csrf_token(cookies);
 
     Template::render(
-        "spaces/browser",
+        "browser/page",
         context! {
             user: &reader.user.username,
             csrf_token: csrf_token,
+            current_path: "spaces",
             chunk_size_bytes: config.chunk_size_bytes,
             max_parallel_chunks: config.max_parallel_chunks,
+            base_url: format!("/spaces/{space_id}"),
+            root_name: &reader.space.space.name,
             space_id: space_id,
-            space_name: &reader.space.space.name,
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
             can_write: can_write,
             is_admin: is_admin,
-            current_path: "spaces",
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -2133,38 +2244,23 @@ pub async fn space_browser_partial(
     .await
     .unwrap_or_default();
 
-    let breadcrumbs = build_space_breadcrumbs(&reader.space.space.name, user_path);
+    let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
     let is_admin = reader.space.user_permission == "admin";
 
     Ok(Template::render(
-        "partials/space_file_list",
+        "browser/listing",
         context! {
+            base_url: format!("/spaces/{space_id}"),
+            root_name: &reader.space.space.name,
             space_id: space_id,
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
             can_write: can_write,
             is_admin: is_admin,
         },
@@ -2276,7 +2372,7 @@ pub async fn space_settings_page(
                 "grantee_id": a.grantee_id,
                 "grantee_name": a.grantee_name,
                 "permission": a.permission,
-                "granted_at": format_timestamp(&a.granted_at),
+                "granted_at": &a.granted_at,
             })
         })
         .collect();
@@ -2292,7 +2388,7 @@ pub async fn space_settings_page(
                 "name": admin.space.space.name,
                 "owner_type": admin.space.space.owner_type,
                 "owner_id": admin.space.space.owner_id,
-                "created_at": format_timestamp(&admin.space.space.created_at),
+                "created_at": &admin.space.space.created_at,
                 "grantee_count": admin.space.grantee_count,
             }),
             space_id: space_id,
@@ -2612,13 +2708,19 @@ pub async fn space_bulk_delete(
     space_id: &str,
     data: rocket::serde::json::Json<BulkDeleteRequest>,
 ) -> rocket::serde::json::Json<serde_json::Value> {
+    if data.paths.is_empty() || data.paths.len() > 500 {
+        return rocket::serde::json::Json(
+            serde_json::json!({"deleted": 0, "errors": ["Invalid number of paths (1–500)."]}),
+        );
+    }
+
     let mut deleted = 0u64;
     let mut errors: Vec<String> = Vec::new();
 
     for path in &data.paths {
         match fs_service::delete_space_entry(config.inner(), space_id, path).await {
             Ok(()) => deleted += 1,
-            Err(e) => errors.push(format!("{}: {}", path, e)),
+            Err(e) => errors.push(bulk_error(path, &e)),
         }
     }
 
@@ -2650,7 +2752,7 @@ pub async fn space_bulk_move(
         let new_path = join_dir_and_name(&target_dir, &name);
         match fs_service::rename_space_entry(config.inner(), space_id, path, &new_path).await {
             Ok(_) => moved += 1,
-            Err(e) => errors.push(format!("{}: {}", path, e)),
+            Err(e) => errors.push(bulk_error(path, &e)),
         }
     }
 
@@ -3058,6 +3160,8 @@ pub fn routes() -> Vec<Route> {
         delete_submit,
         bulk_delete,
         bulk_move,
+        api_mkdir,
+        api_rename,
         upload_file,
         chunked_init_upload,
         chunked_receive_chunk,
@@ -3095,6 +3199,8 @@ pub fn routes() -> Vec<Route> {
         space_delete_entry_submit,
         space_bulk_delete,
         space_bulk_move,
+        space_api_mkdir,
+        space_api_rename,
         space_upload_file,
         space_download_file,
         space_chunked_init_upload,

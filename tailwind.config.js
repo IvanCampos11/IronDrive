@@ -1,34 +1,46 @@
 /** @type {import('tailwindcss').Config} */
+
+// Colors are CSS variables (see static/css/input.css) so light/dark themes are
+// a single variable swap instead of `dark:` variants on every element.
+const v = (name) => `rgb(var(--c-${name}) / <alpha-value>)`;
+
 module.exports = {
   content: ["./templates/**/*.tera", "./static/js/**/*.js"],
-  safelist: ["sm:ml-16", "w-16", "px-0"],
   darkMode: "class",
   theme: {
     extend: {
+      colors: {
+        bg: v("bg"),
+        surface: v("surface"),
+        "surface-2": v("surface-2"),
+        "surface-3": v("surface-3"),
+        fg: v("fg"),
+        muted: v("muted"),
+        subtle: v("subtle"),
+        outline: v("outline"),
+        primary: v("primary"),
+        "on-primary": v("on-primary"),
+        "primary-container": v("primary-container"),
+        "on-primary-container": v("on-primary-container"),
+        danger: v("danger"),
+        "danger-container": v("danger-container"),
+        "on-danger-container": v("on-danger-container"),
+        success: v("success"),
+        warning: v("warning"),
+        inverse: v("inverse"),
+        "on-inverse": v("on-inverse"),
+      },
       fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ["Roboto", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       boxShadow: {
-        'card': '0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04)',
-        'card-hover': '0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.05)',
-        'elevated': '0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.04)',
-        'modal': '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-        'nav': '0 1px 2px 0 rgb(0 0 0 / 0.03)',
+        1: "0 1px 2px 0 rgb(0 0 0 / 0.12), 0 1px 3px 1px rgb(0 0 0 / 0.06)",
+        2: "0 1px 2px 0 rgb(0 0 0 / 0.15), 0 2px 6px 2px rgb(0 0 0 / 0.08)",
+        3: "0 4px 8px 3px rgb(0 0 0 / 0.10), 0 1px 3px 0 rgb(0 0 0 / 0.15)",
       },
-      animation: {
-        'fade-in': 'fadeIn 0.2s ease-out',
-        'slide-up': 'slideUp 0.25s ease-out',
-      },
-      keyframes: {
-        fadeIn: {
-          '0%': { opacity: '0' },
-          '100%': { opacity: '1' },
-        },
-        slideUp: {
-          '0%': { opacity: '0', transform: 'translateY(8px)' },
-          '100%': { opacity: '1', transform: 'translateY(0)' },
-        },
+      borderRadius: {
+        "4xl": "1.75rem",
       },
     },
   },

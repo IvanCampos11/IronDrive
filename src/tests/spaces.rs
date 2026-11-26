@@ -9,7 +9,6 @@
 
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
-use rocket_dyn_templates::Template;
 use serde_json::Value;
 
 use crate::config::AppConfig;
@@ -109,7 +108,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
                 crate::catch_500,
             ],
         )
-        .attach(Template::fairing())
+        .attach(crate::templates_fairing())
         .attach(crate::security_headers_fairing())
         .attach(crate::cache_control_fairing());
 
@@ -578,7 +577,7 @@ async fn spaces_page_renders_for_authenticated_user() {
     let body = r.into_string().await.unwrap();
     assert!(body.contains("My Space"), "Space name should appear on page");
     assert!(
-        body.contains("Create Space"),
+        body.contains("New space"),
         "Create space button should be present"
     );
 }
@@ -642,11 +641,11 @@ async fn space_settings_page_renders() {
         "Space name should appear on settings page"
     );
     assert!(
-        body.contains("Rename Space"),
+        body.contains("/settings/rename"),
         "Admin should see rename section"
     );
     assert!(
-        body.contains("Danger Zone"),
+        body.contains("/settings/delete"),
         "Admin should see danger zone"
     );
 }
