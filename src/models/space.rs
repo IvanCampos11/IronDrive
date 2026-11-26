@@ -36,6 +36,8 @@ pub struct CreateSpaceParams {
     pub owner_id: String,
     pub encryption_mode: String,
     pub encrypted_data_key: Vec<u8>,
+    /// KDF salt for password-protected spaces.
+    pub salt: Option<Vec<u8>>,
 }
 
 pub struct UpdateSpaceParams {
@@ -84,8 +86,8 @@ impl Space {
         let id = Uuid::new_v4().to_string();
 
         sqlx::query(
-            "INSERT INTO spaces (id, name, owner_type, owner_id, encryption_mode, encrypted_data_key)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO spaces (id, name, owner_type, owner_id, encryption_mode, encrypted_data_key, salt)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&params.name)
@@ -93,6 +95,7 @@ impl Space {
         .bind(&params.owner_id)
         .bind(&params.encryption_mode)
         .bind(&params.encrypted_data_key)
+        .bind(&params.salt)
         .execute(pool)
         .await
         .map_err(AppError::Sqlx)?;
@@ -631,6 +634,7 @@ mod tests {
                 owner_id: owner_id.into(),
                 encryption_mode: "server".into(),
                 encrypted_data_key: dummy_key(),
+                salt: None,
             },
         )
         .await
@@ -863,6 +867,7 @@ mod tests {
                 owner_id: group.id.clone(),
                 encryption_mode: "server".into(),
                 encrypted_data_key: dummy_key(),
+                salt: None,
             },
         )
         .await

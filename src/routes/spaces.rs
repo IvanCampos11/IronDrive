@@ -20,7 +20,7 @@ use crate::services::crypto_service::MasterKey;
 use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::space_service;
 use crate::services::unlock_state::UnlockState;
-use crate::services::{chunk_service, quota_service, trash_service};
+use crate::services::{chunk_service, key_service, quota_service, trash_service};
 use crate::utils::format_bytes;
 
 // Request and response DTOs.
@@ -33,6 +33,10 @@ pub struct CreateSpaceRequest {
     pub owner_type: String,
     /// Required when `owner_type` is `"group"` — the group ID.
     pub group_id: Option<String>,
+    /// Set to make the space password-protected: every member must enter it.
+    /// Omit for standard protection, which follows your account's tier.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 fn default_owner_type() -> String {
@@ -200,38 +204,32 @@ pub async fn create_space(
     user: SetupComplete,
     body: Json<CreateSpaceRequest>,
 ) -> Result<Json<SpaceResponse>, AppError> {
-    let result = match body.owner_type.as_str() {
+    let (owner_type, owner_id) = match body.owner_type.as_str() {
         "group" => {
             let group_id = body.group_id.as_deref().ok_or_else(|| {
                 AppError::Validation("group_id is required when owner_type is 'group'.".into())
             })?;
-            space_service::create_group_space(
-                pool.inner(),
-                config.inner(),
-                master_key.inner(),
-                unlock_state.inner(),
-                group_id,
-                &body.name,
-            )
-            .await?
+            ("group", group_id)
         }
-        "user" | "" => {
-            space_service::create_space(
-                pool.inner(),
-                config.inner(),
-                master_key.inner(),
-                unlock_state.inner(),
-                &user.0.id,
-                &body.name,
-            )
-            .await?
-        }
+        "user" | "" => ("user", user.0.id.as_str()),
         other => {
             return Err(AppError::Validation(format!(
                 "Invalid owner_type '{other}'. Must be 'user' or 'group'."
             )));
         }
     };
+    let result = space_service::create_space_with(
+        pool.inner(),
+        config.inner(),
+        master_key.inner(),
+        unlock_state.inner(),
+        owner_type,
+        owner_id,
+        &user.0.id,
+        &body.name,
+        body.password.as_deref().filter(|p| !p.is_empty()),
+    )
+    .await?;
 
     Ok(Json(space_response(&result)))
 }
@@ -332,6 +330,7 @@ pub async fn list_access(
 #[post("/api/v1/spaces/<_id>/access/user", format = "json", data = "<body>")]
 pub async fn grant_user_access(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     _id: &str,
     admin: SpaceAdmin,
     body: Json<GrantUserAccessRequest>,
@@ -344,6 +343,7 @@ pub async fn grant_user_access(
         &body.permission,
     )
     .await?;
+    key_service::resync_space(pool.inner(), unlock_state.inner(), &admin.space.space.id).await;
 
     Ok(Json(AccessResponse {
         space_id: access.space_id,
@@ -358,6 +358,7 @@ pub async fn grant_user_access(
 #[post("/api/v1/spaces/<_id>/access/group", format = "json", data = "<body>")]
 pub async fn grant_group_access(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     _id: &str,
     admin: SpaceAdmin,
     body: Json<GrantGroupAccessRequest>,
@@ -370,6 +371,7 @@ pub async fn grant_group_access(
         &body.permission,
     )
     .await?;
+    key_service::resync_space(pool.inner(), unlock_state.inner(), &admin.space.space.id).await;
 
     Ok(Json(AccessResponse {
         space_id: access.space_id,
@@ -417,6 +419,7 @@ pub async fn update_access(
 #[delete("/api/v1/spaces/<_id>/access/<grantee_type>/<grantee_id>")]
 pub async fn revoke_access(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     _id: &str,
     grantee_type: &str,
     grantee_id: &str,
@@ -430,6 +433,7 @@ pub async fn revoke_access(
         grantee_id,
     )
     .await?;
+    key_service::resync_space(pool.inner(), unlock_state.inner(), &admin.space.space.id).await;
 
     Ok(Json(MessageResponse {
         message: "Access revoked successfully.".into(),

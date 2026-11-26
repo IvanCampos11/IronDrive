@@ -11,6 +11,7 @@ use crate::services::crypto_service::{
     generate_data_key, unwrap_data_key, wrap_data_key, MasterKey,
 };
 use crate::services::unlock_state::UnlockState;
+use crate::services::{key_crypto, key_service};
 
 const META_FILENAME: &str = ".irondrive.meta";
 
@@ -33,6 +34,46 @@ pub async fn setup_library(
     unlock_state: &UnlockState,
     user_id: &str,
 ) -> Result<SetupLibraryResult, AppError> {
+    setup_library_with(
+        pool,
+        config,
+        master_key,
+        unlock_state,
+        user_id,
+        &EncryptionChoice::server(),
+    )
+    .await
+}
+
+/// How a new account protects its keys. `password` unlocks them: the login
+/// password in `single` mode, a separate encryption password otherwise.
+pub struct EncryptionChoice<'a> {
+    pub tier: &'a str,
+    pub password_mode: &'a str,
+    pub password: Option<&'a str>,
+}
+
+impl EncryptionChoice<'static> {
+    pub fn server() -> Self {
+        Self {
+            tier: key_service::TIER_SERVER,
+            password_mode: key_service::MODE_SINGLE,
+            password: None,
+        }
+    }
+}
+
+/// Create the user's key pair and personal library with the chosen tier.
+pub async fn setup_library_with(
+    pool: &DbPool,
+    config: &AppConfig,
+    master_key: &MasterKey,
+    unlock_state: &UnlockState,
+    user_id: &str,
+    choice: &EncryptionChoice<'_>,
+) -> Result<SetupLibraryResult, AppError> {
+    let tier = key_service::validate_tier(choice.tier)?;
+    key_service::validate_password_mode(choice.password_mode)?;
     let user = User::find_by_id(pool, user_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -53,21 +94,50 @@ pub async fn setup_library(
         ));
     }
 
-    let data_key = generate_data_key();
-    let encrypted_data_key = wrap_data_key(master_key, &data_key)?;
+    // A key pair left behind by an earlier setup attempt that failed later on.
+    sqlx::query("DELETE FROM user_keys WHERE user_id = ?")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    let secret = key_service::create_user_keys(
+        pool,
+        master_key,
+        user_id,
+        tier,
+        choice.password_mode,
+        choice.password,
+    )
+    .await?;
 
-    let library = PersonalLibrary::create(
+    let data_key = generate_data_key();
+    let encrypted_data_key = if tier == key_service::TIER_SERVER {
+        wrap_data_key(master_key, &data_key)?
+    } else {
+        key_crypto::seal(&secret.public_key(), data_key.as_bytes())?
+    };
+
+    let library = match PersonalLibrary::create(
         pool,
         CreateLibraryParams {
             user_id: user_id.to_owned(),
-            encryption_mode: "server".into(),
+            encryption_mode: tier.into(),
             encrypted_data_key,
             salt: None,
             verify_blob: None,
             recovery_blob: None,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = sqlx::query("DELETE FROM user_keys WHERE user_id = ?")
+                .bind(user_id)
+                .execute(pool)
+                .await;
+            return Err(e);
+        }
+    };
 
     // Create library dir on disk. If this fails, roll back the DB row.
     let lib_dir = library_dir(config, &library.id);
@@ -89,6 +159,7 @@ pub async fn setup_library(
     }
 
     unlock_state.insert_library_key(&library.id, &data_key);
+    unlock_state.insert_user_secret(user_id, &secret);
 
     // Mark user setup as complete. If this fails, roll back prior state
     // (DB row, on-disk directory, and unlock-state key) on a best-effort basis.
@@ -131,10 +202,17 @@ pub async fn setup_library(
         return Err(e);
     }
 
+    // Spaces shared with this person before they finished setup can now be
+    // sealed for them (if someone has them open).
+    if let Err(e) = key_service::fulfil_pending_for_user(pool, unlock_state, user_id).await {
+        tracing::warn!(user_id = %user_id, error = %e, "Could not seal pending space keys");
+    }
+
     tracing::info!(
         library_id = %library.id,
         user_id = %user_id,
-        "Personal library created (server mode)"
+        tier = %tier,
+        "Personal library created"
     );
 
     Ok(SetupLibraryResult { library })

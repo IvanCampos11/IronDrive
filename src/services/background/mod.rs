@@ -21,13 +21,16 @@ impl BackgroundRunner {
     /// `UnlockState` uses `Arc<DashMap>` internally, the clone shares
     /// the same live key store as the request handlers.
     pub fn start(pool: SqlitePool, config: AppConfig, unlock_state: UnlockState) {
+        tokio::spawn(session_cleanup::session_cleanup_loop(
+            pool.clone(),
+            unlock_state.clone(),
+        ));
+
         tokio::spawn(integrity_scan::integrity_scan_loop(
             pool.clone(),
             config.clone(),
             unlock_state,
         ));
-
-        tokio::spawn(session_cleanup::session_cleanup_loop(pool.clone()));
 
         tokio::spawn(chunk_cleanup::chunk_cleanup_loop(
             pool.clone(),

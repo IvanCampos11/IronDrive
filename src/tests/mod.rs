@@ -1,4 +1,5 @@
 mod chunked_transfers;
+mod encryption;
 mod groups;
 mod integrity;
 mod library_fs;

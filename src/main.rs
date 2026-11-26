@@ -396,6 +396,21 @@ async fn setup_database(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket
         "Server-mode space keys loaded into UnlockState"
     );
 
+    let created = services::key_service::ensure_keys_for_existing_users(&pool, &master_key)
+        .await
+        .expect("Failed to create key pairs for existing accounts");
+    if created > 0 {
+        tracing::info!(
+            count = created,
+            "Created server-tier key pairs for existing accounts"
+        );
+    }
+    let users_unlocked =
+        services::key_service::unlock_server_tier_users(&pool, &master_key, &unlock_state)
+            .await
+            .expect("Failed to unlock server-tier accounts");
+    tracing::info!(count = users_unlocked, "Server-tier accounts unlocked");
+
     // Clean up expired chunked upload sessions from previous runs.
     if let Err(e) = services::chunk_service::cleanup_expired_uploads(&pool, cfg).await {
         tracing::warn!(error = %e, "Failed to clean up expired chunked uploads on startup");

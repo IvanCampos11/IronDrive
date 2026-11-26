@@ -251,7 +251,7 @@ fn normalize_email(email: &str) -> Result<String, AppError> {
     Ok(normalized)
 }
 
-fn validate_password(password: &str) -> Result<(), AppError> {
+pub fn validate_password(password: &str) -> Result<(), AppError> {
     if password.len() < PASSWORD_MIN_LEN {
         return Err(AppError::Validation(format!(
             "Password must be at least {PASSWORD_MIN_LEN} characters."
@@ -267,6 +267,39 @@ fn validate_password(password: &str) -> Result<(), AppError> {
 }
 
 /// Returns `true` if no users exist yet.
+/// Check a user's login password. A mismatch is [`AppError::BadPassphrase`].
+pub async fn verify_user_password(
+    pool: &DbPool,
+    user_id: &str,
+    password: &str,
+) -> Result<(), AppError> {
+    let (hash,): (String,) = sqlx::query_as("SELECT password_hash FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let password = password.to_owned();
+    let ok = tokio::task::spawn_blocking(move || crypto::verify_password(&password, &hash))
+        .await
+        .map_err(|e| AppError::Internal(format!("Password check task failed: {e}")))?
+        .map_err(AppError::Internal)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::BadPassphrase)
+    }
+}
+
+/// Hash a new login password (validated) for storing.
+pub async fn hash_new_password(password: &str) -> Result<String, AppError> {
+    validate_password(password)?;
+    let password = password.to_owned();
+    tokio::task::spawn_blocking(move || crypto::hash_password(&password))
+        .await
+        .map_err(|e| AppError::Internal(format!("Password hash task failed: {e}")))?
+        .map_err(AppError::Internal)
+}
+
 async fn is_first_user(pool: &DbPool) -> Result<bool, AppError> {
     let row: (bool,) = sqlx::query_as("SELECT NOT EXISTS (SELECT 1 FROM users)")
         .fetch_one(pool)

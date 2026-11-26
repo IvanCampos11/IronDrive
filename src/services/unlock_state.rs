@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use zeroize::Zeroize;
 
 use crate::services::crypto_service::DataKey;
+use crate::services::key_crypto::UserSecret;
 
 /// Holds decrypted data keys for currently unlocked libraries and spaces.
 ///
@@ -18,6 +19,12 @@ use crate::services::crypto_service::DataKey;
 pub struct UnlockState {
     libraries: Arc<DashMap<String, ZeroVec>>,
     spaces: Arc<DashMap<String, ZeroVec>>,
+    /// Unlocked users' private keys, by user ID.
+    users: Arc<DashMap<String, ZeroVec>>,
+    /// Who has typed the password for which password-protected space:
+    /// `(space_id, user_id)`. Having the space key loaded isn't enough for
+    /// those spaces; each member must unlock it themselves.
+    space_unlocks: Arc<DashMap<(String, String), ()>>,
 }
 
 /// A `Vec<u8>` wrapper that zeroizes its contents on drop.
@@ -35,7 +42,79 @@ impl UnlockState {
         Self {
             libraries: Arc::new(DashMap::new()),
             spaces: Arc::new(DashMap::new()),
+            users: Arc::new(DashMap::new()),
+            space_unlocks: Arc::new(DashMap::new()),
         }
+    }
+
+    // -- User private keys ----------------------------------------------------
+
+    pub fn insert_user_secret(&self, user_id: &str, secret: &UserSecret) {
+        self.users
+            .insert(user_id.to_owned(), ZeroVec(secret.as_bytes().to_vec()));
+    }
+
+    pub fn get_user_secret(&self, user_id: &str) -> Option<UserSecret> {
+        self.users.get(user_id).map(|e| {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&e.value().0);
+            UserSecret::from_bytes(bytes)
+        })
+    }
+
+    pub fn remove_user_secret(&self, user_id: &str) -> bool {
+        self.users.remove(user_id).is_some()
+    }
+
+    pub fn is_user_unlocked(&self, user_id: &str) -> bool {
+        self.users.contains_key(user_id)
+    }
+
+    pub fn unlocked_user_ids(&self) -> Vec<String> {
+        self.users.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Users who currently have at least one password-protected space open.
+    pub fn users_with_space_unlocks(&self) -> Vec<String> {
+        self.space_unlocks
+            .iter()
+            .map(|e| e.key().1.clone())
+            .collect()
+    }
+
+    // -- Per-user unlocks of password-protected spaces ------------------------
+
+    pub fn mark_space_unlocked_by(&self, space_id: &str, user_id: &str) {
+        self.space_unlocks
+            .insert((space_id.to_owned(), user_id.to_owned()), ());
+    }
+
+    pub fn has_unlocked_space(&self, space_id: &str, user_id: &str) -> bool {
+        self.space_unlocks
+            .contains_key(&(space_id.to_owned(), user_id.to_owned()))
+    }
+
+    /// Forget that `user_id` unlocked `space_id`. Returns `true` if nobody
+    /// else has it unlocked any more (so the caller can drop the key).
+    pub fn unmark_space_unlocked_by(&self, space_id: &str, user_id: &str) -> bool {
+        self.space_unlocks
+            .remove(&(space_id.to_owned(), user_id.to_owned()));
+        !self.space_unlocks.iter().any(|e| e.key().0 == space_id)
+    }
+
+    /// Password-protected spaces `user_id` currently has unlocked.
+    pub fn spaces_unlocked_by(&self, user_id: &str) -> Vec<String> {
+        self.space_unlocks
+            .iter()
+            .filter(|e| e.key().1 == user_id)
+            .map(|e| e.key().0.clone())
+            .collect()
+    }
+
+    /// Forget every member's unlock of a space (password changed, space
+    /// deleted, protection changed).
+    pub fn clear_space_unlocks(&self, space_id: &str) {
+        self.space_unlocks.retain(|k, _| k.0 != space_id);
     }
 
     // -- Library keys ---------------------------------------------------------
@@ -96,6 +175,8 @@ impl UnlockState {
     pub fn clear_all(&self) {
         self.libraries.clear();
         self.spaces.clear();
+        self.users.clear();
+        self.space_unlocks.clear();
     }
 }
 

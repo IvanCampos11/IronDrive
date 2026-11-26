@@ -168,7 +168,7 @@ pub fn unwrap_data_key(master_key: &MasterKey, blob: &[u8]) -> Result<DataKey, A
 // ---------------------------------------------------------------------------
 
 /// AES-256-GCM encrypt a 32-byte key. Returns nonce ‖ ciphertext ‖ tag.
-fn aes_gcm_wrap(
+pub(crate) fn aes_gcm_wrap(
     wrapping_key: &[u8; KEY_LEN],
     plaintext: &[u8; KEY_LEN],
 ) -> Result<Vec<u8>, AppError> {
@@ -190,7 +190,10 @@ fn aes_gcm_wrap(
 }
 
 /// AES-256-GCM decrypt a wrapped 32-byte key from nonce ‖ ciphertext ‖ tag.
-fn aes_gcm_unwrap(wrapping_key: &[u8; KEY_LEN], blob: &[u8]) -> Result<[u8; KEY_LEN], AppError> {
+pub(crate) fn aes_gcm_unwrap(
+    wrapping_key: &[u8; KEY_LEN],
+    blob: &[u8],
+) -> Result<[u8; KEY_LEN], AppError> {
     if blob.len() != WRAPPED_KEY_LEN {
         return Err(AppError::Internal(format!(
             "Wrapped key blob has wrong size ({} bytes, expected exactly {WRAPPED_KEY_LEN})",

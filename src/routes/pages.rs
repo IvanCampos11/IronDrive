@@ -26,8 +26,8 @@ use crate::services::fs_service::TargetKind;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
 use crate::services::{
-    auth_service, chunk_service, fs_service, group_service, library_service, quota_service,
-    space_service, trash_service,
+    auth_service, chunk_service, fs_service, group_service, key_service, library_service,
+    quota_service, space_service, trash_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -256,9 +256,12 @@ pub async fn login_page(
 
 /// POST /login
 #[post("/login", data = "<form>")]
+#[allow(clippy::too_many_arguments)]
 pub async fn login_submit(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    master_key: &State<MasterKey>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     rate_limiter: &State<RateLimiter>,
     client_ip: ClientIp,
@@ -284,6 +287,14 @@ pub async fn login_submit(
     match result {
         Ok(login_result) => {
             set_session_cookie(cookies, &login_result.token, config.secure_cookies);
+            key_service::unlock_after_login(
+                pool.inner(),
+                master_key.inner(),
+                unlock_state.inner(),
+                &login_result.user.id,
+                &form.password,
+            )
+            .await;
             if login_result.setup_complete {
                 Ok(Redirect::to(uri!(files_page(
                     path = Option::<String>::None
@@ -381,6 +392,7 @@ pub async fn register_submit(
 #[post("/logout", data = "<form>")]
 pub async fn logout_submit(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     user: Option<SessionUser>,
     form: Form<CsrfOnlyForm>,
@@ -392,6 +404,15 @@ pub async fn logout_submit(
         if let Some(cookie) = cookies.get(COOKIE_NAME) {
             let token_hash = crate::guards::auth_guard::hash_token(cookie.value());
             let _ = auth_service::logout(pool.inner(), &session_user.0.id, &token_hash).await;
+            if let Err(e) = key_service::lock_if_no_sessions(
+                pool.inner(),
+                unlock_state.inner(),
+                &session_user.0.id,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "Failed to lock account keys after logout");
+            }
         }
     }
     clear_session_cookie(cookies);
@@ -1649,6 +1670,7 @@ pub async fn group_edit_submit(
 #[post("/groups/<id>/delete", data = "<form>")]
 pub async fn group_delete_submit(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     id: &str,
@@ -1661,7 +1683,14 @@ pub async fn group_delete_submit(
         )
     })?;
 
-    match group_service::delete_group(pool.inner(), &user.0.id, id).await {
+    let spaces = key_service::spaces_of_group(pool.inner(), id)
+        .await
+        .unwrap_or_default();
+    let result = group_service::delete_group(pool.inner(), &user.0.id, id).await;
+    if result.is_ok() {
+        key_service::resync_spaces(pool.inner(), unlock_state.inner(), &spaces).await;
+    }
+    match result {
         Ok(_) => Ok(Flash::success(
             Redirect::to(uri!(groups_page)),
             "Group deleted.",
@@ -1677,10 +1706,19 @@ pub async fn group_delete_submit(
     }
 }
 
+/// Re-sync the key envelopes of every space a group owns or was granted.
+async fn resync_group(pool: &DbPool, unlock_state: &UnlockState, group_id: &str) {
+    match key_service::spaces_of_group(pool, group_id).await {
+        Ok(spaces) => key_service::resync_spaces(pool, unlock_state, &spaces).await,
+        Err(e) => tracing::error!(group_id = %group_id, error = %e, "Failed to list group spaces"),
+    }
+}
+
 /// POST /groups/<id>/members/add
 #[post("/groups/<id>/members/add", data = "<form>")]
 pub async fn group_add_member_submit(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     id: &str,
@@ -1694,8 +1732,12 @@ pub async fn group_add_member_submit(
         )
     })?;
 
-    match group_service::add_member(pool.inner(), &user.0.id, id, &form.username, &form.role).await
-    {
+    let result =
+        group_service::add_member(pool.inner(), &user.0.id, id, &form.username, &form.role).await;
+    if result.is_ok() {
+        resync_group(pool.inner(), unlock_state.inner(), id).await;
+    }
+    match result {
         Ok(_) => Ok(Flash::success(
             Redirect::to(redirect_to),
             format!("Added {} to the group.", form.username),
@@ -1721,6 +1763,7 @@ pub async fn group_add_member_submit(
 #[post("/groups/<id>/members/<user_id>/remove", data = "<form>")]
 pub async fn group_remove_member_submit(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     id: &str,
@@ -1735,7 +1778,11 @@ pub async fn group_remove_member_submit(
         )
     })?;
 
-    match group_service::remove_member(pool.inner(), &user.0.id, id, user_id).await {
+    let result = group_service::remove_member(pool.inner(), &user.0.id, id, user_id).await;
+    if result.is_ok() {
+        resync_group(pool.inner(), unlock_state.inner(), id).await;
+    }
+    match result {
         Ok(_) => Ok(Flash::success(Redirect::to(redirect_to), "Member removed.")),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
         Err(AppError::Forbidden) => Err(Flash::error(
@@ -2482,6 +2529,7 @@ pub async fn space_delete_submit(
 #[post("/spaces/<space_id>/settings/grant", data = "<form>")]
 pub async fn space_grant_access_submit(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     admin: SessionSpaceAdmin,
     space_id: &str,
@@ -2531,6 +2579,9 @@ pub async fn space_grant_access_submit(
         }
     };
 
+    if result.is_ok() {
+        key_service::resync_space(pool.inner(), unlock_state.inner(), space_id).await;
+    }
     match result {
         Ok(_) => Ok(Flash::success(
             Redirect::to(redir_url.clone()),
@@ -2591,6 +2642,7 @@ pub async fn space_update_access_submit(
 #[post("/spaces/<space_id>/access/revoke", data = "<form>")]
 pub async fn space_revoke_access_submit(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     admin: SessionSpaceAdmin,
     space_id: &str,
@@ -2604,15 +2656,18 @@ pub async fn space_revoke_access_submit(
         )
     })?;
 
-    match space_service::revoke_access(
+    let result = space_service::revoke_access(
         pool.inner(),
         &admin.user.id,
         space_id,
         &form.grantee_type,
         &form.grantee_id,
     )
-    .await
-    {
+    .await;
+    if result.is_ok() {
+        key_service::resync_space(pool.inner(), unlock_state.inner(), space_id).await;
+    }
+    match result {
         Ok(()) => Ok(Flash::success(
             Redirect::to(redir_url.clone()),
             "Access revoked.",

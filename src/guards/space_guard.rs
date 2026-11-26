@@ -21,6 +21,8 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::models::space::{Space, SpaceWithMeta};
 use crate::models::user::User;
+use crate::services::key_service::{self, SpaceLockState};
+use crate::services::unlock_state::UnlockState;
 
 use super::session_guard::SessionSetupComplete;
 use super::setup_guard::SetupComplete;
@@ -102,7 +104,42 @@ async fn check_space_permission(
         return Err((Status::Forbidden, AppError::Forbidden));
     }
 
+    // File routes need the space's key to be usable by *this* member: for a
+    // password-protected space that means they typed the password themselves.
+    // Management routes (members, settings, unlock) work while locked.
+    if space_meta.space.encryption_mode != key_service::SPACE_SERVER
+        && !is_management_route(request, &space_id)
+    {
+        let unlock = request.rocket().state::<UnlockState>().ok_or((
+            Status::InternalServerError,
+            AppError::Internal("Unlock state not available".into()),
+        ))?;
+        let state = key_service::space_access_state(pool, unlock, &space_meta.space, user_id)
+            .await
+            .map_err(|e| (Status::InternalServerError, e))?;
+        if state != SpaceLockState::Open {
+            return Err((Status::Locked, AppError::Locked));
+        }
+    }
+
     Ok(space_meta)
+}
+
+/// Routes under a space that don't touch its files: the space page itself
+/// (which shows the unlock form when needed), access management, settings,
+/// and unlocking/locking.
+fn is_management_route(request: &Request<'_>, space_id: &str) -> bool {
+    let path = request.uri().path().as_str();
+    let marker = format!("/spaces/{space_id}");
+    let Some(pos) = path.find(&marker) else {
+        return false;
+    };
+    let rest = &path[pos + marker.len()..];
+    let first = rest.trim_start_matches('/').split('/').next().unwrap_or("");
+    matches!(
+        first,
+        "" | "access" | "settings" | "unlock" | "lock" | "lock-state" | "protection"
+    )
 }
 
 // ---------------------------------------------------------------------------

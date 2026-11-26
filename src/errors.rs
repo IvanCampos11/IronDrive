@@ -112,7 +112,7 @@ impl AppError {
                 "Recovery is not available for this encryption mode.".into()
             }
             AppError::Validation(msg) => msg.clone(),
-            AppError::BadPassphrase => "Incorrect passphrase.".into(),
+            AppError::BadPassphrase => "Incorrect password.".into(),
 
             AppError::Internal(_) | AppError::Sqlx(_) | AppError::Io(_) => {
                 "An internal server error occurred.".into()

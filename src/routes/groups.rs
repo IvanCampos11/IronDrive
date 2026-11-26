@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::setup_guard::SetupComplete;
-use crate::services::group_service;
+use crate::services::unlock_state::UnlockState;
+use crate::services::{group_service, key_service};
 
 // ---------------------------------------------------------------------------
 // Request / Response DTOs
@@ -184,10 +185,13 @@ pub async fn update_group(
 #[delete("/api/v1/groups/<id>")]
 pub async fn delete_group(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     user: SetupComplete,
     id: &str,
 ) -> Result<Json<MessageResponse>, AppError> {
+    let spaces = key_service::spaces_of_group(pool.inner(), id).await?;
     group_service::delete_group(pool.inner(), &user.0.id, id).await?;
+    key_service::resync_spaces(pool.inner(), unlock_state.inner(), &spaces).await;
 
     Ok(Json(MessageResponse {
         message: "Group deleted successfully.".into(),
@@ -221,12 +225,15 @@ pub async fn list_members(
 #[post("/api/v1/groups/<id>/members", format = "json", data = "<body>")]
 pub async fn add_member(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     user: SetupComplete,
     id: &str,
     body: Json<AddMemberRequest>,
 ) -> Result<Json<MemberResponse>, AppError> {
     let member =
         group_service::add_member(pool.inner(), &user.0.id, id, &body.username, &body.role).await?;
+    let spaces = key_service::spaces_of_group(pool.inner(), id).await?;
+    key_service::resync_spaces(pool.inner(), unlock_state.inner(), &spaces).await;
 
     // Fetch full details for response (the service returns GroupMember without user info).
     let members = group_service::list_members(pool.inner(), &user.0.id, id).await?;
@@ -248,11 +255,14 @@ pub async fn add_member(
 #[delete("/api/v1/groups/<id>/members/<user_id>")]
 pub async fn remove_member(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     user: SetupComplete,
     id: &str,
     user_id: &str,
 ) -> Result<Json<MessageResponse>, AppError> {
     group_service::remove_member(pool.inner(), &user.0.id, id, user_id).await?;
+    let spaces = key_service::spaces_of_group(pool.inner(), id).await?;
+    key_service::resync_spaces(pool.inner(), unlock_state.inner(), &spaces).await;
 
     Ok(Json(MessageResponse {
         message: "Member removed successfully.".into(),

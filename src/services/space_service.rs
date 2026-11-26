@@ -27,9 +27,8 @@ use crate::models::space::{
     CreateSpaceParams, Space, SpaceAccess, SpaceAccessDetail, SpaceWithMeta, UpdateSpaceParams,
 };
 use crate::models::user::User;
-use crate::services::crypto_service::{
-    generate_data_key, unwrap_data_key, wrap_data_key, MasterKey,
-};
+use crate::services::crypto_service::{generate_data_key, unwrap_data_key, MasterKey};
+use crate::services::key_service;
 use crate::services::unlock_state::UnlockState;
 
 // ---------------------------------------------------------------------------
@@ -47,13 +46,8 @@ const PERM_ADMIN: &str = "admin";
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Create a new space owned by a user.
-///
-/// Steps: generate data key → wrap with master key → insert DB row →
-/// create space dir on disk → load key into UnlockState.
-///
-/// If disk operations fail after the DB insert, the DB row is rolled back
-/// on a best-effort basis to avoid orphaned state.
+/// Create a new space owned by a user, with standard protection (follows the
+/// owner's account tier).
 pub async fn create_space(
     pool: &DbPool,
     config: &AppConfig,
@@ -62,58 +56,23 @@ pub async fn create_space(
     owner_id: &str,
     name: &str,
 ) -> Result<SpaceWithMeta, AppError> {
-    let name = validate_name(name)?;
-
-    let data_key = generate_data_key();
-    let encrypted_data_key = wrap_data_key(master_key, &data_key)?;
-
-    let space = Space::create(
+    create_space_with(
         pool,
-        CreateSpaceParams {
-            name,
-            owner_type: "user".into(),
-            owner_id: owner_id.to_owned(),
-            encryption_mode: "server".into(),
-            encrypted_data_key,
-        },
+        config,
+        master_key,
+        unlock_state,
+        "user",
+        owner_id,
+        owner_id,
+        name,
+        None,
     )
-    .await?;
-
-    // Create space dir on disk. If this fails, roll back the DB row.
-    let dir = space_dir(config, &space.id);
-    if let Err(e) = create_space_directory(&dir, &space.id).await {
-        tracing::error!(
-            space_id = %space.id,
-            path = %dir,
-            error = %e,
-            "Failed to create space directory — rolling back DB row"
-        );
-        if let Err(del_err) = Space::delete_by_id(pool, &space.id).await {
-            tracing::error!(
-                space_id = %space.id,
-                error = %del_err,
-                "Failed to roll back space DB row after disk failure"
-            );
-        }
-        return Err(e);
-    }
-
-    unlock_state.insert_space_key(&space.id, &data_key);
-
-    tracing::info!(
-        space_id = %space.id,
-        owner_id = %owner_id,
-        "Space created (server mode)"
-    );
-
-    Ok(SpaceWithMeta {
-        space,
-        grantee_count: 0,
-        user_permission: PERM_ADMIN.to_string(),
-    })
+    .await
 }
 
-/// Create a new space owned by a group.
+/// Create a new space owned by a group, with standard protection (follows
+/// the creator's account tier).
+#[cfg(test)]
 pub async fn create_group_space(
     pool: &DbPool,
     config: &AppConfig,
@@ -122,24 +81,72 @@ pub async fn create_group_space(
     group_id: &str,
     name: &str,
 ) -> Result<SpaceWithMeta, AppError> {
-    let name = validate_name(name)?;
-
-    // Verify the group exists before creating a space for it.
-    Group::find_by_id(pool, group_id)
+    let group = Group::find_by_id(pool, group_id)
         .await?
         .ok_or(AppError::NotFound)?;
+    create_space_with(
+        pool,
+        config,
+        master_key,
+        unlock_state,
+        "group",
+        group_id,
+        &group.created_by,
+        name,
+        None,
+    )
+    .await
+}
 
+/// Create a space.
+///
+/// - `password = Some(..)`: password-protected; every member types it.
+/// - `password = None`: standard. Server-managed if the creator's account is
+///   server tier, otherwise members-only (key sealed to each member).
+///
+/// Steps: generate data key → protect it → insert DB row → create the
+/// directory → load the key → create member envelopes. A disk failure after
+/// the insert rolls the row back.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_space_with(
+    pool: &DbPool,
+    config: &AppConfig,
+    master_key: &MasterKey,
+    unlock_state: &UnlockState,
+    owner_type: &str,
+    owner_id: &str,
+    creator_id: &str,
+    name: &str,
+    password: Option<&str>,
+) -> Result<SpaceWithMeta, AppError> {
+    let name = validate_name(name)?;
+    if owner_type == "group" {
+        Group::find_by_id(pool, owner_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    }
+
+    let mode = match password {
+        Some(_) => key_service::SPACE_PASSWORD,
+        None => key_service::standard_space_mode(
+            key_service::find_user_keys(pool, creator_id)
+                .await?
+                .as_ref(),
+        ),
+    };
     let data_key = generate_data_key();
-    let encrypted_data_key = wrap_data_key(master_key, &data_key)?;
+    let (encrypted_data_key, salt) =
+        key_service::space_key_material(master_key, mode, password, &data_key).await?;
 
     let space = Space::create(
         pool,
         CreateSpaceParams {
             name,
-            owner_type: "group".into(),
-            owner_id: group_id.to_owned(),
-            encryption_mode: "server".into(),
+            owner_type: owner_type.into(),
+            owner_id: owner_id.to_owned(),
+            encryption_mode: mode.into(),
             encrypted_data_key,
+            salt,
         },
     )
     .await?;
@@ -163,11 +170,17 @@ pub async fn create_group_space(
     }
 
     unlock_state.insert_space_key(&space.id, &data_key);
+    if mode == key_service::SPACE_PASSWORD {
+        unlock_state.mark_space_unlocked_by(&space.id, creator_id);
+    }
+    key_service::sync_space_envelopes(pool, unlock_state, &space.id).await?;
 
     tracing::info!(
         space_id = %space.id,
-        group_id = %group_id,
-        "Group space created (server mode)"
+        owner_type = %owner_type,
+        owner_id = %owner_id,
+        mode = %mode,
+        "Space created"
     );
 
     Ok(SpaceWithMeta {
@@ -234,6 +247,7 @@ pub async fn delete_space(
 
     // Remove the key from memory.
     unlock_state.remove_space_key(space_id);
+    unlock_state.clear_space_unlocks(space_id);
 
     // Remove the directory from disk (best-effort).
     let dir = space_dir(config, space_id);
