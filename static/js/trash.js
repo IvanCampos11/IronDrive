@@ -4,7 +4,12 @@
   var ID = window.IronDrive;
   var root = document.getElementById('trash');
   if (!root || !ID) return;
-  var BASE = root.getAttribute('data-base');
+  // Only the two shapes the server renders: /trash or /spaces/<id>/trash.
+  // Anything else is ignored rather than used to build request or link URLs.
+  var m = /^\/(?:trash|spaces\/([A-Za-z0-9-]+)\/trash)$/.exec(root.getAttribute('data-base') || '');
+  if (!m) return;
+  var BASE = m[0];
+  var HOME = m[1] ? '/spaces/' + encodeURIComponent(m[1]) : '/files';
 
   function rows() { return Array.prototype.slice.call(root.querySelectorAll('.trash-row')); }
   function selected() { return rows().filter(function (r) { return r.getAttribute('aria-selected') === 'true'; }); }
@@ -87,8 +92,7 @@
       if (done.length === 1) {
         var path = done[0].path;
         var parent = path.indexOf('/') >= 0 ? path.slice(0, path.lastIndexOf('/')) : '';
-        var home = BASE === '/trash' ? '/files' : BASE.replace(/\/trash$/, '');
-        var folderUrl = home + (parent ? '?path=' + encodeURIComponent(parent) : '');
+        var folderUrl = HOME + (parent ? '?path=' + encodeURIComponent(parent) : '');
         ID.toast('“' + path.split('/').pop() + '” restored', {
           action: { label: 'Show', onClick: function () { window.location.href = folderUrl; } },
         });
