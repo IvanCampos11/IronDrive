@@ -72,13 +72,21 @@ fn alert_view(ev: &IntegrityEvent, location: &str, base: &str, can_dismiss: bool
 
 /// Open events for `kind/id`. Events whose file has since been deleted or
 /// renamed are resolved automatically so the bell doesn't point at nothing.
-async fn live_events(pool: &DbPool, config: &AppConfig, kind: TargetKind, id: &str) -> Vec<IntegrityEvent> {
+async fn live_events(
+    pool: &DbPool,
+    config: &AppConfig,
+    kind: TargetKind,
+    id: &str,
+) -> Vec<IntegrityEvent> {
     let events = integrity_service::list_unacknowledged(pool, kind.as_str(), id)
         .await
         .unwrap_or_default();
     let mut live = Vec::with_capacity(events.len());
     for ev in events {
-        if fs_service::entry_exists(config, kind, id, &ev.file_path).await.unwrap_or(true) {
+        if fs_service::entry_exists(config, kind, id, &ev.file_path)
+            .await
+            .unwrap_or(true)
+        {
             live.push(ev);
         } else {
             let _ = integrity_service::acknowledge_event(pool, &ev.id).await;
@@ -118,7 +126,10 @@ pub async fn notifications(
     user: SessionSetupComplete,
 ) -> Template {
     let alerts = alerts_for(pool.inner(), config.inner(), &user.0).await;
-    Template::render("partials/notifications", context! { count: alerts.len(), alerts: alerts })
+    Template::render(
+        "partials/notifications",
+        context! { count: alerts.len(), alerts: alerts },
+    )
 }
 
 /// Can `user` dismiss this event? Library owners, and space editors/admins.
@@ -128,7 +139,9 @@ async fn can_dismiss(pool: &DbPool, user: &User, ev: &IntegrityEvent) -> Result<
             .await?
             .is_some_and(|lib| lib.id == ev.target_id),
         "space" => matches!(
-            SpaceAccess::resolve_user_permission(pool, &user.id, &ev.target_id).await?.as_deref(),
+            SpaceAccess::resolve_user_permission(pool, &user.id, &ev.target_id)
+                .await?
+                .as_deref(),
             Some("write") | Some("admin")
         ),
         _ => false,
@@ -147,7 +160,10 @@ pub async fn dismiss_notification(
         .await
         .map_err(json_error)?
         .ok_or_else(|| json_error(AppError::NotFound))?;
-    if !can_dismiss(pool.inner(), &user.0, &ev).await.map_err(json_error)? {
+    if !can_dismiss(pool.inner(), &user.0, &ev)
+        .await
+        .map_err(json_error)?
+    {
         return Err(json_error(AppError::NotFound));
     }
     integrity_service::acknowledge_event(pool.inner(), id)
@@ -190,8 +206,12 @@ async fn entry_details(
         return Err(AppError::Validation("Choose a file or folder.".into()));
     }
     let entry = match kind {
-        TargetKind::Library => fs_service::get_entry_info(config, unlock_state, target_id, path, false).await?,
-        TargetKind::Space => fs_service::get_space_entry_info(config, unlock_state, target_id, path, false).await?,
+        TargetKind::Library => {
+            fs_service::get_entry_info(config, unlock_state, target_id, path, false).await?
+        }
+        TargetKind::Space => {
+            fs_service::get_space_entry_info(config, unlock_state, target_id, path, false).await?
+        }
     };
     let icon = file_icon(&entry.name, entry.is_dir, entry.mime_type.as_deref());
 
@@ -214,11 +234,13 @@ async fn entry_details(
         .await
         .into_iter()
         .filter(|ev| ev.file_path == path || ev.file_path.starts_with(&prefix))
-        .map(|ev| json!({
-            "title": integrity_service::describe_event_type(&ev.event_type),
-            "file_path": ev.file_path,
-            "detected_at": ev.created_at,
-        }))
+        .map(|ev| {
+            json!({
+                "title": integrity_service::describe_event_type(&ev.event_type),
+                "file_path": ev.file_path,
+                "detected_at": ev.created_at,
+            })
+        })
         .collect();
 
     let parent = parent_path(path);
@@ -249,11 +271,21 @@ pub async fn files_info(
     user: SessionSetupComplete,
     path: String,
 ) -> JsonResult {
-    let lib = require_library(pool.inner(), &user.0.id).await.map_err(json_error)?;
-    entry_details(pool.inner(), config.inner(), unlock_state.inner(), TargetKind::Library, &lib.id, "My files", &path)
+    let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map(Json)
-        .map_err(json_error)
+        .map_err(json_error)?;
+    entry_details(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Library,
+        &lib.id,
+        "My files",
+        &path,
+    )
+    .await
+    .map(Json)
+    .map_err(json_error)
 }
 
 /// GET /spaces/<space_id>/info?<path> — JSON for the details panel.
@@ -266,10 +298,18 @@ pub async fn space_info(
     space_id: &str,
     path: String,
 ) -> JsonResult {
-    entry_details(pool.inner(), config.inner(), unlock_state.inner(), TargetKind::Space, space_id, &reader.space.space.name, &path)
-        .await
-        .map(Json)
-        .map_err(json_error)
+    entry_details(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Space,
+        space_id,
+        &reader.space.space.name,
+        &path,
+    )
+    .await
+    .map(Json)
+    .map_err(json_error)
 }
 
 /// Fully decrypt one file to confirm it's intact; record an alert if not.
@@ -282,8 +322,12 @@ async fn verify_entry(
     path: &str,
 ) -> Result<Value, AppError> {
     let entry = match kind {
-        TargetKind::Library => fs_service::get_entry_info(config, unlock_state, target_id, path, true).await?,
-        TargetKind::Space => fs_service::get_space_entry_info(config, unlock_state, target_id, path, true).await?,
+        TargetKind::Library => {
+            fs_service::get_entry_info(config, unlock_state, target_id, path, true).await?
+        }
+        TargetKind::Space => {
+            fs_service::get_space_entry_info(config, unlock_state, target_id, path, true).await?
+        }
     };
     if entry.is_dir {
         return Err(AppError::Validation("Choose a file to check.".into()));
@@ -291,7 +335,9 @@ async fn verify_entry(
     let status = entry.integrity.unwrap_or_default();
     if status == "ok" {
         // A clean check resolves any earlier alert (e.g. the file was restored).
-        let resolved = integrity_service::resolve_events_for_path(pool, kind.as_str(), target_id, path).await?;
+        let resolved =
+            integrity_service::resolve_events_for_path(pool, kind.as_str(), target_id, path)
+                .await?;
         let message = if resolved > 0 {
             "The file is intact now — its alert has been cleared."
         } else {
@@ -306,7 +352,16 @@ async fn verify_entry(
     } else {
         "decrypt_failed"
     };
-    integrity_service::record_event(pool, kind.as_str(), target_id, path, event_type, Some(&status), "manual_check").await?;
+    integrity_service::record_event(
+        pool,
+        kind.as_str(),
+        target_id,
+        path,
+        event_type,
+        Some(&status),
+        "manual_check",
+    )
+    .await?;
     Ok(json!({ "ok": false, "message": integrity_service::describe_event_type(event_type) }))
 }
 
@@ -320,11 +375,20 @@ pub async fn files_verify(
     user: SessionSetupComplete,
     path: String,
 ) -> JsonResult {
-    let lib = require_library(pool.inner(), &user.0.id).await.map_err(json_error)?;
-    verify_entry(pool.inner(), config.inner(), unlock_state.inner(), TargetKind::Library, &lib.id, &path)
+    let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map(Json)
-        .map_err(json_error)
+        .map_err(json_error)?;
+    verify_entry(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &path,
+    )
+    .await
+    .map(Json)
+    .map_err(json_error)
 }
 
 /// POST /spaces/<space_id>/verify?<path> — XHR: check one file's integrity now.
@@ -338,10 +402,17 @@ pub async fn space_verify(
     space_id: &str,
     path: String,
 ) -> JsonResult {
-    verify_entry(pool.inner(), config.inner(), unlock_state.inner(), TargetKind::Space, space_id, &path)
-        .await
-        .map(Json)
-        .map_err(json_error)
+    verify_entry(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Space,
+        space_id,
+        &path,
+    )
+    .await
+    .map(Json)
+    .map_err(json_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +433,10 @@ pub async fn nav_extra(pool: &State<DbPool>, user: SessionSetupComplete) -> Temp
     spaces.sort_by_key(|(_, name)| name.to_lowercase());
     let more = spaces.len().saturating_sub(SIDEBAR_SPACES);
     spaces.truncate(SIDEBAR_SPACES);
-    let spaces: Vec<Value> = spaces.into_iter().map(|(id, name)| json!({ "id": id, "name": name })).collect();
+    let spaces: Vec<Value> = spaces
+        .into_iter()
+        .map(|(id, name)| json!({ "id": id, "name": name }))
+        .collect();
     Template::render(
         "partials/nav_extra",
         context! { spaces: spaces, more: more, is_admin: user.0.role == "admin" },
@@ -376,7 +450,11 @@ pub async fn nav_extra(pool: &State<DbPool>, user: SessionSetupComplete) -> Temp
 static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn require_admin(user: &User) -> Result<(), Status> {
-    if user.role == "admin" { Ok(()) } else { Err(Status::Forbidden) }
+    if user.role == "admin" {
+        Ok(())
+    } else {
+        Err(Status::Forbidden)
+    }
 }
 
 /// GET /admin — users, quotas, and integrity overview.
@@ -392,20 +470,33 @@ pub async fn admin_page(
     let pool = pool.inner();
     let config = config.inner();
 
-    let libraries: Vec<(String, String)> = sqlx::query_as("SELECT id, user_id FROM personal_libraries")
-        .fetch_all(pool)
+    let libraries: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, user_id FROM personal_libraries")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| Status::InternalServerError)?;
+    let lib_by_user: HashMap<&str, &str> = libraries
+        .iter()
+        .map(|(l, u)| (u.as_str(), l.as_str()))
+        .collect();
+
+    let users = User::list_all(pool)
         .await
         .map_err(|_| Status::InternalServerError)?;
-    let lib_by_user: HashMap<&str, &str> = libraries.iter().map(|(l, u)| (u.as_str(), l.as_str())).collect();
-
-    let users = User::list_all(pool).await.map_err(|_| Status::InternalServerError)?;
     let mut rows = Vec::with_capacity(users.len());
     for u in &users {
         let used = match lib_by_user.get(u.id.as_str()) {
-            Some(lib) => fs_service::calculate_usage(config, lib, "").await.map(|r| r.disk_bytes).unwrap_or(0),
+            Some(lib) => fs_service::calculate_usage(config, lib, "")
+                .await
+                .map(|r| r.disk_bytes)
+                .unwrap_or(0),
             None => 0,
         };
-        let pct = if u.quota_bytes > 0 { ((used as f64 / u.quota_bytes as f64) * 100.0).min(100.0) as u64 } else { 0 };
+        let pct = if u.quota_bytes > 0 {
+            ((used as f64 / u.quota_bytes as f64) * 100.0).min(100.0) as u64
+        } else {
+            0
+        };
         rows.push(json!({
             "id": u.id,
             "username": u.username,
@@ -422,9 +513,17 @@ pub async fn admin_page(
     }
 
     // Name each alert's location: "<user>'s files" or the space name.
-    let user_by_lib: HashMap<&str, &str> = libraries.iter().map(|(l, u)| (l.as_str(), u.as_str())).collect();
-    let name_by_user: HashMap<&str, &str> = users.iter().map(|u| (u.id.as_str(), u.username.as_str())).collect();
-    let events = integrity_service::list_all_unacknowledged(pool, 100).await.unwrap_or_default();
+    let user_by_lib: HashMap<&str, &str> = libraries
+        .iter()
+        .map(|(l, u)| (l.as_str(), u.as_str()))
+        .collect();
+    let name_by_user: HashMap<&str, &str> = users
+        .iter()
+        .map(|u| (u.id.as_str(), u.username.as_str()))
+        .collect();
+    let events = integrity_service::list_all_unacknowledged(pool, 100)
+        .await
+        .unwrap_or_default();
     let mut alerts = Vec::with_capacity(events.len());
     for ev in &events {
         let location = if ev.target_type == "library" {
@@ -490,13 +589,19 @@ pub async fn admin_set_quota(
     require_admin(&user.0)?;
     let back = || Redirect::to("/admin");
     if validate_csrf(cookies, &form.csrf_token).is_err() {
-        return Ok(Flash::error(back(), "Your session changed — please try again."));
+        return Ok(Flash::error(
+            back(),
+            "Your session changed — please try again.",
+        ));
     }
     let Some(bytes) = parse_size(&form.quota).filter(|b| *b > 0 && *b <= i64::MAX as u64) else {
         return Ok(Flash::error(back(), "Enter a size like 10 GB or 500 MB."));
     };
     match User::set_quota(pool.inner(), id, bytes as i64).await {
-        Ok(true) => Ok(Flash::success(back(), format!("Quota set to {}.", format_bytes(bytes)))),
+        Ok(true) => Ok(Flash::success(
+            back(),
+            format!("Quota set to {}.", format_bytes(bytes)),
+        )),
         Ok(false) => Ok(Flash::error(back(), "That user no longer exists.")),
         Err(_) => Err(Status::InternalServerError),
     }
@@ -521,7 +626,10 @@ pub async fn admin_set_active(
     require_admin(&user.0)?;
     let back = || Redirect::to("/admin");
     if validate_csrf(cookies, &form.csrf_token).is_err() {
-        return Ok(Flash::error(back(), "Your session changed — please try again."));
+        return Ok(Flash::error(
+            back(),
+            "Your session changed — please try again.",
+        ));
     }
     if id == user.0.id {
         return Ok(Flash::error(back(), "You can't disable your own account."));
@@ -531,7 +639,14 @@ pub async fn admin_set_active(
             if !form.active {
                 let _ = Session::delete_all_for_user(pool.inner(), id).await;
             }
-            Ok(Flash::success(back(), if form.active { "Account enabled." } else { "Account disabled and signed out." }))
+            Ok(Flash::success(
+                back(),
+                if form.active {
+                    "Account enabled."
+                } else {
+                    "Account disabled and signed out."
+                },
+            ))
         }
         Ok(false) => Ok(Flash::error(back(), "That user no longer exists.")),
         Err(_) => Err(Status::InternalServerError),
@@ -549,14 +664,22 @@ pub async fn admin_scan(
 ) -> Result<Json<Value>, Status> {
     require_admin(&user.0)?;
     if SCAN_RUNNING.swap(true, Ordering::SeqCst) {
-        return Ok(Json(json!({ "started": false, "message": "A scan is already running." })));
+        return Ok(Json(
+            json!({ "started": false, "message": "A scan is already running." }),
+        ));
     }
-    let (pool, config, unlock_state) = (pool.inner().clone(), config.inner().clone(), unlock_state.inner().clone());
+    let (pool, config, unlock_state) = (
+        pool.inner().clone(),
+        config.inner().clone(),
+        unlock_state.inner().clone(),
+    );
     tokio::spawn(async move {
         integrity_service::scan_everything(&pool, &config, &unlock_state).await;
         SCAN_RUNNING.store(false, Ordering::SeqCst);
     });
-    Ok(Json(json!({ "started": true, "message": "Scan started. New problems will appear here and in users' alerts." })))
+    Ok(Json(
+        json!({ "started": true, "message": "Scan started. New problems will appear here and in users' alerts." }),
+    ))
 }
 
 pub fn routes() -> Vec<Route> {

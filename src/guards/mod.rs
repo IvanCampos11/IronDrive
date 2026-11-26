@@ -16,6 +16,5 @@ pub use session_guard::{SessionSetupComplete, SessionUser};
 pub use setup_guard::SetupComplete;
 #[allow(unused_imports)]
 pub use space_guard::{
-    SessionSpaceAdmin, SessionSpaceReader, SessionSpaceWriter, SpaceAdmin, SpaceReader,
-    SpaceWriter,
+    SessionSpaceAdmin, SessionSpaceReader, SessionSpaceWriter, SpaceAdmin, SpaceReader, SpaceWriter,
 };

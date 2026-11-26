@@ -352,9 +352,15 @@ mod tests {
             ..test_config()
         };
 
-        let first = register(&pool, &config, "alice", "alice@example.com", alice_password())
-            .await
-            .expect("first account must be allowed even when registration is closed");
+        let first = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .expect("first account must be allowed even when registration is closed");
         assert_eq!(first.user.role, "admin");
 
         let second = register(&pool, &config, "bob", "bob@example.com", bob_password()).await;
@@ -366,9 +372,15 @@ mod tests {
         let pool = test_pool().await;
         let config = test_config();
 
-        let a = register(&pool, &config, "alice", "alice@example.com", alice_password())
-            .await
-            .unwrap();
+        let a = register(
+            &pool,
+            &config,
+            "alice",
+            "alice@example.com",
+            alice_password(),
+        )
+        .await
+        .unwrap();
         let b = register(&pool, &config, "bob", "bob@example.com", bob_password())
             .await
             .unwrap();

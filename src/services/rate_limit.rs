@@ -112,7 +112,11 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_millis(1100));
         rl.check("trigger", 5, 60);
-        assert!(rl.len() < 10, "expired entries should be pruned, got {}", rl.len());
+        assert!(
+            rl.len() < 10,
+            "expired entries should be pruned, got {}",
+            rl.len()
+        );
     }
 
     #[test]

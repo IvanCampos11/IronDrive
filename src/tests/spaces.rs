@@ -167,12 +167,7 @@ async fn setup_library(client: &Client, token: &str) {
     assert_eq!(r.status(), Status::Ok, "setup-library failed");
 }
 
-async fn create_ready_user(
-    client: &Client,
-    username: &str,
-    email: &str,
-    password: &str,
-) -> String {
+async fn create_ready_user(client: &Client, username: &str, email: &str, password: &str) -> String {
     register_user(client, username, email, password).await;
     let token = login_user(client, username, password).await;
     setup_library(client, &token).await;
@@ -339,8 +334,7 @@ async fn grant_and_revoke_user_access() {
     let client = test_client(&tmp).await;
     let alice_token =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
-    let bob_token =
-        create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
+    let bob_token = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
 
     let space = api_create_space(&client, &alice_token, "Shared").await;
     let space_id = space["id"].as_str().unwrap();
@@ -357,8 +351,7 @@ async fn grant_and_revoke_user_access() {
     assert_eq!(list["spaces"].as_array().unwrap().len(), 0);
 
     // Grant bob read access
-    let (status, _) =
-        api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
+    let (status, _) = api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
     assert_eq!(status, Status::Ok);
 
     // Bob can now see it
@@ -491,7 +484,10 @@ async fn space_upload_download_delete() {
 
     // Delete
     let r = client
-        .delete(format!("/api/v1/spaces/{}/files/delete?path=hello.txt", space_id))
+        .delete(format!(
+            "/api/v1/spaces/{}/files/delete?path=hello.txt",
+            space_id
+        ))
         .header(auth_header(&token))
         .dispatch()
         .await;
@@ -515,15 +511,13 @@ async fn reader_cannot_upload_to_space() {
     let client = test_client(&tmp).await;
     let alice_token =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
-    let bob_token =
-        create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
+    let bob_token = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
 
     let space = api_create_space(&client, &alice_token, "ReadOnly").await;
     let space_id = space["id"].as_str().unwrap();
 
     // Grant bob read-only access
-    let (status, _) =
-        api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
+    let (status, _) = api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
     assert_eq!(status, Status::Ok);
 
     // Bob tries to upload → should be forbidden
@@ -575,7 +569,10 @@ async fn spaces_page_renders_for_authenticated_user() {
     assert_eq!(r.status(), Status::Ok);
 
     let body = r.into_string().await.unwrap();
-    assert!(body.contains("My Space"), "Space name should appear on page");
+    assert!(
+        body.contains("My Space"),
+        "Space name should appear on page"
+    );
     assert!(
         body.contains("New space"),
         "Create space button should be present"
@@ -604,10 +601,7 @@ async fn space_browser_page_renders() {
     // Session login and visit browser
     session_login(&client, "alice", &alice_password()).await;
 
-    let r = client
-        .get(format!("/spaces/{}", space_id))
-        .dispatch()
-        .await;
+    let r = client.get(format!("/spaces/{}", space_id)).dispatch().await;
 
     assert_eq!(r.status(), Status::Ok);
     let body = r.into_string().await.unwrap();
@@ -702,8 +696,7 @@ async fn non_member_cannot_access_space() {
     let client = test_client(&tmp).await;
     let alice_token =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
-    let bob_token =
-        create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
+    let bob_token = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
 
     let space = api_create_space(&client, &alice_token, "Private").await;
     let space_id = space["id"].as_str().unwrap();

@@ -102,11 +102,7 @@ pub async fn update_group(
 }
 
 /// Delete a group. Only the creator (owner) can delete.
-pub async fn delete_group(
-    pool: &DbPool,
-    user_id: &str,
-    group_id: &str,
-) -> Result<(), AppError> {
+pub async fn delete_group(pool: &DbPool, user_id: &str, group_id: &str) -> Result<(), AppError> {
     let group = Group::find_by_id(pool, group_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -245,9 +241,7 @@ pub async fn update_member_role(
 
     validate_role(new_role)?;
     if new_role == ROLE_OWNER {
-        return Err(AppError::Validation(
-            "Cannot assign the owner role.".into(),
-        ));
+        return Err(AppError::Validation("Cannot assign the owner role.".into()));
     }
 
     // Target must be a current member.

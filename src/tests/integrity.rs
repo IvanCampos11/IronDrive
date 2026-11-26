@@ -223,7 +223,8 @@ async fn scan_clean_library_finds_no_failures() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) =
+        create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload a file
     let resp = client
@@ -256,7 +257,8 @@ async fn corrupt_file_detected_by_scan() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) =
+        create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload
     let resp = client
@@ -306,7 +308,10 @@ async fn corrupt_file_detected_by_scan() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["target_type"], "library");
     assert_eq!(events[0]["target_id"], library_id);
-    assert!(events[0]["file_path"].as_str().unwrap().contains("important.txt"));
+    assert!(events[0]["file_path"]
+        .as_str()
+        .unwrap()
+        .contains("important.txt"));
     assert_eq!(events[0]["detected_by"], "background_scan");
     assert_eq!(events[0]["acknowledged"], 0);
 }
@@ -316,7 +321,8 @@ async fn truncated_file_detected_by_scan() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) =
+        create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload
     let resp = client
@@ -355,7 +361,8 @@ async fn acknowledge_event_removes_from_notifications() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) =
+        create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload + corrupt
     let resp = client
@@ -426,7 +433,8 @@ async fn list_events_via_admin_endpoint() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) =
+        create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload + corrupt
     client
@@ -567,7 +575,11 @@ async fn session_cleanup_removes_expired_sessions() {
         .fetch_one(pool)
         .await
         .unwrap();
-    assert!(count.0 >= 2, "Expected at least 2 sessions, got {}", count.0);
+    assert!(
+        count.0 >= 2,
+        "Expected at least 2 sessions, got {}",
+        count.0
+    );
 
     // Run cleanup
     let removed = crate::models::session::Session::delete_expired(pool)
@@ -600,9 +612,7 @@ async fn chunk_cleanup_removes_expired_uploads() {
     let pool = rocket
         .state::<crate::db::DbPool>()
         .expect("DbPool in state");
-    let config = rocket
-        .state::<AppConfig>()
-        .expect("AppConfig in state");
+    let config = rocket.state::<AppConfig>().expect("AppConfig in state");
 
     // Insert an already-expired chunked upload row directly.
     let upload_id = uuid::Uuid::new_v4().to_string();
@@ -631,11 +641,7 @@ async fn chunk_cleanup_removes_expired_uploads() {
     .unwrap();
 
     // Create a staging directory for it
-    let staging = tmp
-        .path()
-        .join("data")
-        .join(".chunks")
-        .join(&upload_id);
+    let staging = tmp.path().join("data").join(".chunks").join(&upload_id);
     tokio::fs::create_dir_all(&staging).await.unwrap();
     tokio::fs::write(staging.join("00000000.chunk"), b"fake chunk")
         .await
@@ -652,12 +658,11 @@ async fn chunk_cleanup_removes_expired_uploads() {
     assert!(!tokio::fs::try_exists(&staging).await.unwrap());
 
     // DB row should be gone
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM chunked_uploads WHERE id = ?")
-            .bind(&upload_id)
-            .fetch_optional(pool)
-            .await
-            .unwrap();
+    let row: Option<(String,)> = sqlx::query_as("SELECT id FROM chunked_uploads WHERE id = ?")
+        .bind(&upload_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
     assert!(row.is_none(), "Expired upload row should be deleted");
 }
 
@@ -670,7 +675,8 @@ async fn scan_detects_corruption_in_subdirectory() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) =
+        create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     // Upload files in root and in a subdir
     client
@@ -719,12 +725,10 @@ async fn scan_detects_corruption_in_subdirectory() {
     let json: Value = serde_json::from_str(&resp.into_string().await.unwrap()).unwrap();
     let events = json["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
-    assert!(
-        events[0]["file_path"]
-            .as_str()
-            .unwrap()
-            .contains("nested.txt")
-    );
+    assert!(events[0]["file_path"]
+        .as_str()
+        .unwrap()
+        .contains("nested.txt"));
 }
 
 #[tokio::test]
@@ -732,7 +736,8 @@ async fn scan_empty_library_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
     let client = test_client(&tmp).await;
     let pw = alice_password();
-    let (token, library_id, csrf) = create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
+    let (token, library_id, csrf) =
+        create_ready_admin(&client, "alice", "alice@example.com", &pw).await;
 
     let resp = client
         .post(format!(

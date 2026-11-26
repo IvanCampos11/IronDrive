@@ -40,7 +40,10 @@ impl std::fmt::Debug for AppConfig {
             .field("chunk_upload_expiry_hours", &self.chunk_upload_expiry_hours)
             .field("max_parallel_chunks", &self.max_parallel_chunks)
             .field("integrity_scan_enabled", &self.integrity_scan_enabled)
-            .field("integrity_scan_interval_hours", &self.integrity_scan_interval_hours)
+            .field(
+                "integrity_scan_interval_hours",
+                &self.integrity_scan_interval_hours,
+            )
             .field("registration_enabled", &self.registration_enabled)
             .field("secure_cookies", &self.secure_cookies)
             .finish()

@@ -149,7 +149,10 @@ pub async fn resolve_events_for_path(
 }
 
 /// Unacknowledged events across every library and space, newest first (admin view).
-pub async fn list_all_unacknowledged(pool: &DbPool, limit: i64) -> Result<Vec<IntegrityEvent>, AppError> {
+pub async fn list_all_unacknowledged(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<IntegrityEvent>, AppError> {
     Ok(sqlx::query_as::<_, IntegrityEvent>(
         "SELECT id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
          FROM integrity_events WHERE acknowledged = 0
@@ -172,10 +175,12 @@ pub fn describe_event_type(event_type: &str) -> &'static str {
 
 /// Mark an integrity event as acknowledged. Returns `true` if the row was updated.
 pub async fn acknowledge_event(pool: &DbPool, event_id: &str) -> Result<bool, AppError> {
-    let result = sqlx::query("UPDATE integrity_events SET acknowledged = 1 WHERE id = ? AND acknowledged = 0")
-        .bind(event_id)
-        .execute(pool)
-        .await?;
+    let result = sqlx::query(
+        "UPDATE integrity_events SET acknowledged = 1 WHERE id = ? AND acknowledged = 0",
+    )
+    .bind(event_id)
+    .execute(pool)
+    .await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -316,8 +321,7 @@ async fn scan_directory(
                     }
                     IntegrityStatus::DecryptionFailed(ref msg) => {
                         let rel = relative_path(root, &file_path);
-                        let event_type = if msg.contains("truncated") || msg.contains("too small")
-                        {
+                        let event_type = if msg.contains("truncated") || msg.contains("too small") {
                             "file_truncated"
                         } else {
                             "decrypt_failed"
@@ -379,8 +383,15 @@ pub async fn scan_everything(
         .await
         .unwrap_or_default();
 
-    tracing::info!(libraries = libraries.len(), spaces = spaces.len(), "Integrity scan: starting");
-    let mut total = ScanResult { files_scanned: 0, failures_found: 0 };
+    tracing::info!(
+        libraries = libraries.len(),
+        spaces = spaces.len(),
+        "Integrity scan: starting"
+    );
+    let mut total = ScanResult {
+        files_scanned: 0,
+        failures_found: 0,
+    };
 
     let targets = libraries
         .iter()
@@ -400,12 +411,18 @@ pub async fn scan_everything(
                     tracing::warn!(target_type = kind, target_id = %id, failures = r.failures_found, "Integrity scan: failures detected");
                 }
             }
-            Err(e) => tracing::error!(target_type = kind, target_id = %id, error = %e, "Integrity scan: error"),
+            Err(e) => {
+                tracing::error!(target_type = kind, target_id = %id, error = %e, "Integrity scan: error")
+            }
         }
         // Throttle between targets to avoid sustained I/O pressure.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    tracing::info!(files_scanned = total.files_scanned, failures = total.failures_found, "Integrity scan: complete");
+    tracing::info!(
+        files_scanned = total.files_scanned,
+        failures = total.failures_found,
+        "Integrity scan: complete"
+    );
     total
 }

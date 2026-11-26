@@ -128,9 +128,7 @@ fn try_data_key(unlock_state: &UnlockState, library_id: &str) -> Option<DataKey>
 
 /// Retrieve the data key for a space from [`UnlockState`].
 fn require_space_key(unlock_state: &UnlockState, space_id: &str) -> Result<DataKey, AppError> {
-    unlock_state
-        .get_space_key(space_id)
-        .ok_or(AppError::Locked)
+    unlock_state.get_space_key(space_id).ok_or(AppError::Locked)
 }
 
 /// Like `require_space_key` but returns `None` instead of erroring.
@@ -1274,9 +1272,7 @@ pub async fn delete_space_entry(
     user_path: &str,
 ) -> Result<(), AppError> {
     if user_path.is_empty() {
-        return Err(AppError::Validation(
-            "Cannot delete the space root.".into(),
-        ));
+        return Err(AppError::Validation("Cannot delete the space root.".into()));
     }
 
     let root = space_root(config, space_id);
@@ -1293,9 +1289,7 @@ pub async fn delete_space_entry(
     let canonical_root = canonicalize_async(root).await?;
     let canonical_target = canonicalize_async(target.clone()).await?;
     if !canonical_target.starts_with(&canonical_root) || canonical_target == canonical_root {
-        return Err(AppError::Validation(
-            "Path escapes the space root.".into(),
-        ));
+        return Err(AppError::Validation("Path escapes the space root.".into()));
     }
 
     tracing::info!(
@@ -1326,9 +1320,7 @@ pub async fn rename_space_entry(
     new_path: &str,
 ) -> Result<RenameResult, AppError> {
     if old_path.is_empty() {
-        return Err(AppError::Validation(
-            "Cannot rename the space root.".into(),
-        ));
+        return Err(AppError::Validation("Cannot rename the space root.".into()));
     }
     if new_path.is_empty() {
         return Err(AppError::Validation("New path must not be empty.".into()));
@@ -2390,8 +2382,7 @@ mod tests {
         let status = info.integrity.unwrap();
         // File hash check catches the tamper before decryption is even attempted.
         assert!(
-            status.contains("file_hash_mismatch")
-                || status.contains("decryption_failed"),
+            status.contains("file_hash_mismatch") || status.contains("decryption_failed"),
             "expected failure status, got: {status}"
         );
     }

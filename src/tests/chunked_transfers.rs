@@ -225,7 +225,10 @@ async fn chunked_upload_download_roundtrip() {
     let dl_token = dl_json["token"].as_str().unwrap().to_string();
     let dl_chunks = dl_json["total_chunks"].as_u64().unwrap() as u32;
     // Size comes from the STREAM segment table, not a full decrypt.
-    assert_eq!(dl_json["total_bytes"].as_u64().unwrap(), payload.len() as u64);
+    assert_eq!(
+        dl_json["total_bytes"].as_u64().unwrap(),
+        payload.len() as u64
+    );
 
     let mut downloaded = Vec::new();
     for index in 0..dl_chunks {
@@ -240,7 +243,10 @@ async fn chunked_upload_download_roundtrip() {
         assert_eq!(resp.status(), Status::Ok);
         // User content is never served with its real MIME type or inline.
         assert_eq!(resp.content_type(), Some(ContentType::Binary));
-        assert_eq!(resp.headers().get_one("Content-Disposition"), Some("attachment"));
+        assert_eq!(
+            resp.headers().get_one("Content-Disposition"),
+            Some("attachment")
+        );
         assert!(resp
             .headers()
             .get_one("Content-Security-Policy")

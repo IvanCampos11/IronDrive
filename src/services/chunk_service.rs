@@ -241,7 +241,10 @@ fn build_download_token(
     ))
 }
 
-fn verify_download_token(signing_key: &[u8], token: &str) -> Result<DownloadTokenPayload, AppError> {
+fn verify_download_token(
+    signing_key: &[u8],
+    token: &str,
+) -> Result<DownloadTokenPayload, AppError> {
     let mut parts = token.splitn(2, '.');
     let payload_b64 = parts
         .next()
@@ -629,7 +632,9 @@ pub async fn serve_chunk(
     }
 
     let start = (chunk_index as u64).saturating_mul(config.chunk_size_bytes);
-    let end = start.saturating_add(config.chunk_size_bytes).min(total_bytes);
+    let end = start
+        .saturating_add(config.chunk_size_bytes)
+        .min(total_bytes);
     let data = crypto_service::read_plaintext_range(&file.data_key, &file.path, start, end).await?;
     let checksum_sha256 = hex::encode(crypto_service::sha256_bytes(&data));
 
@@ -669,7 +674,10 @@ pub async fn cleanup_expired_uploads(pool: &DbPool, config: &AppConfig) -> Resul
     }
 
     if cleaned > 0 {
-        tracing::info!(count = cleaned, "Cleaned up expired chunked upload sessions");
+        tracing::info!(
+            count = cleaned,
+            "Cleaned up expired chunked upload sessions"
+        );
     }
 
     Ok(cleaned)
@@ -698,9 +706,15 @@ mod token_binding_tests {
     }
 
     fn token_for(cfg: &AppConfig, uid: &str, target: &str, kind: TargetKind) -> String {
-        build_download_token(&cfg.download_token_key(), uid, target, kind.as_str(), "f.bin")
-            .unwrap()
-            .0
+        build_download_token(
+            &cfg.download_token_key(),
+            uid,
+            target,
+            kind.as_str(),
+            "f.bin",
+        )
+        .unwrap()
+        .0
     }
 
     #[tokio::test]
@@ -714,7 +728,16 @@ mod token_binding_tests {
         assert!(matches!(r, Err(AppError::Forbidden)));
 
         // Same id, but replayed through the library route.
-        let r = serve_chunk(&cfg, &unlock, "u1", TargetKind::Library, "space-a", &token, 0).await;
+        let r = serve_chunk(
+            &cfg,
+            &unlock,
+            "u1",
+            TargetKind::Library,
+            "space-a",
+            &token,
+            0,
+        )
+        .await;
         assert!(matches!(r, Err(AppError::Forbidden)));
 
         // Different user.

@@ -141,7 +141,10 @@ impl<'r> FromRequest<'r> for SpaceReader {
             Outcome::Forward(s) => return Outcome::Forward(s),
         };
         match check_space_permission(request, &auth.0.id, LEVEL_READ).await {
-            Ok(space) => Outcome::Success(SpaceReader { user: auth.0, space }),
+            Ok(space) => Outcome::Success(SpaceReader {
+                user: auth.0,
+                space,
+            }),
             Err((s, e)) => Outcome::Error((s, e)),
         }
     }
@@ -158,7 +161,10 @@ impl<'r> FromRequest<'r> for SpaceWriter {
             Outcome::Forward(s) => return Outcome::Forward(s),
         };
         match check_space_permission(request, &auth.0.id, LEVEL_WRITE).await {
-            Ok(space) => Outcome::Success(SpaceWriter { user: auth.0, space }),
+            Ok(space) => Outcome::Success(SpaceWriter {
+                user: auth.0,
+                space,
+            }),
             Err((s, e)) => Outcome::Error((s, e)),
         }
     }
@@ -175,7 +181,10 @@ impl<'r> FromRequest<'r> for SpaceAdmin {
             Outcome::Forward(s) => return Outcome::Forward(s),
         };
         match check_space_permission(request, &auth.0.id, LEVEL_ADMIN).await {
-            Ok(space) => Outcome::Success(SpaceAdmin { user: auth.0, space }),
+            Ok(space) => Outcome::Success(SpaceAdmin {
+                user: auth.0,
+                space,
+            }),
             Err((s, e)) => Outcome::Error((s, e)),
         }
     }
@@ -217,7 +226,10 @@ impl<'r> FromRequest<'r> for SessionSpaceReader {
             Outcome::Forward(s) => return Outcome::Forward(s),
         };
         match check_space_permission(request, &auth.0.id, LEVEL_READ).await {
-            Ok(space) => Outcome::Success(SessionSpaceReader { user: auth.0, space }),
+            Ok(space) => Outcome::Success(SessionSpaceReader {
+                user: auth.0,
+                space,
+            }),
             Err((s, e)) => Outcome::Error((s, e)),
         }
     }
@@ -234,7 +246,10 @@ impl<'r> FromRequest<'r> for SessionSpaceWriter {
             Outcome::Forward(s) => return Outcome::Forward(s),
         };
         match check_space_permission(request, &auth.0.id, LEVEL_WRITE).await {
-            Ok(space) => Outcome::Success(SessionSpaceWriter { user: auth.0, space }),
+            Ok(space) => Outcome::Success(SessionSpaceWriter {
+                user: auth.0,
+                space,
+            }),
             Err((s, e)) => Outcome::Error((s, e)),
         }
     }
@@ -251,7 +266,10 @@ impl<'r> FromRequest<'r> for SessionSpaceAdmin {
             Outcome::Forward(s) => return Outcome::Forward(s),
         };
         match check_space_permission(request, &auth.0.id, LEVEL_ADMIN).await {
-            Ok(space) => Outcome::Success(SessionSpaceAdmin { user: auth.0, space }),
+            Ok(space) => Outcome::Success(SessionSpaceAdmin {
+                user: auth.0,
+                space,
+            }),
             Err((s, e)) => Outcome::Error((s, e)),
         }
     }

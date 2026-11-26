@@ -189,7 +189,20 @@ impl Space {
         let spaces = rows
             .into_iter()
             .map(
-                |(id, name, owner_type, owner_id, encryption_mode, encrypted_data_key, salt, verify_blob, recovery_blob, created_at, grantee_count, user_permission)| {
+                |(
+                    id,
+                    name,
+                    owner_type,
+                    owner_id,
+                    encryption_mode,
+                    encrypted_data_key,
+                    salt,
+                    verify_blob,
+                    recovery_blob,
+                    created_at,
+                    grantee_count,
+                    user_permission,
+                )| {
                     SpaceWithMeta {
                         space: Space {
                             id,
@@ -220,7 +233,23 @@ impl Space {
         user_id: &str,
         space_id: &str,
     ) -> Result<Option<SpaceWithMeta>, AppError> {
-        let row = sqlx::query_as::<_, (String, String, String, String, String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, String, i64, String)>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                Vec<u8>,
+                Option<Vec<u8>>,
+                Option<Vec<u8>>,
+                Option<Vec<u8>>,
+                String,
+                i64,
+                String,
+            ),
+        >(
             "WITH user_groups AS (
                 SELECT group_id FROM group_members WHERE user_id = ?1
             ),
@@ -266,7 +295,20 @@ impl Space {
         .await?;
 
         Ok(row.map(
-            |(id, name, owner_type, owner_id, encryption_mode, encrypted_data_key, salt, verify_blob, recovery_blob, created_at, grantee_count, user_permission)| {
+            |(
+                id,
+                name,
+                owner_type,
+                owner_id,
+                encryption_mode,
+                encrypted_data_key,
+                salt,
+                verify_blob,
+                recovery_blob,
+                created_at,
+                grantee_count,
+                user_permission,
+            )| {
                 SpaceWithMeta {
                     space: Space {
                         id,
@@ -738,10 +780,9 @@ mod tests {
             .await
             .unwrap();
 
-        let updated =
-            SpaceAccess::update_permission(&pool, &space.id, "user", &bob.id, "admin")
-                .await
-                .unwrap();
+        let updated = SpaceAccess::update_permission(&pool, &space.id, "user", &bob.id, "admin")
+            .await
+            .unwrap();
         assert_eq!(updated.permission, "admin");
     }
 
@@ -806,8 +847,12 @@ mod tests {
         )
         .await
         .unwrap();
-        GroupMember::add(&pool, &group.id, &alice.id, "owner").await.unwrap();
-        GroupMember::add(&pool, &group.id, &bob.id, "member").await.unwrap();
+        GroupMember::add(&pool, &group.id, &alice.id, "owner")
+            .await
+            .unwrap();
+        GroupMember::add(&pool, &group.id, &bob.id, "member")
+            .await
+            .unwrap();
 
         // Create a group-owned space
         let space = Space::create(
@@ -824,16 +869,14 @@ mod tests {
         .unwrap();
 
         // Both group members get admin through group ownership
-        let alice_perm =
-            SpaceAccess::resolve_user_permission(&pool, &alice.id, &space.id)
-                .await
-                .unwrap();
+        let alice_perm = SpaceAccess::resolve_user_permission(&pool, &alice.id, &space.id)
+            .await
+            .unwrap();
         assert_eq!(alice_perm.as_deref(), Some("admin"));
 
-        let bob_perm =
-            SpaceAccess::resolve_user_permission(&pool, &bob.id, &space.id)
-                .await
-                .unwrap();
+        let bob_perm = SpaceAccess::resolve_user_permission(&pool, &bob.id, &space.id)
+            .await
+            .unwrap();
         assert_eq!(bob_perm.as_deref(), Some("admin"));
     }
 
@@ -880,7 +923,9 @@ mod tests {
         )
         .await
         .unwrap();
-        GroupMember::add(&pool, &group.id, &bob.id, "member").await.unwrap();
+        GroupMember::add(&pool, &group.id, &bob.id, "member")
+            .await
+            .unwrap();
 
         let space = create_user_space(&pool, "S", &alice.id).await;
 
@@ -890,17 +935,15 @@ mod tests {
             .unwrap();
 
         // Bob gets write through group membership
-        let bob_perm =
-            SpaceAccess::resolve_user_permission(&pool, &bob.id, &space.id)
-                .await
-                .unwrap();
+        let bob_perm = SpaceAccess::resolve_user_permission(&pool, &bob.id, &space.id)
+            .await
+            .unwrap();
         assert_eq!(bob_perm.as_deref(), Some("write"));
 
         // Charlie is not in the group — no access
-        let charlie_perm =
-            SpaceAccess::resolve_user_permission(&pool, &charlie.id, &space.id)
-                .await
-                .unwrap();
+        let charlie_perm = SpaceAccess::resolve_user_permission(&pool, &charlie.id, &space.id)
+            .await
+            .unwrap();
         assert!(charlie_perm.is_none());
     }
 
@@ -921,7 +964,9 @@ mod tests {
         )
         .await
         .unwrap();
-        GroupMember::add(&pool, &group.id, &bob.id, "member").await.unwrap();
+        GroupMember::add(&pool, &group.id, &bob.id, "member")
+            .await
+            .unwrap();
 
         let space = create_user_space(&pool, "S", &alice.id).await;
 

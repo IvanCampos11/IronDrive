@@ -366,7 +366,8 @@ async fn cache_control_static_assets() {
 /// Returns the CSRF token for XHR calls.
 async fn signed_in_with_library(client: &Client) -> String {
     let pw = alice_password();
-    let body = serde_json::json!({ "username": "alice", "email": "alice@example.com", "password": pw });
+    let body =
+        serde_json::json!({ "username": "alice", "email": "alice@example.com", "password": pw });
     let r = client
         .post("/api/v1/auth/register")
         .header(rocket::http::ContentType::JSON)
@@ -394,7 +395,12 @@ async fn signed_in_with_library(client: &Client) -> String {
     csrf
 }
 
-async fn xhr_json(client: &Client, csrf: &str, url: &str, body: serde_json::Value) -> (Status, serde_json::Value) {
+async fn xhr_json(
+    client: &Client,
+    csrf: &str,
+    url: &str,
+    body: serde_json::Value,
+) -> (Status, serde_json::Value) {
     let r = client
         .post(url.to_string())
         .header(rocket::http::ContentType::JSON)
@@ -404,7 +410,10 @@ async fn xhr_json(client: &Client, csrf: &str, url: &str, body: serde_json::Valu
         .await;
     let status = r.status();
     let text = r.into_string().await.unwrap_or_default();
-    (status, serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 #[tokio::test]
@@ -417,7 +426,11 @@ async fn html_request_without_session_redirects_to_login() {
         .header(rocket::http::Accept::HTML)
         .dispatch()
         .await;
-    assert_eq!(r.status(), Status::SeeOther, "browsers should be sent to sign-in, not an error page");
+    assert_eq!(
+        r.status(),
+        Status::SeeOther,
+        "browsers should be sent to sign-in, not an error page"
+    );
     assert_eq!(r.headers().get_one("Location"), Some("/login"));
 }
 
@@ -427,32 +440,75 @@ async fn file_api_mkdir_and_rename() {
     let client = page_test_client(&tmp).await;
     let csrf = signed_in_with_library(&client).await;
 
-    let (status, body) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "", "name": "Docs"})).await;
+    let (status, body) = xhr_json(
+        &client,
+        &csrf,
+        "/files/api/mkdir",
+        serde_json::json!({"path": "", "name": "Docs"}),
+    )
+    .await;
     assert_eq!(status, Status::Ok);
     assert_eq!(body["path"], "Docs");
 
-    let (status, body) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "Docs", "name": "Inner"})).await;
+    let (status, body) = xhr_json(
+        &client,
+        &csrf,
+        "/files/api/mkdir",
+        serde_json::json!({"path": "Docs", "name": "Inner"}),
+    )
+    .await;
     assert_eq!(status, Status::Ok);
     assert_eq!(body["path"], "Docs/Inner");
 
     // Duplicate name → 409 with a readable message.
-    let (status, body) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "", "name": "Docs"})).await;
+    let (status, body) = xhr_json(
+        &client,
+        &csrf,
+        "/files/api/mkdir",
+        serde_json::json!({"path": "", "name": "Docs"}),
+    )
+    .await;
     assert_eq!(status, Status::Conflict);
     assert!(body["error"].as_str().unwrap_or("").len() > 3);
 
     // Names with slashes or a leading dot are rejected.
     for bad in ["a/b", ".hidden", "  "] {
-        let (status, _) = xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "", "name": bad})).await;
-        assert_eq!(status, Status::BadRequest, "name {bad:?} should be rejected");
+        let (status, _) = xhr_json(
+            &client,
+            &csrf,
+            "/files/api/mkdir",
+            serde_json::json!({"path": "", "name": bad}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            Status::BadRequest,
+            "name {bad:?} should be rejected"
+        );
     }
 
     // Rename keeps the item in its parent folder.
-    let (status, body) = xhr_json(&client, &csrf, "/files/api/rename", serde_json::json!({"path": "Docs/Inner", "new_name": "Renamed"})).await;
+    let (status, body) = xhr_json(
+        &client,
+        &csrf,
+        "/files/api/rename",
+        serde_json::json!({"path": "Docs/Inner", "new_name": "Renamed"}),
+    )
+    .await;
     assert_eq!(status, Status::Ok);
     assert_eq!(body["path"], "Docs/Renamed");
 
-    let page = client.get("/files/partial?path=Docs").dispatch().await.into_string().await.unwrap();
-    assert!(page.contains("data-name=\"Renamed\""), "renamed folder should be listed");
+    let page = client
+        .get("/files/partial?path=Docs")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
+    assert!(
+        page.contains("data-name=\"Renamed\""),
+        "renamed folder should be listed"
+    );
 
     // Missing CSRF header is refused.
     let r = client
@@ -470,12 +526,24 @@ async fn bulk_errors_are_user_facing() {
     let client = page_test_client(&tmp).await;
     let csrf = signed_in_with_library(&client).await;
 
-    let (status, body) = xhr_json(&client, &csrf, "/files/bulk-delete", serde_json::json!({"paths": ["nope/missing.txt"]})).await;
+    let (status, body) = xhr_json(
+        &client,
+        &csrf,
+        "/files/bulk-delete",
+        serde_json::json!({"paths": ["nope/missing.txt"]}),
+    )
+    .await;
     assert_eq!(status, Status::Ok);
     assert_eq!(body["deleted"], 0);
     let err = body["errors"][0].as_str().unwrap();
-    assert!(err.starts_with("missing.txt: "), "error should name the file, got {err:?}");
-    assert!(!err.contains("internal"), "internal details must not leak: {err:?}");
+    assert!(
+        err.starts_with("missing.txt: "),
+        "error should name the file, got {err:?}"
+    );
+    assert!(
+        !err.contains("internal"),
+        "internal details must not leak: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -484,11 +552,26 @@ async fn file_browser_page_renders_shell() {
     let client = page_test_client(&tmp).await;
     signed_in_with_library(&client).await;
 
-    let page = client.get("/files").dispatch().await.into_string().await.unwrap();
+    let page = client
+        .get("/files")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
     assert!(page.contains("id=\"file-browser-content\""));
-    assert!(page.contains("aria-current=\"page\"") && page.contains("My files"), "My files nav item should be active");
-    assert!(page.contains("/static/js/browser.js?v="), "assets should carry a cache-busting version");
-    assert!(!page.contains("/shares") && !page.contains("/trash"), "links to unimplemented pages must be gone");
+    assert!(
+        page.contains("aria-current=\"page\"") && page.contains("My files"),
+        "My files nav item should be active"
+    );
+    assert!(
+        page.contains("/static/js/browser.js?v="),
+        "assets should carry a cache-busting version"
+    );
+    assert!(
+        !page.contains("/shares") && !page.contains("/trash"),
+        "links to unimplemented pages must be gone"
+    );
 }
 
 /// Upload `bytes` to `name` at the library root through the page XHR endpoint.
@@ -505,7 +588,12 @@ async fn page_upload(client: &Client, csrf: &str, name: &str, bytes: &[u8]) {
 /// Flip a byte in the middle of the only library's copy of `name`.
 fn corrupt_library_file(tmp: &tempfile::TempDir, name: &str) {
     let libs = tmp.path().join("data/libraries");
-    let lib = std::fs::read_dir(&libs).unwrap().next().unwrap().unwrap().path();
+    let lib = std::fs::read_dir(&libs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
     let file = lib.join(name);
     let mut bytes = std::fs::read(&file).unwrap();
     let mid = bytes.len() / 2;
@@ -518,11 +606,23 @@ async fn details_info_describes_files_and_folders() {
     let tmp = tempfile::tempdir().unwrap();
     let client = page_test_client(&tmp).await;
     let csrf = signed_in_with_library(&client).await;
-    xhr_json(&client, &csrf, "/files/api/mkdir", serde_json::json!({"path": "", "name": "Docs"})).await;
+    xhr_json(
+        &client,
+        &csrf,
+        "/files/api/mkdir",
+        serde_json::json!({"path": "", "name": "Docs"}),
+    )
+    .await;
     page_upload(&client, &csrf, "Docs/a.txt", b"hello world").await;
 
     let file: serde_json::Value = serde_json::from_str(
-        &client.get("/files/info?path=Docs/a.txt").dispatch().await.into_string().await.unwrap(),
+        &client
+            .get("/files/info?path=Docs/a.txt")
+            .dispatch()
+            .await
+            .into_string()
+            .await
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(file["name"], "a.txt");
@@ -531,7 +631,13 @@ async fn details_info_describes_files_and_folders() {
     assert_eq!(file["problems"].as_array().unwrap().len(), 0);
 
     let dir: serde_json::Value = serde_json::from_str(
-        &client.get("/files/info?path=Docs").dispatch().await.into_string().await.unwrap(),
+        &client
+            .get("/files/info?path=Docs")
+            .dispatch()
+            .await
+            .into_string()
+            .await
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(dir["is_dir"], true);
@@ -547,36 +653,110 @@ async fn verify_flags_damaged_file_and_alert_lifecycle() {
     page_upload(&client, &csrf, "bad.txt", &[7u8; 4096]).await;
     corrupt_library_file(&tmp, "bad.txt");
 
-    let (status, body) = xhr_json(&client, &csrf, "/files/verify?path=ok.txt", serde_json::json!({})).await;
+    let (status, body) = xhr_json(
+        &client,
+        &csrf,
+        "/files/verify?path=ok.txt",
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(status, Status::Ok);
     assert_eq!(body["ok"], true);
 
     // Checking twice must not create a duplicate alert.
     for _ in 0..2 {
-        let (status, body) = xhr_json(&client, &csrf, "/files/verify?path=bad.txt", serde_json::json!({})).await;
+        let (status, body) = xhr_json(
+            &client,
+            &csrf,
+            "/files/verify?path=bad.txt",
+            serde_json::json!({}),
+        )
+        .await;
         assert_eq!(status, Status::Ok);
         assert_eq!(body["ok"], false);
     }
 
-    let bell = client.get("/notifications").dispatch().await.into_string().await.unwrap();
-    assert_eq!(bell.matches("data-dismiss-alert=").count(), 1, "exactly one alert expected");
-    let listing = client.get("/files/partial").dispatch().await.into_string().await.unwrap();
-    assert!(listing.contains("item-flag"), "damaged file should be badged in the listing");
+    let bell = client
+        .get("/notifications")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
+    assert_eq!(
+        bell.matches("data-dismiss-alert=").count(),
+        1,
+        "exactly one alert expected"
+    );
+    let listing = client
+        .get("/files/partial")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
+    assert!(
+        listing.contains("item-flag"),
+        "damaged file should be badged in the listing"
+    );
 
-    let id = bell.split("data-dismiss-alert=\"").nth(1).unwrap().split('"').next().unwrap().to_string();
-    let (status, _) = xhr_json(&client, &csrf, &format!("/notifications/{id}/dismiss"), serde_json::json!({})).await;
+    let id = bell
+        .split("data-dismiss-alert=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+    let (status, _) = xhr_json(
+        &client,
+        &csrf,
+        &format!("/notifications/{id}/dismiss"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(status, Status::Ok);
-    let bell = client.get("/notifications").dispatch().await.into_string().await.unwrap();
-    assert!(!bell.contains("data-dismiss-alert="), "alert should be gone after dismissing");
+    let bell = client
+        .get("/notifications")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
+    assert!(
+        !bell.contains("data-dismiss-alert="),
+        "alert should be gone after dismissing"
+    );
 
     // Re-flag it, then "restore" the file: a clean check clears the alert by itself.
-    xhr_json(&client, &csrf, "/files/verify?path=bad.txt", serde_json::json!({})).await;
+    xhr_json(
+        &client,
+        &csrf,
+        "/files/verify?path=bad.txt",
+        serde_json::json!({}),
+    )
+    .await;
     corrupt_library_file(&tmp, "bad.txt"); // flips the same byte back
-    let (_, body) = xhr_json(&client, &csrf, "/files/verify?path=bad.txt", serde_json::json!({})).await;
+    let (_, body) = xhr_json(
+        &client,
+        &csrf,
+        "/files/verify?path=bad.txt",
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(body["ok"], true);
     assert_eq!(body["resolved"], 1);
-    let bell = client.get("/notifications").dispatch().await.into_string().await.unwrap();
-    assert!(!bell.contains("data-dismiss-alert="), "a clean check should resolve the alert");
+    let bell = client
+        .get("/notifications")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
+    assert!(
+        !bell.contains("data-dismiss-alert="),
+        "a clean check should resolve the alert"
+    );
 }
 
 #[tokio::test]
@@ -593,14 +773,19 @@ async fn admin_page_is_admin_only_and_sets_quota() {
         .dispatch()
         .await;
     assert_eq!(r.status(), Status::Ok);
-    let bob_id = serde_json::from_str::<serde_json::Value>(&r.into_string().await.unwrap()).unwrap()["user_id"]
+    let bob_id = serde_json::from_str::<serde_json::Value>(&r.into_string().await.unwrap())
+        .unwrap()["user_id"]
         .as_str()
         .unwrap()
         .to_string();
 
     let page = client.get("/admin").dispatch().await;
     assert_eq!(page.status(), Status::Ok);
-    assert!(page.into_string().await.unwrap().contains("bob@example.com"));
+    assert!(page
+        .into_string()
+        .await
+        .unwrap()
+        .contains("bob@example.com"));
 
     let r = client
         .post(format!("/admin/users/{bob_id}/quota"))
@@ -609,10 +794,23 @@ async fn admin_page_is_admin_only_and_sets_quota() {
         .dispatch()
         .await;
     assert_eq!(r.status(), Status::SeeOther);
-    assert!(client.get("/admin").dispatch().await.into_string().await.unwrap().contains("2.0 GB"));
+    assert!(client
+        .get("/admin")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap()
+        .contains("2.0 GB"));
 
     // Admins can't disable themselves.
-    let me_id = client.get("/settings").dispatch().await.into_string().await.unwrap();
+    let me_id = client
+        .get("/settings")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
     assert!(me_id.contains("Server admin"));
 
     // Sign out, sign in as bob: non-admins are refused.
@@ -627,7 +825,10 @@ async fn admin_page_is_admin_only_and_sets_quota() {
     let r = client
         .post("/login")
         .header(rocket::http::ContentType::Form)
-        .body(format!("username=bob&password={}&csrf_token={csrf}", alice_password()))
+        .body(format!(
+            "username=bob&password={}&csrf_token={csrf}",
+            alice_password()
+        ))
         .dispatch()
         .await;
     assert_eq!(r.status(), Status::SeeOther);
@@ -637,12 +838,19 @@ async fn admin_page_is_admin_only_and_sets_quota() {
         .body(format!("csrf_token={csrf}"))
         .dispatch()
         .await;
-    assert_eq!(client.get("/admin").dispatch().await.status(), Status::Forbidden);
+    assert_eq!(
+        client.get("/admin").dispatch().await.status(),
+        Status::Forbidden
+    );
     let r = client
         .post(format!("/admin/users/{bob_id}/quota"))
         .header(rocket::http::ContentType::Form)
         .body(format!("quota=100%20GB&csrf_token={csrf}"))
         .dispatch()
         .await;
-    assert_eq!(r.status(), Status::Forbidden, "non-admins can't change quotas");
+    assert_eq!(
+        r.status(),
+        Status::Forbidden,
+        "non-admins can't change quotas"
+    );
 }

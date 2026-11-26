@@ -13,9 +13,9 @@ use crate::errors::AppError;
 use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
 use crate::services::chunk_service;
-use crate::utils::format_bytes;
 use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::unlock_state::UnlockState;
+use crate::utils::format_bytes;
 
 // Request and response types.
 
@@ -151,7 +151,10 @@ impl<'r> Responder<'r, 'static> for FileChunkDownload {
             .header(ContentType::Binary)
             .header(Header::new("Content-Disposition", "attachment"))
             .header(Header::new("Content-Security-Policy", DOWNLOAD_CSP))
-            .header(Header::new("X-IronDrive-Chunk-Sha256", self.checksum_sha256))
+            .header(Header::new(
+                "X-IronDrive-Chunk-Sha256",
+                self.checksum_sha256,
+            ))
             .header(Header::new(
                 "X-IronDrive-Chunk-Index",
                 self.chunk_index.to_string(),

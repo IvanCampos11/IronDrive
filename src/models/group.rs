@@ -126,7 +126,11 @@ impl Group {
     }
 
     /// Search groups whose name starts with `prefix`. Returns at most `limit` results.
-    pub async fn search_by_name_prefix(pool: &DbPool, prefix: &str, limit: i64) -> Result<Vec<Group>, AppError> {
+    pub async fn search_by_name_prefix(
+        pool: &DbPool,
+        prefix: &str,
+        limit: i64,
+    ) -> Result<Vec<Group>, AppError> {
         let pattern = format!("{}%", prefix);
         let groups = sqlx::query_as::<_, Group>(
             "SELECT id, name, description, created_by, created_at FROM groups WHERE name LIKE ? ORDER BY name ASC LIMIT ?",
@@ -147,48 +151,22 @@ impl Group {
         user_id: &str,
         group_id: &str,
     ) -> Result<Option<GroupWithMeta>, AppError> {
-        let row = sqlx::query_as::<_, (String, String, Option<String>, String, String, i64, String)>(
-            "SELECT g.id, g.name, g.description, g.created_by, g.created_at,
+        let row =
+            sqlx::query_as::<_, (String, String, Option<String>, String, String, i64, String)>(
+                "SELECT g.id, g.name, g.description, g.created_by, g.created_at,
                     (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) AS member_count,
                     gm.role
              FROM groups g
              INNER JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = ?
              WHERE g.id = ?",
-        )
-        .bind(user_id)
-        .bind(group_id)
-        .fetch_optional(pool)
-        .await?;
+            )
+            .bind(user_id)
+            .bind(group_id)
+            .fetch_optional(pool)
+            .await?;
 
-        Ok(row.map(|(id, name, description, created_by, created_at, member_count, user_role)| {
-            GroupWithMeta {
-                group: Group { id, name, description, created_by, created_at },
-                member_count,
-                user_role,
-            }
-        }))
-    }
-
-    /// All groups that a user belongs to (via `group_members`), with member count and user role.
-    pub async fn find_all_for_user(
-        pool: &DbPool,
-        user_id: &str,
-    ) -> Result<Vec<GroupWithMeta>, AppError> {
-        let rows = sqlx::query_as::<_, (String, String, Option<String>, String, String, i64, String)>(
-            "SELECT g.id, g.name, g.description, g.created_by, g.created_at,
-                    (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) AS member_count,
-                    gm.role
-             FROM groups g
-             INNER JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = ?
-             ORDER BY g.name ASC",
-        )
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
-
-        let groups = rows
-            .into_iter()
-            .map(|(id, name, description, created_by, created_at, member_count, user_role)| {
+        Ok(row.map(
+            |(id, name, description, created_by, created_at, member_count, user_role)| {
                 GroupWithMeta {
                     group: Group {
                         id,
@@ -200,7 +178,45 @@ impl Group {
                     member_count,
                     user_role,
                 }
-            })
+            },
+        ))
+    }
+
+    /// All groups that a user belongs to (via `group_members`), with member count and user role.
+    pub async fn find_all_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<Vec<GroupWithMeta>, AppError> {
+        let rows =
+            sqlx::query_as::<_, (String, String, Option<String>, String, String, i64, String)>(
+                "SELECT g.id, g.name, g.description, g.created_by, g.created_at,
+                    (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) AS member_count,
+                    gm.role
+             FROM groups g
+             INNER JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = ?
+             ORDER BY g.name ASC",
+            )
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?;
+
+        let groups = rows
+            .into_iter()
+            .map(
+                |(id, name, description, created_by, created_at, member_count, user_role)| {
+                    GroupWithMeta {
+                        group: Group {
+                            id,
+                            name,
+                            description,
+                            created_by,
+                            created_at,
+                        },
+                        member_count,
+                        user_role,
+                    }
+                },
+            )
             .collect();
 
         Ok(groups)
@@ -222,14 +238,12 @@ impl Group {
             }
         }
 
-        let result = sqlx::query(
-            "UPDATE groups SET name = ?, description = ? WHERE id = ?",
-        )
-        .bind(&params.name)
-        .bind(&params.description)
-        .bind(id)
-        .execute(pool)
-        .await;
+        let result = sqlx::query("UPDATE groups SET name = ?, description = ? WHERE id = ?")
+            .bind(&params.name)
+            .bind(&params.description)
+            .bind(id)
+            .execute(pool)
+            .await;
 
         match result {
             Ok(r) if r.rows_affected() == 0 => Err(AppError::NotFound),
@@ -268,14 +282,13 @@ impl GroupMember {
         user_id: &str,
         role: &str,
     ) -> Result<GroupMember, AppError> {
-        let insert_result = sqlx::query(
-            "INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, ?)",
-        )
-        .bind(group_id)
-        .bind(user_id)
-        .bind(role)
-        .execute(pool)
-        .await;
+        let insert_result =
+            sqlx::query("INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, ?)")
+                .bind(group_id)
+                .bind(user_id)
+                .bind(role)
+                .execute(pool)
+                .await;
 
         match insert_result {
             Ok(_) => {}
@@ -287,25 +300,18 @@ impl GroupMember {
             Err(e) => return Err(AppError::Sqlx(e)),
         }
 
-        Self::find(pool, group_id, user_id)
-            .await?
-            .ok_or_else(|| {
-                AppError::Internal("Member was inserted but could not be read back".into())
-            })
+        Self::find(pool, group_id, user_id).await?.ok_or_else(|| {
+            AppError::Internal("Member was inserted but could not be read back".into())
+        })
     }
 
     /// Remove a member from a group.
-    pub async fn remove(
-        pool: &DbPool,
-        group_id: &str,
-        user_id: &str,
-    ) -> Result<(), AppError> {
-        let result =
-            sqlx::query("DELETE FROM group_members WHERE group_id = ? AND user_id = ?")
-                .bind(group_id)
-                .bind(user_id)
-                .execute(pool)
-                .await?;
+    pub async fn remove(pool: &DbPool, group_id: &str, user_id: &str) -> Result<(), AppError> {
+        let result = sqlx::query("DELETE FROM group_members WHERE group_id = ? AND user_id = ?")
+            .bind(group_id)
+            .bind(user_id)
+            .execute(pool)
+            .await?;
 
         if result.rows_affected() == 0 {
             return Err(AppError::NotFound);
@@ -333,18 +339,13 @@ impl GroupMember {
     }
 
     /// Check whether a user is a member of a group.
-    pub async fn is_member(
-        pool: &DbPool,
-        group_id: &str,
-        user_id: &str,
-    ) -> Result<bool, AppError> {
-        let count: (i32,) = sqlx::query_as(
-            "SELECT COUNT(1) FROM group_members WHERE group_id = ? AND user_id = ?",
-        )
-        .bind(group_id)
-        .bind(user_id)
-        .fetch_one(pool)
-        .await?;
+    pub async fn is_member(pool: &DbPool, group_id: &str, user_id: &str) -> Result<bool, AppError> {
+        let count: (i32,) =
+            sqlx::query_as("SELECT COUNT(1) FROM group_members WHERE group_id = ? AND user_id = ?")
+                .bind(group_id)
+                .bind(user_id)
+                .fetch_one(pool)
+                .await?;
 
         Ok(count.0 > 0)
     }
@@ -377,14 +378,13 @@ impl GroupMember {
         user_id: &str,
         new_role: &str,
     ) -> Result<GroupMember, AppError> {
-        let result = sqlx::query(
-            "UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?",
-        )
-        .bind(new_role)
-        .bind(group_id)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+        let result =
+            sqlx::query("UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?")
+                .bind(new_role)
+                .bind(group_id)
+                .bind(user_id)
+                .execute(pool)
+                .await?;
 
         if result.rows_affected() == 0 {
             return Err(AppError::NotFound);
@@ -514,7 +514,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(updated.name, "New Name");
-        assert_eq!(updated.description.as_deref(), Some("Now with a description"));
+        assert_eq!(
+            updated.description.as_deref(),
+            Some("Now with a description")
+        );
     }
 
     #[tokio::test]
@@ -533,13 +536,19 @@ mod tests {
         .await
         .unwrap();
 
-        GroupMember::add(&pool, &group.id, &user.id, "owner").await.unwrap();
-        assert!(GroupMember::is_member(&pool, &group.id, &user.id).await.unwrap());
+        GroupMember::add(&pool, &group.id, &user.id, "owner")
+            .await
+            .unwrap();
+        assert!(GroupMember::is_member(&pool, &group.id, &user.id)
+            .await
+            .unwrap());
 
         Group::delete_by_id(&pool, &group.id).await.unwrap();
 
         assert!(Group::find_by_id(&pool, &group.id).await.unwrap().is_none());
-        assert!(!GroupMember::is_member(&pool, &group.id, &user.id).await.unwrap());
+        assert!(!GroupMember::is_member(&pool, &group.id, &user.id)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -569,9 +578,15 @@ mod tests {
         .await
         .unwrap();
 
-        GroupMember::add(&pool, &g1.id, &alice.id, "owner").await.unwrap();
-        GroupMember::add(&pool, &g2.id, &bob.id, "owner").await.unwrap();
-        GroupMember::add(&pool, &g2.id, &alice.id, "member").await.unwrap();
+        GroupMember::add(&pool, &g1.id, &alice.id, "owner")
+            .await
+            .unwrap();
+        GroupMember::add(&pool, &g2.id, &bob.id, "owner")
+            .await
+            .unwrap();
+        GroupMember::add(&pool, &g2.id, &alice.id, "member")
+            .await
+            .unwrap();
 
         let alice_groups = Group::find_all_for_user(&pool, &alice.id).await.unwrap();
         assert_eq!(alice_groups.len(), 2);
@@ -602,12 +617,20 @@ mod tests {
         .await
         .unwrap();
 
-        let member = GroupMember::add(&pool, &group.id, &bob.id, "member").await.unwrap();
+        let member = GroupMember::add(&pool, &group.id, &bob.id, "member")
+            .await
+            .unwrap();
         assert_eq!(member.role, "member");
-        assert!(GroupMember::is_member(&pool, &group.id, &bob.id).await.unwrap());
+        assert!(GroupMember::is_member(&pool, &group.id, &bob.id)
+            .await
+            .unwrap());
 
-        GroupMember::remove(&pool, &group.id, &bob.id).await.unwrap();
-        assert!(!GroupMember::is_member(&pool, &group.id, &bob.id).await.unwrap());
+        GroupMember::remove(&pool, &group.id, &bob.id)
+            .await
+            .unwrap();
+        assert!(!GroupMember::is_member(&pool, &group.id, &bob.id)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -626,7 +649,9 @@ mod tests {
         .await
         .unwrap();
 
-        GroupMember::add(&pool, &group.id, &alice.id, "owner").await.unwrap();
+        GroupMember::add(&pool, &group.id, &alice.id, "owner")
+            .await
+            .unwrap();
 
         let err = GroupMember::add(&pool, &group.id, &alice.id, "member")
             .await
@@ -651,10 +676,16 @@ mod tests {
         .await
         .unwrap();
 
-        GroupMember::add(&pool, &group.id, &alice.id, "owner").await.unwrap();
-        GroupMember::add(&pool, &group.id, &bob.id, "member").await.unwrap();
+        GroupMember::add(&pool, &group.id, &alice.id, "owner")
+            .await
+            .unwrap();
+        GroupMember::add(&pool, &group.id, &bob.id, "member")
+            .await
+            .unwrap();
 
-        let members = GroupMember::list_with_details(&pool, &group.id).await.unwrap();
+        let members = GroupMember::list_with_details(&pool, &group.id)
+            .await
+            .unwrap();
         assert_eq!(members.len(), 2);
 
         // Sorted: owner first, then by username ASC
@@ -680,7 +711,9 @@ mod tests {
         .await
         .unwrap();
 
-        GroupMember::add(&pool, &group.id, &alice.id, "member").await.unwrap();
+        GroupMember::add(&pool, &group.id, &alice.id, "member")
+            .await
+            .unwrap();
 
         let updated = GroupMember::update_role(&pool, &group.id, &alice.id, "manager")
             .await

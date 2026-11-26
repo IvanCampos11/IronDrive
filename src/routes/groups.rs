@@ -226,8 +226,7 @@ pub async fn add_member(
     body: Json<AddMemberRequest>,
 ) -> Result<Json<MemberResponse>, AppError> {
     let member =
-        group_service::add_member(pool.inner(), &user.0.id, id, &body.username, &body.role)
-            .await?;
+        group_service::add_member(pool.inner(), &user.0.id, id, &body.username, &body.role).await?;
 
     // Fetch full details for response (the service returns GroupMember without user info).
     let members = group_service::list_members(pool.inner(), &user.0.id, id).await?;
@@ -261,7 +260,11 @@ pub async fn remove_member(
 }
 
 /// PUT /api/v1/groups/<id>/members/<user_id> — Update a member's role.
-#[put("/api/v1/groups/<id>/members/<user_id>", format = "json", data = "<body>")]
+#[put(
+    "/api/v1/groups/<id>/members/<user_id>",
+    format = "json",
+    data = "<body>"
+)]
 pub async fn update_member_role(
     pool: &State<DbPool>,
     user: SetupComplete,

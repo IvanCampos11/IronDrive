@@ -72,7 +72,9 @@ async fn rocket() -> _ {
 
     match dotenv_result {
         Ok(path) => tracing::info!(path = %path.display(), "Loaded .env file"),
-        Err(e) => tracing::warn!("No .env file loaded ({e}); using environment variables / defaults"),
+        Err(e) => {
+            tracing::warn!("No .env file loaded ({e}); using environment variables / defaults")
+        }
     }
 
     let app_config = config::AppConfig::from_env();
@@ -93,10 +95,18 @@ async fn rocket() -> _ {
         .attach(cache_control_fairing())
         .attach(AdHoc::on_liftoff("Background Workers", |rocket| {
             Box::pin(async move {
-                let pool = rocket.state::<SqlitePool>().expect("DbPool not managed").clone();
-                let config = rocket.state::<config::AppConfig>().expect("AppConfig not managed").clone();
-                let unlock_state = rocket.state::<services::unlock_state::UnlockState>()
-                    .expect("UnlockState not managed").clone();
+                let pool = rocket
+                    .state::<SqlitePool>()
+                    .expect("DbPool not managed")
+                    .clone();
+                let config = rocket
+                    .state::<config::AppConfig>()
+                    .expect("AppConfig not managed")
+                    .clone();
+                let unlock_state = rocket
+                    .state::<services::unlock_state::UnlockState>()
+                    .expect("UnlockState not managed")
+                    .clone();
                 services::background::BackgroundRunner::start(pool, config, unlock_state);
             })
         }))
@@ -115,7 +125,10 @@ fn rocket_figment(app_config: &config::AppConfig) -> rocket::figment::Figment {
     rocket::figment::Figment::from(rocket::Config::default())
         .merge(Toml::file("Rocket.toml").nested())
         .merge(Env::prefixed("ROCKET_").global())
-        .merge(Serialized::default("secret_key", app_config.rocket_secret_key()))
+        .merge(Serialized::default(
+            "secret_key",
+            app_config.rocket_secret_key(),
+        ))
 }
 
 /// Tera templates plus an `asset_v()` function returning a content hash of
@@ -264,10 +277,22 @@ impl<'r> Responder<'r, 'static> for CatcherJsonBody {
                     .ok();
             }
             let (title, message) = match self.status.code {
-                403 => ("You don't have access", "You don't have permission to view this page."),
-                404 => ("Page not found", "This page doesn't exist, or it may have been moved or deleted."),
-                400 | 409 | 422 => ("That didn't work", "The request couldn't be processed. Go back and try again."),
-                _ => ("Something went wrong", "An unexpected error occurred on the server. Please try again in a moment."),
+                403 => (
+                    "You don't have access",
+                    "You don't have permission to view this page.",
+                ),
+                404 => (
+                    "Page not found",
+                    "This page doesn't exist, or it may have been moved or deleted.",
+                ),
+                400 | 409 | 422 => (
+                    "That didn't work",
+                    "The request couldn't be processed. Go back and try again.",
+                ),
+                _ => (
+                    "Something went wrong",
+                    "An unexpected error occurred on the server. Please try again in a moment.",
+                ),
             };
             let page = Template::render(
                 "errors/error",
