@@ -1,10 +1,7 @@
 //! API routes for spaces, access control, and space file operations.
 
 use rocket::data::{Data, ToByteUnit};
-use rocket::http::{ContentType, Header};
-use rocket::response::{self, Responder, Response};
 use rocket::serde::json::Json;
-use rocket::Request;
 use rocket::Route;
 use rocket::State;
 use serde::{Deserialize, Serialize};
@@ -14,10 +11,16 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::setup_guard::SetupComplete;
 use crate::guards::space_guard::{SpaceAdmin, SpaceReader, SpaceWriter};
+use crate::routes::download::{stream_file, RangeHeader, StreamedDownload};
+use crate::routes::library::{
+    CancelChunkUploadResponse, ChunkUploadResponse, CompleteChunkUploadRequest, FileChunkDownload,
+    InitChunkDownloadResponse, InitChunkUploadRequest, InitChunkUploadResponse,
+};
 use crate::services::crypto_service::MasterKey;
-use crate::services::fs_service::{self, FsEntry};
+use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::space_service;
 use crate::services::unlock_state::UnlockState;
+use crate::services::{chunk_service, quota_service, trash_service};
 use crate::utils::format_bytes;
 
 // Request and response DTOs.
@@ -135,6 +138,10 @@ pub struct RenameResponse {
 #[derive(Serialize)]
 pub struct DeleteResponse {
     pub message: String,
+    /// Set when the entry went to the trash; pass it to the trash restore
+    /// endpoint to undo. Absent for `permanent=true` deletes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trash_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -166,46 +173,7 @@ pub struct UsageResponse {
     pub dir_count: u64,
 }
 
-/// Custom responder for file downloads from a space.
-pub struct FileDownload {
-    pub data: Vec<u8>,
-    pub filename: String,
-    pub content_type: ContentType,
-    pub checksum_sha256: String,
-}
-
-impl<'r> Responder<'r, 'static> for FileDownload {
-    fn respond_to(self, _request: &'r Request<'_>) -> response::Result<'static> {
-        let len = self.data.len();
-
-        Response::build()
-            .header(self.content_type)
-            .header(Header::new("X-IronDrive-Integrity", self.checksum_sha256))
-            .header(Header::new(
-                "Content-Disposition",
-                format!(
-                    "attachment; filename=\"{}\"",
-                    self.filename.replace('\"', "\\\"")
-                ),
-            ))
-            .sized_body(len, std::io::Cursor::new(self.data))
-            .ok()
-    }
-}
-
 // Helpers.
-
-fn parse_content_type(mime: Option<&str>) -> ContentType {
-    mime.and_then(|m| {
-        let parts: Vec<&str> = m.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            Some(ContentType::new(parts[0].to_string(), parts[1].to_string()))
-        } else {
-            None
-        }
-    })
-    .unwrap_or(ContentType::Binary)
-}
 
 fn space_response(s: &crate::models::space::SpaceWithMeta) -> SpaceResponse {
     SpaceResponse {
@@ -518,7 +486,9 @@ pub async fn mkdir(
 
 /// POST /api/v1/spaces/<_id>/files/upload?path=<path>&verify=<bool>
 #[post("/api/v1/spaces/<_id>/files/upload?<path>&<verify>", data = "<data>")]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     _id: &str,
@@ -529,9 +499,7 @@ pub async fn upload(
 ) -> Result<Json<UploadResponse>, AppError> {
     let write_verify = verify.unwrap_or(false);
 
-    let max_bytes = config.max_upload_bytes;
-    let hard_cap_bytes: u64 = 50 * 1024 * 1024;
-    let allowed_bytes = std::cmp::min(max_bytes.bytes(), hard_cap_bytes.bytes());
+    let allowed_bytes = config.direct_upload_limit().bytes();
     let stream = data
         .open(allowed_bytes)
         .into_bytes()
@@ -546,13 +514,25 @@ pub async fn upload(
     }
 
     let bytes = stream.into_inner();
+    let space_id = &writer.space.space.id;
 
-    let result = fs_service::upload_space_file(
+    quota_service::ensure_room(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Space,
+        space_id,
+        quota_service::estimated_disk_size(bytes.len() as u64, config.chunk_size_bytes),
+        Some(&path),
+        None,
+    )
+    .await?;
+
+    let result = fs_service::upload_space_file_owned(
         config.inner(),
         unlock_state.inner(),
-        &writer.space.space.id,
+        space_id,
         &path,
-        &bytes,
+        bytes,
         write_verify,
     )
     .await?;
@@ -568,44 +548,61 @@ pub async fn upload(
 }
 
 /// GET /api/v1/spaces/<_id>/files/download?path=<path>
+///
+/// Streams the decrypted file. Supports `Range` requests.
 #[get("/api/v1/spaces/<_id>/files/download?<path>")]
 pub async fn download(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     _id: &str,
     reader: SpaceReader,
+    range: RangeHeader,
     path: String,
-) -> Result<FileDownload, AppError> {
-    let result = fs_service::download_space_file(
+) -> Result<StreamedDownload, AppError> {
+    stream_file(
+        pool.inner(),
         config.inner(),
         unlock_state.inner(),
+        TargetKind::Space,
         &reader.space.space.id,
         &path,
+        &range,
     )
-    .await?;
-
-    let content_type = parse_content_type(result.mime_type.as_deref());
-
-    Ok(FileDownload {
-        data: result.data,
-        filename: result.filename,
-        content_type,
-        checksum_sha256: result.checksum_sha256,
-    })
+    .await
 }
 
 /// DELETE /api/v1/spaces/<_id>/files/delete?path=<path>
-#[delete("/api/v1/spaces/<_id>/files/delete?<path>")]
+#[delete("/api/v1/spaces/<_id>/files/delete?<path>&<permanent>")]
 pub async fn delete_file(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     _id: &str,
     writer: SpaceWriter,
     path: String,
+    permanent: Option<bool>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    fs_service::delete_space_entry(config.inner(), &writer.space.space.id, &path).await?;
+    let space_id = &writer.space.space.id;
+    if permanent.unwrap_or(false) {
+        fs_service::delete_space_entry(config.inner(), space_id, &path).await?;
+        return Ok(Json(DeleteResponse {
+            message: "Entry deleted permanently.".into(),
+            trash_id: None,
+        }));
+    }
 
+    let item = trash_service::move_to_trash(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Space,
+        space_id,
+        &path,
+        Some(&writer.user.id),
+    )
+    .await?;
     Ok(Json(DeleteResponse {
-        message: "Entry deleted successfully.".into(),
+        message: "Moved to trash.".into(),
+        trash_id: Some(item.id),
     }))
 }
 
@@ -680,6 +677,216 @@ pub async fn file_usage(
 
 // Route collection.
 
+// ---------------------------------------------------------------------------
+// Chunked transfers (mirror /api/v1/library/chunked/*)
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/spaces/<id>/files/chunked/init — start a chunked upload.
+#[post(
+    "/api/v1/spaces/<_id>/files/chunked/init",
+    format = "json",
+    data = "<body>"
+)]
+pub async fn chunked_init_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _id: &str,
+    writer: SpaceWriter,
+    body: Json<InitChunkUploadRequest>,
+) -> Result<Json<InitChunkUploadResponse>, AppError> {
+    let result = chunk_service::init_upload(
+        pool.inner(),
+        config.inner(),
+        chunk_service::InitUploadParams {
+            user_id: writer.user.id.clone(),
+            target_id: writer.space.space.id.clone(),
+            target_type: "space".to_string(),
+            target_path: body.path.clone(),
+            total_chunks: body.total_chunks,
+            total_bytes: body.total_bytes,
+            checksum_sha256: body.checksum_sha256.clone(),
+        },
+    )
+    .await?;
+
+    Ok(Json(InitChunkUploadResponse {
+        upload_id: result.upload_id,
+        chunk_size_bytes: result.chunk_size_bytes,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+        expires_at: result.expires_at,
+        message: "Chunked upload initialized.".into(),
+    }))
+}
+
+/// PUT /api/v1/spaces/<id>/files/chunked/upload/<upload_id>/<chunk_index>
+#[put(
+    "/api/v1/spaces/<_id>/files/chunked/upload/<upload_id>/<chunk_index>",
+    data = "<data>"
+)]
+pub async fn chunked_receive_chunk(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _id: &str,
+    writer: SpaceWriter,
+    upload_id: &str,
+    chunk_index: u32,
+    data: Data<'_>,
+) -> Result<Json<ChunkUploadResponse>, AppError> {
+    let stream = data
+        .open((config.chunk_size_bytes + 1).bytes())
+        .into_bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read chunk data: {e}")))?;
+    if !stream.is_complete() {
+        return Err(AppError::Validation(format!(
+            "Chunk exceeds the maximum chunk size of {} bytes.",
+            config.chunk_size_bytes
+        )));
+    }
+
+    let result = chunk_service::receive_chunk(
+        pool.inner(),
+        config.inner(),
+        &writer.user.id,
+        &writer.space.space.id,
+        "space",
+        upload_id,
+        chunk_index,
+        &stream.into_inner(),
+    )
+    .await?;
+
+    Ok(Json(ChunkUploadResponse {
+        upload_id: result.upload_id,
+        chunk_index: result.chunk_index,
+        received_chunks: result.received_chunks,
+        total_chunks: result.total_chunks,
+        message: "Chunk received.".into(),
+    }))
+}
+
+/// POST /api/v1/spaces/<id>/files/chunked/complete
+#[post(
+    "/api/v1/spaces/<_id>/files/chunked/complete",
+    format = "json",
+    data = "<body>"
+)]
+pub async fn chunked_complete_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _id: &str,
+    writer: SpaceWriter,
+    body: Json<CompleteChunkUploadRequest>,
+) -> Result<Json<UploadResponse>, AppError> {
+    let result = chunk_service::complete_upload(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        &writer.user.id,
+        &writer.space.space.id,
+        "space",
+        &body.upload_id,
+        body.verify.unwrap_or(false),
+    )
+    .await?;
+
+    Ok(Json(UploadResponse {
+        path: result.path,
+        size: result.size,
+        disk_size: result.disk_size,
+        checksum_sha256: result.checksum_sha256,
+        mime_type: result.mime_type,
+        message: "Chunked upload completed successfully.".into(),
+    }))
+}
+
+/// DELETE /api/v1/spaces/<id>/files/chunked/cancel?upload_id=<upload_id>
+#[delete("/api/v1/spaces/<_id>/files/chunked/cancel?<upload_id>")]
+pub async fn chunked_cancel_upload(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _id: &str,
+    writer: SpaceWriter,
+    upload_id: String,
+) -> Result<Json<CancelChunkUploadResponse>, AppError> {
+    chunk_service::cancel_upload(
+        pool.inner(),
+        config.inner(),
+        &writer.user.id,
+        &writer.space.space.id,
+        "space",
+        &upload_id,
+    )
+    .await?;
+
+    Ok(Json(CancelChunkUploadResponse {
+        upload_id,
+        message: "Chunked upload canceled and cleaned up.".into(),
+    }))
+}
+
+/// GET /api/v1/spaces/<id>/files/chunked/download/init?path=<path>
+#[get("/api/v1/spaces/<_id>/files/chunked/download/init?<path>")]
+pub async fn chunked_init_download(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _id: &str,
+    reader: SpaceReader,
+    path: String,
+) -> Result<Json<InitChunkDownloadResponse>, AppError> {
+    let result = chunk_service::init_download(
+        config.inner(),
+        unlock_state.inner(),
+        &reader.user.id,
+        &reader.space.space.id,
+        TargetKind::Space,
+        &path,
+    )
+    .await?;
+
+    Ok(Json(InitChunkDownloadResponse {
+        token: result.token,
+        filename: result.filename,
+        mime_type: result.mime_type,
+        chunk_size_bytes: result.chunk_size_bytes,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+        expires_at: result.expires_at,
+    }))
+}
+
+/// GET /api/v1/spaces/<id>/files/chunked/download/chunk?token=<token>&index=<n>
+#[get("/api/v1/spaces/<_id>/files/chunked/download/chunk?<token>&<index>")]
+pub async fn chunked_download_chunk(
+    config: &State<AppConfig>,
+    unlock_state: &State<UnlockState>,
+    _id: &str,
+    reader: SpaceReader,
+    token: String,
+    index: u32,
+) -> Result<FileChunkDownload, AppError> {
+    let result = chunk_service::serve_chunk(
+        config.inner(),
+        unlock_state.inner(),
+        &reader.user.id,
+        TargetKind::Space,
+        &reader.space.space.id,
+        &token,
+        index,
+    )
+    .await?;
+
+    Ok(FileChunkDownload {
+        data: result.data,
+        checksum_sha256: result.checksum_sha256,
+        chunk_index: result.chunk_index,
+        total_chunks: result.total_chunks,
+        total_bytes: result.total_bytes,
+    })
+}
+
 pub fn routes() -> Vec<Route> {
     routes![
         // CRUD
@@ -703,5 +910,12 @@ pub fn routes() -> Vec<Route> {
         rename_file,
         file_info,
         file_usage,
+        // Chunked transfers
+        chunked_init_upload,
+        chunked_receive_chunk,
+        chunked_complete_upload,
+        chunked_cancel_upload,
+        chunked_init_download,
+        chunked_download_chunk,
     ]
 }

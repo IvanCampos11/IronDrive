@@ -586,6 +586,12 @@
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
 
+  /** Re-fetch the sidebar storage bar after something changed usage. */
+  function refreshUsage() {
+    var box = document.getElementById('sidebar-usage');
+    if (box && window.htmx) window.htmx.ajax('GET', '/usage/sidebar', { target: box, swap: 'innerHTML' });
+  }
+
   window.IronDrive = {
     csrf: csrf,
     request: request,
@@ -603,5 +609,6 @@
     icon: icon,
     errorMessage: errorMessage,
     refreshAlerts: refreshAlerts,
+    refreshUsage: refreshUsage,
   };
 })();

@@ -12,23 +12,42 @@
       <span class="{% if usage_pct >= 90 %}!bg-danger{% elif usage_pct >= 75 %}!bg-warning{% endif %}" style="width: {{ usage_pct }}%"></span>
     </div>
     <p class="mt-3 text-[13px] text-muted">
-      {% if usage_pct >= 90 %}You're almost out of space. Delete files you don't need to free some up.{% else %}{{ usage_pct }}% of your storage is in use.{% endif %}
+      {% if usage_pct >= 100 %}Your storage is full. Uploads are paused until you free up space — emptying the trash is often the quickest way.
+      {% elif usage_pct >= 90 %}You're almost out of space: {{ available_fmt }} left. Delete files you don't need, or empty the trash.
+      {% else %}{{ available_fmt }} available.{% endif %}
     </p>
     {% else %}
     <p class="mt-3 text-[13px] text-muted">There is no storage limit on your account.</p>
     {% endif %}
   </section>
 
+  <section class="section">
+    <h2 class="section-title px-5 pt-4 pb-2">What's using your storage</h2>
+    <ul>
+      {% for b in breakdown %}
+      <li>
+        {% if b.href %}<a href="{{ b.href }}" class="flex items-center gap-4 px-5 py-3 hover:bg-surface-2">{% else %}<div class="flex items-center gap-4 px-5 py-3">{% endif %}
+          <span class="ms text-muted">{{ b.icon }}</span>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-baseline justify-between gap-3"><span>{{ b.label }}</span><span class="text-[13px] text-muted">{{ b.bytes }}</span></div>
+            <div class="progress mt-2"><span style="width: {{ b.pct }}%"></span></div>
+          </div>
+        {% if b.href %}</a>{% else %}</div>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+
   <section class="section grid grid-cols-2 divide-x divide-outline">
     <div class="p-5 flex items-center gap-4">
       <span class="w-12 h-12 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center"><span class="ms ms-lg">draft</span></span>
-      <div><p class="text-2xl">{{ file_count }}</p><p class="text-muted">{% if file_count == 1 %}file{% else %}files{% endif %}</p></div>
+      <div><p class="text-2xl">{{ file_count }}</p><p class="text-muted">{% if file_count == 1 %}file{% else %}files{% endif %} in My files</p></div>
     </div>
     <div class="p-5 flex items-center gap-4">
       <span class="w-12 h-12 rounded-full bg-surface-3 text-fg flex items-center justify-center"><span class="ms ms-lg ms-fill">folder</span></span>
-      <div><p class="text-2xl">{{ dir_count }}</p><p class="text-muted">{% if dir_count == 1 %}folder{% else %}folders{% endif %}</p></div>
+      <div><p class="text-2xl">{{ dir_count }}</p><p class="text-muted">{% if dir_count == 1 %}folder{% else %}folders{% endif %} in My files</p></div>
     </div>
   </section>
-  <p class="px-2 text-xs text-subtle">Counts your personal files only. Files in spaces aren't included.</p>
+  <p class="px-2 text-xs text-subtle">Your limit covers My files, spaces you own and your trash. Spaces owned by a group don't count toward it.</p>
 </div>
 {% endblock %}

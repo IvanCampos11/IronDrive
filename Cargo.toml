@@ -38,6 +38,10 @@ dotenvy = "0.15"                 # Load .env files
 async-trait = "0.1"              # Async trait support
 dashmap = "6"                    # Concurrent map for UnlockState
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+bytes = "1"                      # Byte buffers for streamed responses
+tokio-util = { version = "0.7", features = ["io"] }  # Stream <-> AsyncRead adapters
+async_zip = { version = "0.0.19", default-features = false, features = ["tokio"] }  # Streaming folder downloads
 
 [dev-dependencies]
 tempfile = "3"
+proptest = { version = "1", default-features = false, features = ["std"] }

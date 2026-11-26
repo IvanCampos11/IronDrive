@@ -1167,6 +1167,119 @@ pub async fn read_plaintext_range(
     Ok(out)
 }
 
+/// Decrypted bytes of a file, produced piece by piece.
+pub type PlaintextStream =
+    rocket::futures::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>;
+
+/// Stream plaintext bytes `[start, end)` of an encrypted file (`end` is
+/// clamped to the file size, so `u64::MAX` means "to the end").
+///
+/// STREAM files are read and decrypted one segment at a time, so memory stays
+/// bounded by the segment size no matter how big the file is. A segment that
+/// fails authentication ends the stream with an `InvalidData` error — callers
+/// must treat that as fatal (e.g. abort the HTTP response) rather than as a
+/// clean end of data. Single-shot files are small and decrypted in one go.
+pub async fn open_plaintext_stream(
+    data_key: &DataKey,
+    path: &Path,
+    start: u64,
+    end: u64,
+) -> Result<PlaintextStream, AppError> {
+    use aes_gcm::aead::stream::{NewStream, StreamBE32, StreamPrimitive};
+    use rocket::futures::stream::{self, StreamExt};
+    use std::io::SeekFrom;
+    use tokio::io::AsyncSeekExt;
+
+    if end < start {
+        return Err(AppError::Validation("Invalid byte range.".into()));
+    }
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let file_len = file.metadata().await?.len();
+    let mut magic = [0u8; MAGIC_LEN];
+    file.read_exact(&mut magic).await?;
+
+    if magic != STREAM_MAGIC {
+        drop(file);
+        let mut plaintext = read_and_decrypt_file(data_key, path).await?;
+        let e = (end.min(plaintext.len() as u64)) as usize;
+        let s = (start as usize).min(e);
+        plaintext.truncate(e);
+        plaintext.drain(..s);
+        let one = stream::once(async move { Ok(bytes::Bytes::from(plaintext)) });
+        return Ok(one.boxed());
+    }
+
+    let (nonce, segments) = read_stream_index(&mut file, file_len).await?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(data_key.as_bytes()));
+    let decryptor = StreamBE32::<Aes256Gcm>::from_aead(
+        cipher,
+        aes_gcm::aead::generic_array::GenericArray::from_slice(&nonce),
+    );
+
+    // Skip whole segments before `start`.
+    let mut idx = 0;
+    let mut seg_start = 0u64;
+    while idx < segments.len() && seg_start + segments[idx].pt_len() <= start {
+        seg_start += segments[idx].pt_len();
+        idx += 1;
+    }
+
+    struct State {
+        file: tokio::fs::File,
+        segments: Vec<StreamSegment>,
+        decryptor: StreamBE32<Aes256Gcm>,
+        idx: usize,
+        seg_start: u64,
+        start: u64,
+        end: u64,
+    }
+
+    let state = State {
+        file,
+        segments,
+        decryptor,
+        idx,
+        seg_start,
+        start,
+        end,
+    };
+
+    let s = stream::try_unfold(state, |mut st| async move {
+        if st.idx >= st.segments.len() || st.seg_start >= st.end {
+            return Ok(None);
+        }
+        let seg = st.segments[st.idx];
+        let seg_end = st.seg_start + seg.pt_len();
+        let position = u32::try_from(st.idx).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "segment index overflow")
+        })?;
+        let last = st.idx == st.segments.len() - 1;
+
+        let mut buf = vec![0u8; seg.ct_len as usize];
+        st.file.seek(SeekFrom::Start(seg.offset)).await?;
+        st.file.read_exact(&mut buf).await?;
+        st.decryptor
+            .decrypt_in_place(position, last, b"", &mut buf)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "encrypted segment failed authentication (damaged file)",
+                )
+            })?;
+
+        let from = st.start.saturating_sub(st.seg_start) as usize;
+        let to = (st.end.min(seg_end) - st.seg_start) as usize;
+        buf.truncate(to);
+        buf.drain(..from);
+
+        st.idx += 1;
+        st.seg_start = seg_end;
+        Ok(Some((bytes::Bytes::from(buf), st)))
+    });
+    Ok(s.boxed())
+}
+
 /// Verify integrity of any encrypted file (single-shot or STREAM).
 ///
 /// Two tiers:
@@ -2157,5 +2270,83 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(leftovers, vec!["doc.txt".to_string()]);
+    }
+
+    async fn collect_stream(s: PlaintextStream) -> std::io::Result<Vec<u8>> {
+        use rocket::futures::TryStreamExt;
+        let parts: Vec<bytes::Bytes> = s.try_collect().await?;
+        Ok(parts.concat())
+    }
+
+    #[tokio::test]
+    async fn plaintext_stream_matches_every_range() {
+        let key = generate_data_key();
+        let a: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        let b: Vec<u8> = (0..1000u32).map(|i| (i * 3) as u8).collect();
+        let c: Vec<u8> = (0..333u32).map(|i| (i * 7) as u8).collect();
+        let (_c, _o, path, plaintext) = write_stream_fixture(&key, &[&a, &b, &c]).await;
+        let len = plaintext.len() as u64;
+
+        for (start, end) in [
+            (0, len),
+            (0, u64::MAX),
+            (0, 1),
+            (999, 1001),
+            (1000, 2000),
+            (1500, 2200),
+            (len - 1, len),
+            (700, 700),
+            (len, len),
+        ] {
+            let s = open_plaintext_stream(&key, &path, start, end)
+                .await
+                .unwrap();
+            let got = collect_stream(s).await.unwrap();
+            let e = end.min(len) as usize;
+            assert_eq!(got, &plaintext[start as usize..e], "range {start}..{end}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plaintext_stream_single_shot_and_empty() {
+        let key = generate_data_key();
+        let file = NamedTempFile::new().unwrap();
+        encrypt_and_write_file(&key, b"0123456789", file.path(), false)
+            .await
+            .unwrap();
+        let s = open_plaintext_stream(&key, file.path(), 2, u64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(collect_stream(s).await.unwrap(), b"23456789");
+
+        let empty = NamedTempFile::new().unwrap();
+        encrypt_and_write_file(&key, b"", empty.path(), false)
+            .await
+            .unwrap();
+        let s = open_plaintext_stream(&key, empty.path(), 0, u64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(collect_stream(s).await.unwrap(), b"");
+    }
+
+    #[tokio::test]
+    async fn plaintext_stream_errors_on_damaged_segment() {
+        let key = generate_data_key();
+        let (_c, _o, path, _) =
+            write_stream_fixture(&key, &[&[1u8; 500], &[2u8; 500], &[3u8; 500]]).await;
+        // Flip a byte inside the second segment's ciphertext.
+        let mut raw = std::fs::read(&path).unwrap();
+        let second = MAGIC_LEN + STREAM_NONCE_LEN + 4 + 500 + TAG_LEN + 4 + 10;
+        raw[second] ^= 0x01;
+        std::fs::write(&path, raw).unwrap();
+
+        use rocket::futures::StreamExt;
+        let mut s = open_plaintext_stream(&key, &path, 0, u64::MAX)
+            .await
+            .unwrap();
+        // First segment is fine, the second must fail rather than end quietly.
+        assert_eq!(s.next().await.unwrap().unwrap().len(), 500);
+        let err = s.next().await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

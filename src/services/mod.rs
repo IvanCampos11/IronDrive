@@ -6,6 +6,8 @@ pub mod fs_service;
 pub mod group_service;
 pub mod integrity_service;
 pub mod library_service;
+pub mod quota_service;
 pub mod rate_limit;
 pub mod space_service;
+pub mod trash_service;
 pub mod unlock_state;

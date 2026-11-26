@@ -12,9 +12,10 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
-use crate::services::chunk_service;
+use crate::routes::download::{stream_file, RangeHeader, StreamedDownload};
 use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::unlock_state::UnlockState;
+use crate::services::{chunk_service, quota_service, trash_service};
 use crate::utils::format_bytes;
 
 // Request and response types.
@@ -46,6 +47,10 @@ pub struct RenameResponse {
 #[derive(Serialize)]
 pub struct DeleteResponse {
     pub message: String,
+    /// Set when the entry went to the trash; pass it to the trash restore
+    /// endpoint to undo. Absent for `permanent=true` deletes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trash_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -176,33 +181,6 @@ impl<'r> Responder<'r, 'static> for FileChunkDownload {
 /// an opaque origin with no scripts, so it can't touch the app's cookies or DOM.
 pub const DOWNLOAD_CSP: &str = "sandbox; default-src 'none'";
 
-/// Custom responder for file downloads. Sends the decrypted body with
-/// `X-IronDrive-Integrity` (plaintext SHA-256, computed on the fly).
-pub struct FileDownload {
-    pub data: Vec<u8>,
-    pub filename: String,
-    pub content_type: ContentType,
-    /// Plaintext SHA-256 hex digest for the `X-IronDrive-Integrity` header.
-    pub checksum_sha256: String,
-}
-
-impl<'r> Responder<'r, 'static> for FileDownload {
-    fn respond_to(self, _request: &'r Request<'_>) -> response::Result<'static> {
-        let len = self.data.len();
-
-        Response::build()
-            .header(self.content_type)
-            .header(Header::new("X-IronDrive-Integrity", self.checksum_sha256))
-            .header(Header::new(
-                "Content-Disposition",
-                content_disposition_attachment(&self.filename),
-            ))
-            .header(Header::new("Content-Security-Policy", DOWNLOAD_CSP))
-            .sized_body(len, std::io::Cursor::new(self.data))
-            .ok()
-    }
-}
-
 /// Build an RFC 6266 `attachment` header value: a plain-ASCII `filename`
 /// fallback plus an RFC 5987 `filename*` with the exact UTF-8 name. Control
 /// characters, quotes and backslashes never reach the header verbatim.
@@ -237,20 +215,6 @@ async fn require_library(pool: &DbPool, user_id: &str) -> Result<PersonalLibrary
     PersonalLibrary::find_by_user(pool, user_id)
         .await?
         .ok_or(AppError::NotFound)
-}
-
-/// Parse a MIME string into a Rocket `ContentType`, falling back to
-/// `application/octet-stream`.
-fn parse_content_type(mime: Option<&str>) -> ContentType {
-    mime.and_then(|m| {
-        let parts: Vec<&str> = m.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            Some(ContentType::new(parts[0].to_string(), parts[1].to_string()))
-        } else {
-            None
-        }
-    })
-    .unwrap_or(ContentType::Binary)
 }
 
 // Routes.
@@ -326,11 +290,8 @@ pub async fn upload(
     let lib = require_library(pool.inner(), &user.0.id).await?;
     let write_verify = verify.unwrap_or(false);
 
-    // Read the body up to the configured max upload size, but enforce a smaller
-    // hard cap for this non-chunked endpoint to avoid excessive RAM usage.
-    let max_bytes = config.max_upload_bytes;
-    let hard_cap_bytes: u64 = 50 * 1024 * 1024; // 50 MiB hard in-memory limit.
-    let allowed_bytes = std::cmp::min(max_bytes.bytes(), hard_cap_bytes.bytes());
+    // This endpoint buffers the body in memory, so it has its own smaller cap.
+    let allowed_bytes = config.direct_upload_limit().bytes();
     let stream = data
         .open(allowed_bytes)
         .into_bytes()
@@ -346,12 +307,23 @@ pub async fn upload(
 
     let bytes = stream.into_inner();
 
-    let result = fs_service::upload_file(
+    quota_service::ensure_room(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Library,
+        &lib.id,
+        quota_service::estimated_disk_size(bytes.len() as u64, config.chunk_size_bytes),
+        Some(&path),
+        None,
+    )
+    .await?;
+
+    let result = fs_service::upload_file_owned(
         config.inner(),
         unlock_state.inner(),
         &lib.id,
         &path,
-        &bytes,
+        bytes,
         write_verify,
     )
     .await?;
@@ -368,48 +340,63 @@ pub async fn upload(
 
 /// GET /api/v1/library/download?path=<path>
 ///
-/// Download a file from the user's personal library. Returns the decrypted
-/// file content with an `X-IronDrive-Integrity` header containing the
-/// SHA-256 hex digest of the plaintext.
+/// Download a file from the user's personal library. The decrypted content
+/// is streamed; `Range` requests are supported for resuming and seeking.
 #[get("/api/v1/library/download?<path>")]
 pub async fn download(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     user: SetupComplete,
+    range: RangeHeader,
     path: String,
-) -> Result<FileDownload, AppError> {
+) -> Result<StreamedDownload, AppError> {
     let lib = require_library(pool.inner(), &user.0.id).await?;
-
-    let result =
-        fs_service::download_file(config.inner(), unlock_state.inner(), &lib.id, &path).await?;
-
-    let content_type = parse_content_type(result.mime_type.as_deref());
-
-    Ok(FileDownload {
-        data: result.data,
-        filename: result.filename,
-        content_type,
-        checksum_sha256: result.checksum_sha256,
-    })
+    stream_file(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &path,
+        &range,
+    )
+    .await
 }
 
 /// DELETE /api/v1/library/delete?path=<path>
 ///
 /// Delete a file or directory (recursively) from the user's personal library.
-#[delete("/api/v1/library/delete?<path>")]
+#[delete("/api/v1/library/delete?<path>&<permanent>")]
 pub async fn delete(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     user: SetupComplete,
     path: String,
+    permanent: Option<bool>,
 ) -> Result<Json<DeleteResponse>, AppError> {
     let lib = require_library(pool.inner(), &user.0.id).await?;
 
-    fs_service::delete_entry(config.inner(), &lib.id, &path).await?;
+    if permanent.unwrap_or(false) {
+        fs_service::delete_entry(config.inner(), &lib.id, &path).await?;
+        return Ok(Json(DeleteResponse {
+            message: "Entry deleted permanently.".into(),
+            trash_id: None,
+        }));
+    }
 
+    let item = trash_service::move_to_trash(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &path,
+        Some(&user.0.id),
+    )
+    .await?;
     Ok(Json(DeleteResponse {
-        message: "Entry deleted successfully.".into(),
+        message: "Moved to trash.".into(),
+        trash_id: Some(item.id),
     }))
 }
 

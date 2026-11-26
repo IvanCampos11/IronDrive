@@ -70,6 +70,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         integrity_scan_interval_hours: 168,
         registration_enabled: true,
         secure_cookies: false,
+        trash_retention_days: 30,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());

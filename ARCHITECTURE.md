@@ -1,7 +1,7 @@
 # IronDrive Architecture
 
-> Version: 0.6.0  
-> Last updated: 2026-04-10 
+> Version: 0.7.0  
+> Last updated: 2026-11-26
 
 ## 1) Current State
 
@@ -20,9 +20,14 @@ IronDrive is a Rust self-hosted file storage app with encrypted-at-rest file dat
 - Spaces
   - Space CRUD.
   - User/group access grants with read/write/admin permissions.
-  - File operations parity with libraries.
-  - Chunked upload/download in page routes.
-  - Non-chunked file API routes are complete.
+  - File operations parity with libraries, including chunked upload/download
+    in both the API and the browser.
+- Storage
+  - Quotas enforced on every write path (see "Quotas" below).
+  - Trash with restore; deleted items are kept for
+    `IRONDRIVE_TRASH_RETENTION_DAYS` (default 30).
+  - Streaming downloads with HTTP Range support; folders and multi-item
+    selections download as a streamed zip.
 - Groups
   - Group CRUD, membership management, member role updates.
 - Integrity
@@ -44,12 +49,7 @@ IronDrive is a Rust self-hosted file storage app with encrypted-at-rest file dat
 - User-managed encryption tiers are not active in runtime flows.
   - `failsafe_user` and `pure_user` exist in schema/model shape but setup currently creates server mode only.
   - No active lock/unlock passphrase flow in API or pages.
-- Quota enforcement is not complete.
-  - Quota values are stored and usage is displayed in UI.
-  - Upload/complete paths are not consistently blocked by quota checks.
-- Chunked spaces API parity
-  - Chunked space operations exist in page routes.
-  - API route module does not currently expose chunked space endpoints.
+- Group-owned spaces have no quota (they aren't charged to any user).
 
 ## 4) Architecture Principles
 
@@ -97,6 +97,9 @@ On startup, the server:
 - `data/libraries/<library_id>/...`
 - `data/spaces/<space_id>/...`
 - `data/.chunks/<upload_id>/...`
+- `<library or space root>/.trash/<trash_id>/<name>`: trashed items. Dot-prefixed
+  paths can't be addressed through any file route and are skipped by listings,
+  usage walks and the integrity scanner.
 
 Disk files are encrypted blobs. Directory and file names are currently plaintext.
 
@@ -113,6 +116,24 @@ Disk files are encrypted blobs. Directory and file names are currently plaintext
 - Hash footer is stored with encrypted payload for key-free corruption checks.
 - Optional deeper integrity checks use data key when available.
 
+### Downloads
+
+- `crypto_service::open_plaintext_stream` decrypts a byte range one STREAM
+  segment at a time; memory stays bounded by the chunk size.
+- A segment that fails authentication ends the stream with an error, so the
+  HTTP response aborts (clients see a failed transfer, never a short "success")
+  and an integrity alert is recorded.
+- Full downloads of small single-piece files also carry `X-IronDrive-Integrity`
+  (plaintext SHA-256). Streamed (chunked) files don't, since the hash isn't
+  known until the end.
+
+### Quotas
+
+- A user's quota covers their library, spaces they own, their trash and their
+  in-progress chunked uploads (which reserve space at init).
+- Checked before every write: direct uploads, chunked init, chunked complete.
+  Exceeding it returns 507 with how much space is left.
+
 ### Key cache
 
 - `UnlockState` stores currently available decrypted data keys.
@@ -128,26 +149,50 @@ Disk files are encrypted blobs. Directory and file names are currently plaintext
 
 ## 9) API Surface (Current)
 
+### Which routes to use
+
+`/api/v1/*` is the API: bearer-token auth (`Authorization: Bearer <token>` from
+`POST /api/v1/auth/login`), JSON in and out, errors as
+`{"error": {"status", "reason", "description"}}`. Libraries and spaces expose the same set of
+file operations, including chunked transfers and trash.
+
+Everything else is the browser UI's own surface: session cookie plus CSRF
+token, HTML or ad-hoc JSON shaped for the pages. It changes with the UI and
+isn't a supported integration point.
+
 ### Core API modules
 
 - Auth: `/api/v1/auth/*`
-- Library files + chunked: `/api/v1/library/*`
+- Library files: `/api/v1/library/{list,mkdir,upload,download,delete,rename,info,usage,zip}`
+- Library chunked transfers: `/api/v1/library/chunked/*`
+- Library trash: `/api/v1/library/trash*`
 - Integrity + notifications: `/api/v1/library/integrity/*`, `/api/v1/users/me/notifications`, `/api/v1/admin/integrity/*`
 - Groups: `/api/v1/groups/*`
-- Spaces + access + files: `/api/v1/spaces/*`
+- Spaces + access: `/api/v1/spaces/*`
+- Space files: `/api/v1/spaces/<id>/files/*` (same operations as the library,
+  including `chunked/*` and `zip`), trash at `/api/v1/spaces/<id>/trash*`
+
+Notes:
+
+- `DELETE .../delete` moves to the trash and returns `trash_id`; pass
+  `permanent=true` to delete outright.
+- `GET .../download` streams and honours `Range`; `GET .../zip?path=a&path=b`
+  streams a zip.
 
 ### Page modules
 
 - Auth/setup pages: `/`, `/login`, `/register`, `/setup`
-- Library pages: `/files*`, `/usage*`, `/settings`
+- Library pages: `/files*`, `/usage*`, `/settings`, `/trash*`
 - Group pages: `/groups*`
-- Space pages: `/spaces*` (including chunked flows in page routes)
+- Space pages: `/spaces*`
+- Admin and UI partials: `/admin*`, `/notifications*`, `/nav/extra`
 
 ## 10) Background Jobs
 
 - Integrity scanner: periodic scan + event recording.
 - Session cleanup: removes expired sessions.
 - Chunk cleanup: removes expired chunk uploads and staging directories.
+- Trash cleanup: permanently deletes items older than the retention period.
 
 ## 11) Security Model (Current)
 
@@ -170,6 +215,5 @@ Disk files are encrypted blobs. Directory and file names are currently plaintext
 
 ## 14) Immediate Cleanup Priorities
 
-- Add server-side quota enforcement in upload and chunk completion paths.
-- Decide on chunked space endpoint parity between API and page layers.
 - Implement user-tier encryption flows end-to-end, or remove dormant schema paths until ready.
+- Decide how group-owned spaces should be limited (group quotas, or charge the group's owner).

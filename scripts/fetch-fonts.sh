@@ -20,6 +20,7 @@ ICONS=(
   view_list visibility workspaces
   admin_panel_settings block info notifications refresh select_all verified_user
   warning
+  delete_forever restore_from_trash
 )
 NAMES=$(printf '%s\n' "${ICONS[@]}" | sort -u | paste -sd, -)
 

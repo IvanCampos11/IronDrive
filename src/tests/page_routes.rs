@@ -18,17 +18,17 @@ use crate::services;
 // Test helpers
 // ---------------------------------------------------------------------------
 
-fn test_password(index: usize) -> String {
+pub(super) fn test_password(index: usize) -> String {
     let base = String::from("test-credential");
     format!("{}-page{}", base, index)
 }
 
-fn alice_password() -> String {
+pub(super) fn alice_password() -> String {
     test_password(0)
 }
 
 /// Build a Rocket instance with Template fairing for page tests.
-async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
+pub(super) async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
     let data_dir = tmp.path().join("data");
     let db_dir = tmp.path().join("db");
 
@@ -63,6 +63,7 @@ async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
         integrity_scan_interval_hours: 168,
         registration_enabled: true,
         secure_cookies: false,
+        trash_retention_days: 30,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());
@@ -111,7 +112,7 @@ async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
 // ── Tests ────────────────────────────────────────────────────────────────
 
 /// GET a page to establish the CSRF cookie, then return the token value.
-async fn get_csrf_token(client: &Client, path: &str) -> String {
+pub(super) async fn get_csrf_token(client: &Client, path: &str) -> String {
     let _ = client.get(path).dispatch().await;
     client
         .cookies()
@@ -364,7 +365,7 @@ async fn cache_control_static_assets() {
 
 /// Register + sign in through the page form + create the library.
 /// Returns the CSRF token for XHR calls.
-async fn signed_in_with_library(client: &Client) -> String {
+pub(super) async fn signed_in_with_library(client: &Client) -> String {
     let pw = alice_password();
     let body =
         serde_json::json!({ "username": "alice", "email": "alice@example.com", "password": pw });
@@ -395,7 +396,7 @@ async fn signed_in_with_library(client: &Client) -> String {
     csrf
 }
 
-async fn xhr_json(
+pub(super) async fn xhr_json(
     client: &Client,
     csrf: &str,
     url: &str,
@@ -569,13 +570,17 @@ async fn file_browser_page_renders_shell() {
         "assets should carry a cache-busting version"
     );
     assert!(
-        !page.contains("/shares") && !page.contains("/trash"),
+        !page.contains("/shares"),
         "links to unimplemented pages must be gone"
+    );
+    assert!(
+        page.contains("href=\"/trash\""),
+        "sidebar links to the trash"
     );
 }
 
 /// Upload `bytes` to `name` at the library root through the page XHR endpoint.
-async fn page_upload(client: &Client, csrf: &str, name: &str, bytes: &[u8]) {
+pub(super) async fn page_upload(client: &Client, csrf: &str, name: &str, bytes: &[u8]) {
     let r = client
         .post(format!("/files/upload?path={name}"))
         .header(rocket::http::Header::new("X-CSRF-Token", csrf.to_string()))
@@ -586,7 +591,7 @@ async fn page_upload(client: &Client, csrf: &str, name: &str, bytes: &[u8]) {
 }
 
 /// Flip a byte in the middle of the only library's copy of `name`.
-fn corrupt_library_file(tmp: &tempfile::TempDir, name: &str) {
+pub(super) fn corrupt_library_file(tmp: &tempfile::TempDir, name: &str) {
     let libs = tmp.path().join("data/libraries");
     let lib = std::fs::read_dir(&libs)
         .unwrap()

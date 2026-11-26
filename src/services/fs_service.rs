@@ -67,6 +67,7 @@ pub struct UploadResult {
 
 /// Result of [`download_file`].
 #[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct DownloadResult {
     /// Decrypted plaintext bytes.
     pub data: Vec<u8>,
@@ -109,6 +110,14 @@ fn space_root(config: &AppConfig, space_id: &str) -> PathBuf {
     PathBuf::from(&config.data_dir)
         .join("spaces")
         .join(space_id)
+}
+
+/// Root directory of a library or space.
+pub(crate) fn root_of(config: &AppConfig, kind: TargetKind, target_id: &str) -> PathBuf {
+    match kind {
+        TargetKind::Library => library_root(config, target_id),
+        TargetKind::Space => space_root(config, target_id),
+    }
 }
 
 /// Retrieve the data key for a library from [`UnlockState`], returning
@@ -256,6 +265,22 @@ pub struct ReadableFile {
     pub plaintext_size: u64,
 }
 
+/// On-disk size of the file at `user_path`, or `None` if there's no file there.
+pub async fn existing_file_size(
+    config: &AppConfig,
+    kind: TargetKind,
+    target_id: &str,
+    user_path: &str,
+) -> Option<u64> {
+    let root = match kind {
+        TargetKind::Library => library_root(config, target_id),
+        TargetKind::Space => space_root(config, target_id),
+    };
+    let path = safe_join_async(root, user_path.to_string()).await.ok()?;
+    let meta = fs::metadata(&path).await.ok()?;
+    meta.is_file().then_some(meta.len())
+}
+
 /// Resolve `user_path` inside a library or space to an existing file and its
 /// data key, without reading or decrypting the file body.
 pub async fn resolve_readable_file(
@@ -312,14 +337,14 @@ pub async fn resolve_readable_file(
 /// Async wrapper for [`safe_join`] — moves the blocking path validation
 /// (which calls `std::fs::canonicalize` and `std::fs::symlink_metadata`)
 /// onto a blocking thread pool.
-async fn safe_join_async(root: PathBuf, user_path: String) -> Result<PathBuf, AppError> {
+pub(crate) async fn safe_join_async(root: PathBuf, user_path: String) -> Result<PathBuf, AppError> {
     tokio::task::spawn_blocking(move || safe_join(&root, &user_path))
         .await
         .map_err(|e| AppError::Internal(format!("Path validation task failed: {e}")))?
 }
 
 /// Async wrapper for [`std::fs::canonicalize`].
-async fn canonicalize_async(path: PathBuf) -> Result<PathBuf, AppError> {
+pub(crate) async fn canonicalize_async(path: PathBuf) -> Result<PathBuf, AppError> {
     tokio::task::spawn_blocking(move || {
         std::fs::canonicalize(&path)
             .map_err(|e| AppError::Internal(format!("Cannot resolve path: {e}")))
@@ -496,6 +521,7 @@ pub async fn create_directory(
 /// The `data` is the plaintext file content. It will be encrypted with
 /// the library's data key and written to disk, followed by an optional
 /// write-verify pass.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn upload_file(
     config: &AppConfig,
     unlock_state: &UnlockState,
@@ -690,9 +716,10 @@ pub async fn upload_space_file_streaming(
     })
 }
 
-/// Download (read and decrypt) a file from a library.
-///
-/// Returns the decrypted plaintext along with integrity metadata.
+/// Download (read and decrypt) a whole file from a library into memory.
+/// Request handlers stream instead (see `routes::download`); this is kept
+/// for tests that check round trips.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn download_file(
     config: &AppConfig,
     unlock_state: &UnlockState,
@@ -1159,13 +1186,13 @@ pub async fn create_space_directory(
     Ok(user_path.to_string())
 }
 
-/// Upload (encrypt and write) a file into a space.
-pub async fn upload_space_file(
+/// Upload (encrypt and write) a file into a space, taking ownership of the buffer.
+pub async fn upload_space_file_owned(
     config: &AppConfig,
     unlock_state: &UnlockState,
     space_id: &str,
     user_path: &str,
-    data: &[u8],
+    data: Vec<u8>,
     write_verify: bool,
 ) -> Result<UploadResult, AppError> {
     if user_path.is_empty() {
@@ -1182,11 +1209,11 @@ pub async fn upload_space_file(
             .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
     }
 
-    let checksum = crypto_service::sha256_bytes(data);
+    let checksum = crypto_service::sha256_bytes(&data);
     let checksum_hex = hex::encode(checksum);
     let plaintext_size = data.len() as u64;
 
-    match encrypt_and_write_file_owned(&data_key, data.to_vec(), &target, write_verify).await {
+    match encrypt_and_write_file_owned(&data_key, data, &target, write_verify).await {
         Ok(()) => {}
         Err(e) => {
             if let Ok(meta) = fs::metadata(&target).await {
@@ -1215,53 +1242,6 @@ pub async fn upload_space_file(
         disk_size: disk_meta.len(),
         checksum_sha256: checksum_hex,
         mime_type: mime_from_filename(&filename),
-    })
-}
-
-/// Download (read and decrypt) a file from a space.
-pub async fn download_space_file(
-    config: &AppConfig,
-    unlock_state: &UnlockState,
-    space_id: &str,
-    user_path: &str,
-) -> Result<DownloadResult, AppError> {
-    if user_path.is_empty() {
-        return Err(AppError::Validation("File path must not be empty.".into()));
-    }
-
-    let data_key = require_space_key(unlock_state, space_id)?;
-    let root = space_root(config, space_id);
-    let target = safe_join_async(root, user_path.to_string()).await?;
-
-    let meta = fs::metadata(&target).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::NotFound
-        } else {
-            AppError::Internal(format!("Cannot read file metadata: {e}"))
-        }
-    })?;
-
-    if meta.is_dir() {
-        return Err(AppError::Validation(
-            "The specified path is a directory, not a file.".into(),
-        ));
-    }
-
-    let plaintext = read_and_decrypt_file(&data_key, &target).await?;
-
-    let checksum = crypto_service::sha256_bytes(&plaintext);
-    let checksum_hex = hex::encode(checksum);
-
-    let filename = target
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    Ok(DownloadResult {
-        data: plaintext,
-        checksum_sha256: checksum_hex,
-        mime_type: mime_from_filename(&filename),
-        filename,
     })
 }
 
@@ -1549,6 +1529,7 @@ mod tests {
             integrity_scan_interval_hours: 168,
             registration_enabled: true,
             secure_cookies: false,
+            trash_retention_days: 30,
         }
     }
 

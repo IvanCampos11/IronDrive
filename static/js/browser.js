@@ -10,6 +10,8 @@
   if (!ID || !browser) return;
 
   var BASE = browser.getAttribute('data-base');
+  // Personal trash is /trash; a space's is /spaces/<id>/trash.
+  var TRASH_BASE = BASE === '/files' ? '/trash' : BASE + '/trash';
   var CAN_WRITE = browser.getAttribute('data-can-write') === 'true';
   var CHUNK_SIZE = positiveInt(browser.getAttribute('data-chunk-size-bytes'), 8 * 1024 * 1024);
   var MAX_PARALLEL_CHUNKS = Math.min(positiveInt(browser.getAttribute('data-max-parallel-chunks'), 4), 8);
@@ -394,13 +396,12 @@
     var sel = selectedItems();
     if (!sel.length || !itemMenu) return;
     itemMenu.replaceChildren();
-    var files = sel.filter(function (i) { return !isDir(i); });
     if (sel.length === 1) {
       if (isDir(sel[0])) itemMenu.appendChild(menuButton('open', 'folder_open', 'Open'));
-      else itemMenu.appendChild(menuButton('download', 'download', 'Download'));
+      itemMenu.appendChild(menuButton('download', isDir(sel[0]) ? 'folder_zip' : 'download', isDir(sel[0]) ? 'Download as zip' : 'Download'));
       if (CAN_WRITE) itemMenu.appendChild(menuButton('rename', 'edit', 'Rename'));
-    } else if (files.length) {
-      itemMenu.appendChild(menuButton('download', 'download', 'Download ' + plural(files.length, 'file')));
+    } else {
+      itemMenu.appendChild(menuButton('download', 'folder_zip', 'Download ' + plural(sel.length, 'item') + ' as zip'));
     }
     if (CAN_WRITE) {
       itemMenu.appendChild(menuButton('move', 'drive_file_move', 'Move to…'));
@@ -451,26 +452,37 @@
     return ok;
   }
 
+  // Delete moves items to the trash, so there's no confirmation: the snackbar
+  // offers Undo instead.
   function deleteItems(list) {
-    if (!CAN_WRITE) return;
+    if (!CAN_WRITE || !list.length) return;
     var names = list.map(nameOf);
-    var hasFolder = list.some(isDir);
-    ID.confirm({
-      title: list.length === 1 ? 'Delete “' + names[0] + '”?' : 'Delete ' + plural(list.length, 'item') + '?',
-      message: (hasFolder ? 'Folders are deleted with everything inside them. ' : '') + 'This can’t be undone.',
-      confirmLabel: 'Delete',
-      danger: true,
-    }).then(function (yes) {
-      if (!yes) return;
-      return ID.request(BASE + '/bulk-delete', { method: 'POST', json: { paths: list.map(pathOf) } })
-        .then(function (res) {
-          var ok = reportBulk(res, 'deleted', list.length);
-          if (ok && !(res.errors || []).length) {
-            ID.toast(list.length === 1 ? '“' + names[0] + '” deleted' : plural(ok, 'item') + ' deleted');
-          }
-          refresh();
-        });
-    }).catch(function (err) { ID.toast(err.message, { error: true }); });
+    ID.request(BASE + '/bulk-delete', { method: 'POST', json: { paths: list.map(pathOf) } })
+      .then(function (res) {
+        var ok = reportBulk(res, 'deleted', list.length);
+        var ids = res.trash_ids || [];
+        if (ok && !(res.errors || []).length) {
+          ID.toast(list.length === 1 ? '“' + names[0] + '” moved to trash' : plural(ok, 'item') + ' moved to trash', {
+            timeout: 8000,
+            action: ids.length ? { label: 'Undo', onClick: function () { undoDelete(ids); } } : null,
+          });
+        }
+        refresh();
+        ID.refreshUsage();
+      })
+      .catch(function (err) { ID.toast(err.message, { error: true }); });
+  }
+
+  function undoDelete(ids) {
+    ID.request(TRASH_BASE + '/restore', { method: 'POST', json: { ids: ids } })
+      .then(function (res) {
+        var restored = (res.restored || []).map(function (r) { return r.path; });
+        if ((res.errors || []).length) ID.toast(res.errors[0], { error: true });
+        // Select what came back if it's in the folder being shown.
+        refresh(restored);
+        ID.refreshUsage();
+      })
+      .catch(function (err) { ID.toast(err.message, { error: true }); });
   }
 
   // New folder ---------------------------------------------------------------
@@ -675,92 +687,28 @@
   // -------------------------------------------------------------------------
   // Downloads
   // -------------------------------------------------------------------------
-  function saveBlob(blob, filename) {
-    var url = URL.createObjectURL(blob);
+  // Downloads are plain links: the browser streams them to disk with its own
+  // progress, pause and resume. `download` keeps this page from treating the
+  // click as navigation (no "leave page?" prompt during uploads).
+  function startDownload(url) {
     var a = document.createElement('a');
     a.href = url;
-    a.download = filename;
+    a.download = '';
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
   }
 
+  // One file downloads as itself; a folder or several items come as one zip.
   function downloadItems(list) {
-    var files = list.filter(function (i) { return !isDir(i); });
-    if (!files.length) { ID.toast('Folders can’t be downloaded yet — open the folder and select its files.'); return; }
-    if (files.length < list.length) ID.toast('Skipping folders — only files are downloaded.');
-    // One at a time so the browser doesn't block a burst of saves.
-    files.reduce(function (chain, item) {
-      return chain.then(function () { return downloadOne(pathOf(item), nameOf(item), +item.getAttribute('data-size') || 0); });
-    }, Promise.resolve());
-  }
-
-  function downloadOne(path, name, size) {
-    var controller = new AbortController();
-    var t = ID.addTransfer({ name: name, kind: 'download', onCancel: function () { controller.abort(); } });
-    var run = size > CHUNK_SIZE ? downloadChunked(path, t, controller.signal) : downloadSingle(path, size, t, controller.signal);
-    return run.then(function (blob) {
-      saveBlob(blob, name);
-      t.done(ID.formatBytes(blob.size));
-    }).catch(function (err) {
-      if (controller.signal.aborted) t.cancelled(); else t.fail(err.message);
-    });
-  }
-
-  function fetchOk(url, signal) {
-    return fetch(url, { headers: { 'X-CSRF-Token': ID.csrf() }, credentials: 'same-origin', signal: signal }).then(function (resp) {
-      if (resp.ok) return resp;
-      if (resp.status === 401) window.location.href = '/login';
-      return resp.text().then(function (txt) {
-        var payload = null;
-        try { payload = JSON.parse(txt); } catch (_) { /* not JSON */ }
-        throw new Error(ID.errorMessage(payload, 'Download failed (' + resp.status + ')'));
-      });
-    });
-  }
-
-  function downloadSingle(path, size, t, signal) {
-    return fetchOk(BASE + '/download?path=' + encodeURIComponent(path), signal).then(function (resp) {
-      var total = +resp.headers.get('Content-Length') || size;
-      if (!resp.body || !total) return resp.blob();
-      var reader = resp.body.getReader();
-      var parts = [];
-      var got = 0;
-      function pump() {
-        return reader.read().then(function (r) {
-          if (r.done) return new Blob(parts);
-          parts.push(r.value);
-          got += r.value.length;
-          t.progress(got / total, ID.formatBytes(got) + ' of ' + ID.formatBytes(total));
-          return pump();
-        });
-      }
-      return pump();
-    });
-  }
-
-  function downloadChunked(path, t, signal) {
-    return ID.request(BASE + '/chunked/download/init?path=' + encodeURIComponent(path)).then(function (init) {
-      var total = init.total_chunks || 0;
-      var parts = [];
-      var got = 0;
-      var chain = Promise.resolve();
-      for (var i = 0; i < total; i++) {
-        (function (idx) {
-          chain = chain.then(function () {
-            return fetchOk(BASE + '/chunked/download/chunk?token=' + encodeURIComponent(init.token) + '&index=' + idx, signal)
-              .then(function (r) { return r.arrayBuffer(); })
-              .then(function (buf) {
-                parts.push(buf);
-                got += buf.byteLength;
-                t.progress(got / init.total_bytes, ID.formatBytes(got) + ' of ' + ID.formatBytes(init.total_bytes));
-              });
-          });
-        })(i);
-      }
-      return chain.then(function () { return new Blob(parts, { type: init.mime_type || 'application/octet-stream' }); });
-    });
+    if (!list.length) return;
+    if (list.length === 1 && !isDir(list[0])) {
+      startDownload(BASE + '/download?path=' + encodeURIComponent(pathOf(list[0])));
+      return;
+    }
+    var query = list.map(function (i) { return 'path=' + encodeURIComponent(pathOf(i)); }).join('&');
+    startDownload(BASE + '/zip?' + query);
+    ID.toast(list.length === 1 ? 'Zipping “' + nameOf(list[0]) + '”…' : 'Zipping ' + plural(list.length, 'item') + '…', { timeout: 3000 });
   }
 
   // -------------------------------------------------------------------------
@@ -864,7 +812,7 @@
       if (completedFolders.has(currentPath()) || Array.from(completedFolders).some(function (d) { return parentOf(d) === currentPath(); })) {
         refresh(Array.from(selection));
       }
-      if (!activeUploads && !queue.length) completedFolders.clear();
+      if (!activeUploads && !queue.length) { completedFolders.clear(); ID.refreshUsage(); }
     }, activeUploads || queue.length ? 1500 : 250);
   }
 
