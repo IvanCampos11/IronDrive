@@ -2,31 +2,30 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
   pull_request:
-    branches: [main]
+    branches: [dev, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
 
   clippy:
     name: Clippy
@@ -37,14 +36,27 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
 
-  fmt:
-    name: Format
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --check
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  css:
+    name: Compiled CSS is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild style.css
+        run: ./tailwindcss -i static/css/input.css -o static/css/style.css --minify
+      - name: Compare with the committed file
+        run: |
+          if ! git diff --quiet -- static/css/style.css; then
+            echo "::error file=static/css/style.css::style.css is out of date. Run 'make build-css' and commit the result."
+            exit 1
+          fi

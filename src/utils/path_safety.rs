@@ -341,8 +341,7 @@ mod tests {
         // Exactly MAX_PATH_BYTES should be fine (single component ≤ 255).
         // Build a path of 128 components of 31 chars each + 127 slashes = 4095
         let comp = "a".repeat(31);
-        let path = std::iter::repeat(comp.as_str())
-            .take(MAX_DEPTH)
+        let path = std::iter::repeat_n(comp.as_str(), MAX_DEPTH)
             .collect::<Vec<_>>()
             .join("/");
         assert!(path.len() <= MAX_PATH_BYTES);
@@ -370,8 +369,7 @@ mod tests {
     #[test]
     fn reject_excessive_depth() {
         let root = make_root();
-        let deep = std::iter::repeat("d")
-            .take(MAX_DEPTH + 1)
+        let deep = std::iter::repeat_n("d", MAX_DEPTH + 1)
             .collect::<Vec<_>>()
             .join("/");
         assert_validation_err(root.path(), &deep, "nesting depth");

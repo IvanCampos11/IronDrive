@@ -1,7 +1,7 @@
 use std::path::Path;
 
+use aes_gcm::aead::stream::{DecryptorBE32, EncryptorBE32};
 use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, OsRng};
-use aes_gcm::aead::stream::{EncryptorBE32, DecryptorBE32};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::Engine;
 use rand::RngCore;
@@ -491,10 +491,9 @@ pub async fn verify_file_hash(path: &Path) -> Result<(), AppError> {
 
     while remaining > 0 {
         let to_read = remaining.min(HASH_BUF_SIZE);
-        let n = file
-            .read(&mut buf[..to_read])
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to read file for integrity check: {e}")))?;
+        let n = file.read(&mut buf[..to_read]).await.map_err(|e| {
+            AppError::Internal(format!("Failed to read file for integrity check: {e}"))
+        })?;
         if n == 0 {
             return Err(AppError::Internal(
                 "Unexpected EOF during integrity check".to_string(),
@@ -532,12 +531,78 @@ pub async fn encrypt_and_write_file(
     encrypt_and_write_file_owned(data_key, plaintext.to_vec(), dest, write_verify).await
 }
 
-/// Encrypt owned plaintext in place and write the encrypted payload to disk.
+// ---------------------------------------------------------------------------
+// Atomic writes
+// ---------------------------------------------------------------------------
+
+/// Hidden temp path next to `dest` (same directory, so `rename` is atomic).
+/// The leading dot keeps it out of directory listings and usage totals.
+fn temp_path_for(dest: &Path) -> Result<std::path::PathBuf, AppError> {
+    let name = dest
+        .file_name()
+        .ok_or_else(|| AppError::Validation("File path must include a filename.".into()))?;
+    let tmp_name = format!(
+        ".{}.{}.part",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    );
+    Ok(dest.with_file_name(tmp_name))
+}
+
+/// Run `write` against a temp file, then atomically rename it over `dest`.
+///
+/// If `write` fails or the rename fails, the temp file is removed and any
+/// existing file at `dest` is left untouched — a crash mid-upload can never
+/// destroy the previous version of a file.
+async fn write_atomically<F, Fut>(dest: &Path, write: F) -> Result<(), AppError>
+where
+    F: FnOnce(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<(), AppError>>,
+{
+    let tmp = temp_path_for(dest)?;
+
+    if let Err(e) = write(tmp.clone()).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+
+    if let Err(e) = tokio::fs::rename(&tmp, dest).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(AppError::Internal(format!(
+            "Failed to move encrypted file into place: {e}"
+        )));
+    }
+
+    // Persist the directory entry so the rename survives a power loss.
+    if let Some(parent) = dest.parent() {
+        if let Ok(dir) = tokio::fs::File::open(parent).await {
+            let _ = dir.sync_all().await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Encrypt owned plaintext in place and atomically write it to `dest`.
 ///
 /// Uses in-place encryption to avoid allocating a second full-size buffer.
 /// On-disk: `SINGLE_MAGIC(3) | nonce(12) | ciphertext+tag(N+16) | file_hash(32)`.
-/// Feeds all bytes through a SHA-256 hasher while writing, then appends the hash.
 pub async fn encrypt_and_write_file_owned(
+    data_key: &DataKey,
+    plaintext: Vec<u8>,
+    dest: &Path,
+    write_verify: bool,
+) -> Result<(), AppError> {
+    write_atomically(dest, |tmp| async move {
+        write_single_shot_file(data_key, plaintext, &tmp, write_verify).await
+    })
+    .await
+}
+
+/// Write a single-shot encrypted file to `dest` (non-atomic; see
+/// [`encrypt_and_write_file_owned`]). Feeds all bytes through a SHA-256
+/// hasher while writing, then appends the hash.
+async fn write_single_shot_file(
     data_key: &DataKey,
     mut plaintext: Vec<u8>,
     dest: &Path,
@@ -599,9 +664,9 @@ pub async fn encrypt_and_write_file_owned(
 
     if write_verify {
         // Key-free check: re-read and verify the file hash.
-        verify_file_hash(dest).await.map_err(|e| {
-            AppError::Internal(format!("Write-verify failed: {e}"))
-        })?;
+        verify_file_hash(dest)
+            .await
+            .map_err(|e| AppError::Internal(format!("Write-verify failed: {e}")))?;
 
         // Key check: decrypt to confirm GCM tag passes.
         let readback = tokio::fs::read(dest).await.map_err(|e| {
@@ -626,7 +691,28 @@ pub async fn encrypt_and_write_file_owned(
 ///
 /// Chunks are read one at a time so peak RAM is bounded to one chunk buffer.
 /// `write_verify` re-reads the file and checks the file hash (no key needed).
+/// The file is written to a temp path and atomically renamed over `dest`.
 pub async fn stream_encrypt_chunks_to_file(
+    data_key: &DataKey,
+    chunk_paths: &[std::path::PathBuf],
+    total_plaintext_bytes: u64,
+    dest: &Path,
+    write_verify: bool,
+) -> Result<(), AppError> {
+    write_atomically(dest, |tmp| async move {
+        write_stream_file(
+            data_key,
+            chunk_paths,
+            total_plaintext_bytes,
+            &tmp,
+            write_verify,
+        )
+        .await
+    })
+    .await
+}
+
+async fn write_stream_file(
     data_key: &DataKey,
     chunk_paths: &[std::path::PathBuf],
     total_plaintext_bytes: u64,
@@ -674,13 +760,17 @@ pub async fn stream_encrypt_chunks_to_file(
                 .take()
                 .expect("encryptor consumed before last chunk")
                 .encrypt_last_in_place(b"", &mut buf)
-                .map_err(|e| AppError::Internal(format!("STREAM encrypt last segment failed: {e}")))?;
+                .map_err(|e| {
+                    AppError::Internal(format!("STREAM encrypt last segment failed: {e}"))
+                })?;
         } else {
             encryptor
                 .as_mut()
                 .expect("encryptor already consumed")
                 .encrypt_next_in_place(b"", &mut buf)
-                .map_err(|e| AppError::Internal(format!("STREAM encrypt segment {i} failed: {e}")))?;
+                .map_err(|e| {
+                    AppError::Internal(format!("STREAM encrypt segment {i} failed: {e}"))
+                })?;
         }
 
         // Write 4-byte LE segment length then the ciphertext+tag.
@@ -726,10 +816,7 @@ pub async fn stream_encrypt_chunks_to_file(
 
 /// Read and decrypt a STREAM-encrypted file, returning all plaintext.
 /// The file hash is checked first (key-free), then GCM tags validate each segment.
-pub async fn stream_decrypt_file(
-    data_key: &DataKey,
-    path: &Path,
-) -> Result<Vec<u8>, AppError> {
+pub async fn stream_decrypt_file(data_key: &DataKey, path: &Path) -> Result<Vec<u8>, AppError> {
     stream_decrypt_file_inner(data_key, path).await
 }
 
@@ -738,18 +825,18 @@ pub async fn stream_decrypt_file(
 /// Decrypts each segment to check its auth tag, then drops the plaintext
 /// immediately — peak RAM is one segment buffer. The file hash is checked
 /// first (key-free), so disk corruption is caught before any decryption.
-pub async fn stream_verify_decryption(
-    data_key: &DataKey,
-    path: &Path,
-) -> Result<(), AppError> {
+pub async fn stream_verify_decryption(data_key: &DataKey, path: &Path) -> Result<(), AppError> {
     use tokio::io::AsyncReadExt;
 
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to open STREAM file for verify: {e}")))?;
 
-    let file_len = file.metadata().await
-        .map_err(|e| AppError::Internal(format!("Failed to stat STREAM file: {e}")))?.len() as usize;
+    let file_len = file
+        .metadata()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to stat STREAM file: {e}")))?
+        .len() as usize;
 
     // File hash check first (key-free).
     drop(file);
@@ -767,7 +854,9 @@ pub async fn stream_verify_decryption(
         .map_err(|_| AppError::Internal("STREAM file too small to contain header".into()))?;
 
     if header_buf[..MAGIC_LEN] != STREAM_MAGIC {
-        return Err(AppError::Internal("STREAM file has wrong magic bytes".into()));
+        return Err(AppError::Internal(
+            "STREAM file has wrong magic bytes".into(),
+        ));
     }
 
     let stream_nonce = &header_buf[MAGIC_LEN..MAGIC_LEN + STREAM_NONCE_LEN];
@@ -782,25 +871,23 @@ pub async fn stream_verify_decryption(
     let mut seg_len_buf = [0u8; 4];
 
     while pos < segments_end {
-        file.read_exact(&mut seg_len_buf)
-            .await
-            .map_err(|e| AppError::Internal(format!("STREAM verify: truncated segment header: {e}")))?;
+        file.read_exact(&mut seg_len_buf).await.map_err(|e| {
+            AppError::Internal(format!("STREAM verify: truncated segment header: {e}"))
+        })?;
         pos += 4;
 
         let seg_len = u32::from_le_bytes(seg_len_buf) as usize;
         let mut seg_data = vec![0u8; seg_len];
-        file.read_exact(&mut seg_data)
-            .await
-            .map_err(|e| AppError::Internal(format!("STREAM verify: truncated segment body: {e}")))?;
+        file.read_exact(&mut seg_data).await.map_err(|e| {
+            AppError::Internal(format!("STREAM verify: truncated segment body: {e}"))
+        })?;
         pos += seg_len;
 
         // Decrypt the previously pending segment as non-last.
         if let Some(mut prev) = pending.take() {
             decryptor
                 .decrypt_next_in_place(b"", &mut prev)
-                .map_err(|_| AppError::Internal(
-                    "STREAM verify: decrypt segment failed".into(),
-                ))?;
+                .map_err(|_| AppError::Internal("STREAM verify: decrypt segment failed".into()))?;
             // drop plaintext
         }
 
@@ -811,9 +898,7 @@ pub async fn stream_verify_decryption(
     if let Some(mut seg) = pending.take() {
         decryptor
             .decrypt_last_in_place(b"", &mut seg)
-            .map_err(|_| AppError::Internal(
-                "STREAM verify: decrypt last segment failed".into(),
-            ))?;
+            .map_err(|_| AppError::Internal("STREAM verify: decrypt last segment failed".into()))?;
     }
 
     Ok(())
@@ -821,10 +906,7 @@ pub async fn stream_verify_decryption(
 
 /// Internal: parse and decrypt a STREAM file, returning plaintext.
 /// Checks file hash (key-free) first, then decrypts all segments.
-async fn stream_decrypt_file_inner(
-    data_key: &DataKey,
-    path: &Path,
-) -> Result<Vec<u8>, AppError> {
+async fn stream_decrypt_file_inner(data_key: &DataKey, path: &Path) -> Result<Vec<u8>, AppError> {
     let raw = tokio::fs::read(path)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to read STREAM encrypted file: {e}")))?;
@@ -863,9 +945,8 @@ async fn stream_decrypt_file_inner(
                 "STREAM file truncated inside segment header".into(),
             ));
         }
-        let seg_len = u32::from_le_bytes(
-            raw[pos..pos + 4].try_into().expect("slice is 4 bytes"),
-        ) as usize;
+        let seg_len =
+            u32::from_le_bytes(raw[pos..pos + 4].try_into().expect("slice is 4 bytes")) as usize;
         pos += STREAM_SEGMENT_HEADER_LEN;
 
         if pos + seg_len > segments_end {
@@ -880,9 +961,11 @@ async fn stream_decrypt_file_inner(
         if let Some(mut prev) = pending.take() {
             decryptor
                 .decrypt_next_in_place(b"", &mut prev)
-                .map_err(|_| AppError::Internal(
-                    "STREAM decrypt segment failed — wrong key or tampered data".into(),
-                ))?;
+                .map_err(|_| {
+                    AppError::Internal(
+                        "STREAM decrypt segment failed — wrong key or tampered data".into(),
+                    )
+                })?;
             plaintext.extend_from_slice(&prev);
         }
 
@@ -893,9 +976,11 @@ async fn stream_decrypt_file_inner(
     if let Some(mut seg) = pending.take() {
         decryptor
             .decrypt_last_in_place(b"", &mut seg)
-            .map_err(|_| AppError::Internal(
-                "STREAM decrypt last segment failed — wrong key or tampered data".into(),
-            ))?;
+            .map_err(|_| {
+                AppError::Internal(
+                    "STREAM decrypt last segment failed — wrong key or tampered data".into(),
+                )
+            })?;
         plaintext.extend_from_slice(&seg);
     }
 
@@ -910,6 +995,176 @@ pub async fn is_stream_format(path: &Path) -> bool {
     };
     let mut magic = [0u8; 3];
     (file.read_exact(&mut magic).await).is_ok() && magic == STREAM_MAGIC
+}
+
+// ---------------------------------------------------------------------------
+// Random access: plaintext size and byte-range reads
+// ---------------------------------------------------------------------------
+
+/// Location of one STREAM segment's ciphertext+tag on disk.
+#[derive(Debug, Clone, Copy)]
+struct StreamSegment {
+    offset: u64,
+    ct_len: u64,
+}
+
+impl StreamSegment {
+    fn pt_len(&self) -> u64 {
+        self.ct_len - TAG_LEN as u64
+    }
+}
+
+/// Parse a STREAM file's header and segment table. Only the 4-byte length
+/// prefixes are read; segment bodies are skipped with seeks.
+async fn read_stream_index(
+    file: &mut tokio::fs::File,
+    file_len: u64,
+) -> Result<([u8; STREAM_NONCE_LEN], Vec<StreamSegment>), AppError> {
+    use std::io::SeekFrom;
+    use tokio::io::AsyncSeekExt;
+
+    let corrupt = |what: &str| AppError::Internal(format!("STREAM file corrupt: {what}"));
+
+    if file_len < MIN_STREAM_FILE_LEN as u64 {
+        return Err(corrupt("too small"));
+    }
+
+    let mut header = [0u8; MAGIC_LEN + STREAM_NONCE_LEN];
+    file.seek(SeekFrom::Start(0)).await?;
+    file.read_exact(&mut header).await?;
+    if header[..MAGIC_LEN] != STREAM_MAGIC {
+        return Err(corrupt("wrong magic bytes"));
+    }
+    let mut nonce = [0u8; STREAM_NONCE_LEN];
+    nonce.copy_from_slice(&header[MAGIC_LEN..]);
+
+    let segments_end = file_len - FILE_HASH_LEN as u64;
+    let mut pos = header.len() as u64;
+    let mut segments = Vec::new();
+    let mut len_buf = [0u8; STREAM_SEGMENT_HEADER_LEN];
+
+    while pos < segments_end {
+        if pos + STREAM_SEGMENT_HEADER_LEN as u64 > segments_end {
+            return Err(corrupt("truncated segment header"));
+        }
+        file.read_exact(&mut len_buf).await?;
+        pos += STREAM_SEGMENT_HEADER_LEN as u64;
+
+        let ct_len = u32::from_le_bytes(len_buf) as u64;
+        if ct_len < TAG_LEN as u64 || pos + ct_len > segments_end {
+            return Err(corrupt("bad segment length"));
+        }
+        segments.push(StreamSegment {
+            offset: pos,
+            ct_len,
+        });
+        pos += ct_len;
+        file.seek(SeekFrom::Start(pos)).await?;
+    }
+
+    if segments.is_empty() {
+        return Err(corrupt("no segments"));
+    }
+
+    Ok((nonce, segments))
+}
+
+/// Plaintext size of an encrypted file (either format) without decrypting it.
+pub async fn plaintext_size(path: &Path) -> Result<u64, AppError> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let file_len = file.metadata().await?.len();
+
+    let mut magic = [0u8; MAGIC_LEN];
+    file.read_exact(&mut magic).await?;
+
+    if magic == STREAM_MAGIC {
+        let (_, segments) = read_stream_index(&mut file, file_len).await?;
+        Ok(segments.iter().map(StreamSegment::pt_len).sum())
+    } else if magic == SINGLE_MAGIC {
+        Ok(file_len.saturating_sub(MIN_SINGLE_FILE_LEN as u64))
+    } else {
+        Err(AppError::Internal("Unknown encrypted file format".into()))
+    }
+}
+
+/// Decrypt plaintext bytes `[start, end)` of an encrypted file.
+///
+/// STREAM files: only the segments overlapping the range are read and
+/// decrypted, so cost is bounded by the range size rather than the file
+/// size. Each segment's GCM tag binds it to its position and "last" flag, so
+/// segments can't be reordered or substituted. The whole-file hash is *not*
+/// checked here (that would mean reading the whole file); the integrity
+/// scanner covers that.
+///
+/// Single-shot files are decrypted in full and sliced. They are bounded by the
+/// non-chunked upload cap, so this stays cheap.
+pub async fn read_plaintext_range(
+    data_key: &DataKey,
+    path: &Path,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>, AppError> {
+    use aes_gcm::aead::stream::{NewStream, StreamBE32, StreamPrimitive};
+    use std::io::SeekFrom;
+    use tokio::io::AsyncSeekExt;
+
+    if end < start {
+        return Err(AppError::Validation("Invalid byte range.".into()));
+    }
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let file_len = file.metadata().await?.len();
+    let mut magic = [0u8; MAGIC_LEN];
+    file.read_exact(&mut magic).await?;
+
+    if magic != STREAM_MAGIC {
+        drop(file);
+        let plaintext = read_and_decrypt_file(data_key, path).await?;
+        let s = (start as usize).min(plaintext.len());
+        let e = (end as usize).min(plaintext.len());
+        return Ok(plaintext[s..e].to_vec());
+    }
+
+    let (nonce, segments) = read_stream_index(&mut file, file_len).await?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(data_key.as_bytes()));
+    let stream = StreamBE32::<Aes256Gcm>::from_aead(
+        cipher,
+        aes_gcm::aead::generic_array::GenericArray::from_slice(&nonce),
+    );
+
+    let last_index = segments.len() - 1;
+    let mut out = Vec::with_capacity(end.saturating_sub(start) as usize);
+    let mut seg_start = 0u64;
+
+    for (i, seg) in segments.iter().enumerate() {
+        if seg_start >= end {
+            break;
+        }
+        let seg_end = seg_start + seg.pt_len();
+
+        if seg_end > start {
+            let position = u32::try_from(i)
+                .map_err(|_| AppError::Internal("STREAM segment index overflow".into()))?;
+            let mut buf = vec![0u8; seg.ct_len as usize];
+            file.seek(SeekFrom::Start(seg.offset)).await?;
+            file.read_exact(&mut buf).await?;
+            stream
+                .decrypt_in_place(position, i == last_index, b"", &mut buf)
+                .map_err(|_| {
+                    AppError::Internal(
+                        "STREAM decrypt segment failed — wrong key or tampered data".into(),
+                    )
+                })?;
+
+            let from = start.saturating_sub(seg_start) as usize;
+            let to = (end.min(seg_end) - seg_start) as usize;
+            out.extend_from_slice(&buf[from..to]);
+        }
+
+        seg_start = seg_end;
+    }
+
+    Ok(out)
 }
 
 /// Verify integrity of any encrypted file (single-shot or STREAM).
@@ -1245,7 +1500,9 @@ mod tests {
         let msg = format!("{err}");
         // File hash check catches this before GCM even runs.
         assert!(
-            msg.contains("hash mismatch") || msg.contains("decryption failed") || msg.contains("tampered"),
+            msg.contains("hash mismatch")
+                || msg.contains("decryption failed")
+                || msg.contains("tampered"),
             "Expected integrity failure, got: {msg}"
         );
     }
@@ -1622,15 +1879,9 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         // Should be identified as STREAM format.
         assert!(is_stream_format(dest.path()).await);
@@ -1646,8 +1897,7 @@ mod tests {
         let chunk1 = vec![0xAAu8; 1024];
         let chunk2 = vec![0xBBu8; 512];
         let total = (chunk1.len() + chunk2.len()) as u64;
-        let (_chunk_dir, chunk_paths) =
-            write_chunk_files(&[&chunk1, &chunk2]);
+        let (_chunk_dir, chunk_paths) = write_chunk_files(&[&chunk1, &chunk2]);
 
         let dest = NamedTempFile::new().unwrap();
         stream_encrypt_chunks_to_file(&key, &chunk_paths, total, dest.path(), false)
@@ -1688,15 +1938,9 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         // Key-free file hash check should pass.
         assert!(verify_file_hash(dest.path()).await.is_ok());
@@ -1709,15 +1953,9 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         // Tamper a byte in the encrypted segment area.
         let mut raw = std::fs::read(dest.path()).unwrap();
@@ -1735,15 +1973,9 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key1,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key1, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         assert!(stream_decrypt_file(&key2, dest.path()).await.is_err());
     }
@@ -1755,15 +1987,9 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         let status = verify_file_integrity_async(None, dest.path()).await;
         assert_eq!(status, IntegrityStatus::Ok);
@@ -1776,15 +2002,9 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         let mut raw = std::fs::read(dest.path()).unwrap();
         raw[MAGIC_LEN + STREAM_NONCE_LEN + 4] ^= 0xFF;
@@ -1802,15 +2022,9 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key1,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key1, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         // File hash passes, GCM tags fail.
         let status = verify_file_integrity_async(Some(&key2), dest.path()).await;
@@ -1828,17 +2042,120 @@ mod tests {
         let (_chunk_dir, chunk_paths) = write_chunk_files(&[data]);
 
         let dest = NamedTempFile::new().unwrap();
-        stream_encrypt_chunks_to_file(
-            &key,
-            &chunk_paths,
-            data.len() as u64,
-            dest.path(),
-            false,
-        )
-        .await
-        .unwrap();
+        stream_encrypt_chunks_to_file(&key, &chunk_paths, data.len() as u64, dest.path(), false)
+            .await
+            .unwrap();
 
         let status = verify_file_integrity_async(Some(&key), dest.path()).await;
         assert_eq!(status, IntegrityStatus::Ok);
+    }
+
+    // -- Random access + atomic write tests --
+
+    /// Encrypt `segments` as a STREAM file in a fresh temp dir.
+    async fn write_stream_fixture(
+        key: &DataKey,
+        segments: &[&[u8]],
+    ) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, Vec<u8>) {
+        let (chunk_dir, chunk_paths) = write_chunk_files(segments);
+        let out_dir = tempfile::tempdir().unwrap();
+        let dest = out_dir.path().join("file.bin");
+        let plaintext: Vec<u8> = segments.concat();
+        stream_encrypt_chunks_to_file(key, &chunk_paths, plaintext.len() as u64, &dest, false)
+            .await
+            .unwrap();
+        (chunk_dir, out_dir, dest, plaintext)
+    }
+
+    #[tokio::test]
+    async fn plaintext_size_matches_for_both_formats() {
+        let key = generate_data_key();
+        let seg_a: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        let seg_b: Vec<u8> = (0..700u32).map(|i| (i * 7) as u8).collect();
+        let (_c, _o, stream_path, plaintext) = write_stream_fixture(&key, &[&seg_a, &seg_b]).await;
+        assert_eq!(
+            plaintext_size(&stream_path).await.unwrap(),
+            plaintext.len() as u64
+        );
+
+        let single = NamedTempFile::new().unwrap();
+        encrypt_and_write_file(&key, b"twelve bytes", single.path(), false)
+            .await
+            .unwrap();
+        assert_eq!(plaintext_size(single.path()).await.unwrap(), 12);
+    }
+
+    #[tokio::test]
+    async fn read_plaintext_range_spans_segment_boundaries() {
+        let key = generate_data_key();
+        let seg_a: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        let seg_b: Vec<u8> = (0..1000u32).map(|i| (i * 3) as u8).collect();
+        let seg_c: Vec<u8> = (0..300u32).map(|i| (i * 11) as u8).collect();
+        let (_c, _o, path, plaintext) = write_stream_fixture(&key, &[&seg_a, &seg_b, &seg_c]).await;
+        let len = plaintext.len() as u64;
+
+        // Ranges that don't line up with the 1000-byte segments.
+        for (start, end) in [
+            (0, len),
+            (0, 1),
+            (999, 1001),
+            (500, 2100),
+            (1000, 2000),
+            (2000, len),
+            (len - 1, len),
+            (700, 700),
+        ] {
+            let got = read_plaintext_range(&key, &path, start, end).await.unwrap();
+            assert_eq!(
+                got,
+                &plaintext[start as usize..end as usize],
+                "range {start}..{end}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_plaintext_range_rejects_wrong_key() {
+        let key = generate_data_key();
+        let (_c, _o, path, _) = write_stream_fixture(&key, &[&[1u8; 100], &[2u8; 50]]).await;
+        let other = generate_data_key();
+        assert!(read_plaintext_range(&other, &path, 0, 10).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_plaintext_range_single_shot() {
+        let key = generate_data_key();
+        let file = NamedTempFile::new().unwrap();
+        encrypt_and_write_file(&key, b"0123456789", file.path(), false)
+            .await
+            .unwrap();
+        let got = read_plaintext_range(&key, file.path(), 3, 7).await.unwrap();
+        assert_eq!(got, b"3456");
+    }
+
+    #[tokio::test]
+    async fn failed_overwrite_keeps_old_file_and_leaves_no_temp() {
+        let key = generate_data_key();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("doc.txt");
+        encrypt_and_write_file(&key, b"original", &dest, false)
+            .await
+            .unwrap();
+
+        // Second chunk is missing, so the STREAM write fails partway through.
+        let (_chunk_dir, mut chunk_paths) = write_chunk_files(&[&[9u8; 64]]);
+        chunk_paths.push(dir.path().join("does-not-exist.chunk"));
+        let result = stream_encrypt_chunks_to_file(&key, &chunk_paths, 128, &dest, false).await;
+        assert!(result.is_err());
+
+        assert_eq!(
+            read_and_decrypt_file(&key, &dest).await.unwrap(),
+            b"original"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(leftovers, vec!["doc.txt".to_string()]);
     }
 }

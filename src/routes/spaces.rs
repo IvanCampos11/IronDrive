@@ -207,9 +207,7 @@ fn parse_content_type(mime: Option<&str>) -> ContentType {
     .unwrap_or(ContentType::Binary)
 }
 
-fn space_response(
-    s: &crate::models::space::SpaceWithMeta,
-) -> SpaceResponse {
+fn space_response(s: &crate::models::space::SpaceWithMeta) -> SpaceResponse {
     SpaceResponse {
         id: s.space.id.clone(),
         name: s.space.name.clone(),
@@ -285,10 +283,7 @@ pub async fn list_spaces(
 
 /// GET /api/v1/spaces/<_id> — Get a single space.
 #[get("/api/v1/spaces/<_id>")]
-pub async fn get_space(
-    _id: &str,
-    reader: SpaceReader,
-) -> Result<Json<SpaceResponse>, AppError> {
+pub async fn get_space(_id: &str, reader: SpaceReader) -> Result<Json<SpaceResponse>, AppError> {
     Ok(Json(space_response(&reader.space)))
 }
 

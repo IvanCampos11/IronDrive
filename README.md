@@ -51,7 +51,7 @@ cd IronDrive
 cp .env.example .env
 
 # Required: root secret for server-managed encryption key material.
-echo "IRONDRIVE_SECRET_KEY=$(openssl rand -base64 44)" >> .env
+echo "IRONDRIVE_SECRET_KEY=$(openssl rand -base64 32)" >> .env
 
 # Start the app
 cargo run
@@ -73,6 +73,12 @@ If you want Tailwind watch + server in one command:
 ```bash
 make dev
 ```
+
+Frontend notes:
+
+- Styles are Tailwind (`static/css/input.css` → `static/css/style.css`); rebuild with `make build-css`.
+- Fonts and icons are self-hosted. Icons are a subset of Material Symbols — if you use a new
+  icon name in a template or script, add it to `scripts/fetch-fonts.sh` and re-run it.
 
 ## Configuration
 

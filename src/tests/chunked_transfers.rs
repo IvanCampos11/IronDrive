@@ -1,7 +1,6 @@
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::serde_json;
-use rocket_dyn_templates::Template;
 use serde_json::Value;
 
 use crate::config::AppConfig;
@@ -17,7 +16,7 @@ fn chunks_for(total_bytes: usize, chunk_size: usize) -> u32 {
     if total_bytes == 0 {
         1
     } else {
-        ((total_bytes + chunk_size - 1) / chunk_size) as u32
+        total_bytes.div_ceil(chunk_size) as u32
     }
 }
 
@@ -58,6 +57,8 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         max_parallel_chunks: 4,
         integrity_scan_enabled: false,
         integrity_scan_interval_hours: 168,
+        registration_enabled: true,
+        secure_cookies: false,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());
@@ -93,7 +94,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
                 crate::catch_500,
             ],
         )
-        .attach(Template::fairing());
+        .attach(crate::templates_fairing());
 
     Client::tracked(rocket)
         .await
@@ -194,7 +195,7 @@ async fn chunked_upload_download_roundtrip() {
                 upload_id, index
             ))
             .header(auth_header(&token))
-            .body(chunk.to_vec())
+            .body(chunk)
             .dispatch()
             .await;
         assert_eq!(put_resp.status(), Status::Ok);
@@ -223,6 +224,11 @@ async fn chunked_upload_download_roundtrip() {
     let dl_json: Value = serde_json::from_str(&dl_init_resp.into_string().await.unwrap()).unwrap();
     let dl_token = dl_json["token"].as_str().unwrap().to_string();
     let dl_chunks = dl_json["total_chunks"].as_u64().unwrap() as u32;
+    // Size comes from the STREAM segment table, not a full decrypt.
+    assert_eq!(
+        dl_json["total_bytes"].as_u64().unwrap(),
+        payload.len() as u64
+    );
 
     let mut downloaded = Vec::new();
     for index in 0..dl_chunks {
@@ -235,7 +241,25 @@ async fn chunked_upload_download_roundtrip() {
             .dispatch()
             .await;
         assert_eq!(resp.status(), Status::Ok);
-        downloaded.extend_from_slice(&resp.into_bytes().await.unwrap());
+        // User content is never served with its real MIME type or inline.
+        assert_eq!(resp.content_type(), Some(ContentType::Binary));
+        assert_eq!(
+            resp.headers().get_one("Content-Disposition"),
+            Some("attachment")
+        );
+        assert!(resp
+            .headers()
+            .get_one("Content-Security-Policy")
+            .unwrap()
+            .starts_with("sandbox"));
+        let chunk_hash = resp
+            .headers()
+            .get_one("X-IronDrive-Chunk-Sha256")
+            .unwrap()
+            .to_string();
+        let bytes = resp.into_bytes().await.unwrap();
+        assert_eq!(chunk_hash, checksum_hex(&bytes));
+        downloaded.extend_from_slice(&bytes);
     }
 
     assert_eq!(downloaded, payload);
@@ -283,7 +307,7 @@ async fn chunked_upload_accepts_out_of_order_chunks() {
                 upload_id, index
             ))
             .header(auth_header(&token))
-            .body(payload[start..end].to_vec())
+            .body(&payload[start..end])
             .dispatch()
             .await;
         assert_eq!(resp.status(), Status::Ok);
@@ -340,7 +364,7 @@ async fn incomplete_upload_cancel_cleans_staging() {
     let put_resp = client
         .put(format!("/api/v1/library/chunked/upload/{}/0", upload_id))
         .header(auth_header(&token))
-        .body(first_chunk.to_vec())
+        .body(first_chunk)
         .dispatch()
         .await;
     assert_eq!(put_resp.status(), Status::Ok);
@@ -410,7 +434,7 @@ async fn checksum_field_is_advisory_only() {
                 upload_id, index
             ))
             .header(auth_header(&token))
-            .body(payload[start..end].to_vec())
+            .body(&payload[start..end])
             .dispatch()
             .await;
         assert_eq!(resp.status(), Status::Ok);
@@ -487,7 +511,7 @@ async fn duplicate_chunk_upload_is_rejected() {
     let first = client
         .put(format!("/api/v1/library/chunked/upload/{}/0", upload_id))
         .header(auth_header(&token))
-        .body(payload[..chunk_size].to_vec())
+        .body(&payload[..chunk_size])
         .dispatch()
         .await;
     assert_eq!(first.status(), Status::Ok);
@@ -495,7 +519,7 @@ async fn duplicate_chunk_upload_is_rejected() {
     let duplicate = client
         .put(format!("/api/v1/library/chunked/upload/{}/0", upload_id))
         .header(auth_header(&token))
-        .body(payload[..chunk_size].to_vec())
+        .body(&payload[..chunk_size])
         .dispatch()
         .await;
     assert_eq!(duplicate.status(), Status::Conflict);

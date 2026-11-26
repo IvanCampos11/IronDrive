@@ -1,0 +1,17 @@
+{# Spaces under the "Spaces" nav item (main swap) + admin links (out-of-band). #}
+{% for s in spaces %}
+<a href="/spaces/{{ s.id }}" class="nav-item h-8 pl-11 text-[13px]" data-nav-space="/spaces/{{ s.id }}" title="{{ s.name }}">
+  <span class="truncate">{{ s.name }}</span>
+</a>
+{% endfor %}
+{% if more > 0 %}
+<a href="/spaces" class="nav-item h-8 pl-11 text-[13px] text-muted">{{ more }} more…</a>
+{% endif %}
+<div id="nav-admin" hx-swap-oob="true">
+  {% if is_admin %}
+  <a href="/admin" class="nav-item" data-nav-space="/admin"><span class="ms">admin_panel_settings</span> Admin</a>
+  {% endif %}
+</div>
+<div id="account-admin" hx-swap-oob="true">
+  {% if is_admin %}<a href="/admin" class="menu-item" role="menuitem"><span class="ms">admin_panel_settings</span>Admin</a>{% endif %}
+</div>

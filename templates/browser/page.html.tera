@@ -1,0 +1,68 @@
+{% extends "base" %}
+{# Full file-browser page for a personal library or a space. #}
+{% block title %}{% if breadcrumbs | length > 0 %}{{ breadcrumbs | last | get(key='name') }} – {% endif %}{{ root_name }} – IronDrive{% endblock %}
+
+{% block search %}
+<label class="search" for="browser-filter">
+  <span class="ms ms-lg text-muted w-10 text-center">search</span>
+  <input id="browser-filter" type="search" placeholder="Search in this folder" autocomplete="off" spellcheck="false">
+  <kbd class="hidden lg:inline-flex items-center h-6 px-2 mr-2 rounded border border-outline text-xs text-muted font-sans">/</kbd>
+</label>
+{% endblock %}
+
+{% block new_menu %}
+{% if can_write %}
+<button type="button" class="menu-item" role="menuitem" data-action="new-folder"><span class="ms">create_new_folder</span>New folder</button>
+<div class="menu-sep"></div>
+<button type="button" class="menu-item" role="menuitem" data-action="upload-files"><span class="ms">upload_file</span>File upload</button>
+<button type="button" class="menu-item" role="menuitem" data-action="upload-folder"><span class="ms">drive_folder_upload</span>Folder upload</button>
+{% else %}
+<p class="px-4 py-2 text-[13px] text-muted max-w-[240px]">You have view-only access to this space.</p>
+{% endif %}
+<div class="menu-sep"></div>
+<a href="/spaces?new=1" class="menu-item" role="menuitem"><span class="ms">workspaces</span>New space</a>
+<a href="/groups?new=1" class="menu-item" role="menuitem"><span class="ms">group_add</span>New group</a>
+{% endblock %}
+
+{% block content %}
+<div class="flex h-full">
+  <div id="browser" class="flex-1 min-w-0 overflow-auto relative"
+       data-base="{{ base_url }}"
+       data-can-write="{{ can_write }}"
+       data-chunk-size-bytes="{{ chunk_size_bytes }}"
+       data-max-parallel-chunks="{{ max_parallel_chunks }}">
+    <div id="file-browser-content" class="min-h-full">
+      {% include "browser/listing" %}
+    </div>
+
+    {# Shown while files are dragged in from the desktop #}
+    <div id="drop-zone" class="absolute inset-0 z-30 rounded-2xl border-2 border-dashed border-primary bg-primary-container/60 items-center justify-center pointer-events-none hidden">
+      <div class="px-6 py-4 rounded-2xl bg-surface shadow-2 text-center">
+        <span class="ms ms-lg text-primary">upload</span>
+        <p class="mt-1 font-medium">Drop to upload to <span id="drop-zone-target">{{ root_name }}</span></p>
+      </div>
+    </div>
+  </div>
+
+  {# Details panel (filled by browser.js) #}
+  <aside id="details" class="details-panel" aria-label="Details" hidden>
+    <div class="flex items-center gap-2 h-16 pl-5 pr-2 shrink-0">
+      <h2 id="details-title" class="flex-1 text-base font-medium truncate">Details</h2>
+      <button type="button" class="icon-btn" data-details-close aria-label="Close details"><span class="ms">close</span></button>
+    </div>
+    <div id="details-body" class="flex-1 overflow-y-auto px-5 pb-6"></div>
+  </aside>
+</div>
+
+{% if can_write %}
+<input type="file" id="file-upload-input" class="sr-only" multiple tabindex="-1" aria-hidden="true">
+<input type="file" id="folder-upload-input" class="sr-only" webkitdirectory directory multiple tabindex="-1" aria-hidden="true">
+{% include "browser/dialogs" %}
+{% endif %}
+
+<div id="item-menu" class="menu" role="menu" hidden></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/browser.js?v={{ asset_v() }}" defer></script>
+{% endblock %}

@@ -552,6 +552,8 @@ mod tests {
             max_parallel_chunks: 4,
             integrity_scan_enabled: false,
             integrity_scan_interval_hours: 168,
+            registration_enabled: true,
+            secure_cookies: false,
         }
     }
 
@@ -589,10 +591,16 @@ mod tests {
         let unlock_state = UnlockState::new();
         let owner_id = seed_user(&pool, "alice").await;
 
-        let result =
-            create_space(&pool, &config, &master_key, &unlock_state, &owner_id, "Project X")
-                .await
-                .unwrap();
+        let result = create_space(
+            &pool,
+            &config,
+            &master_key,
+            &unlock_state,
+            &owner_id,
+            "Project X",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.space.name, "Project X");
         assert_eq!(result.space.owner_type, "user");
@@ -691,12 +699,20 @@ mod tests {
         let unlock_state = UnlockState::new();
         let alice_id = seed_user(&pool, "alice").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "My Space")
-                .await
-                .unwrap();
+        let created = create_space(
+            &pool,
+            &config,
+            &master_key,
+            &unlock_state,
+            &alice_id,
+            "My Space",
+        )
+        .await
+        .unwrap();
 
-        let fetched = get_space(&pool, &alice_id, &created.space.id).await.unwrap();
+        let fetched = get_space(&pool, &alice_id, &created.space.id)
+            .await
+            .unwrap();
         assert_eq!(fetched.space.name, "My Space");
         assert_eq!(fetched.user_permission, "admin");
     }
@@ -714,10 +730,16 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "Private")
-                .await
-                .unwrap();
+        let created = create_space(
+            &pool,
+            &config,
+            &master_key,
+            &unlock_state,
+            &alice_id,
+            "Private",
+        )
+        .await
+        .unwrap();
 
         let err = get_space(&pool, &bob_id, &created.space.id)
             .await
@@ -773,13 +795,13 @@ mod tests {
         let unlock_state = UnlockState::new();
         let alice_id = seed_user(&pool, "alice").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "Old")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "Old")
+            .await
+            .unwrap();
 
-        let updated =
-            update_space(&pool, &alice_id, &created.space.id, "New").await.unwrap();
+        let updated = update_space(&pool, &alice_id, &created.space.id, "New")
+            .await
+            .unwrap();
         assert_eq!(updated.name, "New");
     }
 
@@ -796,10 +818,9 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         // Grant bob read-only.
         SpaceAccess::grant(&pool, &created.space.id, "user", &bob_id, "read")
@@ -828,10 +849,16 @@ mod tests {
         let unlock_state = UnlockState::new();
         let alice_id = seed_user(&pool, "alice").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "Doomed")
-                .await
-                .unwrap();
+        let created = create_space(
+            &pool,
+            &config,
+            &master_key,
+            &unlock_state,
+            &alice_id,
+            "Doomed",
+        )
+        .await
+        .unwrap();
         let space_id = created.space.id.clone();
 
         delete_space(&pool, &config, &unlock_state, &alice_id, &space_id)
@@ -860,10 +887,9 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         SpaceAccess::grant(&pool, &created.space.id, "user", &bob_id, "write")
             .await
@@ -892,29 +918,32 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let _bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         // Grant bob write.
-        let access =
-            grant_user_access(&pool, &alice_id, &created.space.id, "bob", "write")
-                .await
-                .unwrap();
+        let access = grant_user_access(&pool, &alice_id, &created.space.id, "bob", "write")
+            .await
+            .unwrap();
         assert_eq!(access.permission, "write");
         assert_eq!(access.grantee_type, "user");
 
         // Revoke.
-        revoke_access(&pool, &alice_id, &created.space.id, "user", &access.grantee_id)
-            .await
-            .unwrap();
+        revoke_access(
+            &pool,
+            &alice_id,
+            &created.space.id,
+            "user",
+            &access.grantee_id,
+        )
+        .await
+        .unwrap();
 
         // Bob should no longer have access.
-        let perm =
-            resolve_permission(&pool, &access.grantee_id, &created.space.id)
-                .await
-                .unwrap();
+        let perm = resolve_permission(&pool, &access.grantee_id, &created.space.id)
+            .await
+            .unwrap();
         assert!(perm.is_none());
     }
 
@@ -930,15 +959,13 @@ mod tests {
         let unlock_state = UnlockState::new();
         let alice_id = seed_user(&pool, "alice").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
-        let err =
-            grant_user_access(&pool, &alice_id, &created.space.id, "ghost", "read")
-                .await
-                .unwrap_err();
+        let err = grant_user_access(&pool, &alice_id, &created.space.id, "ghost", "read")
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::NotFound));
     }
 
@@ -955,15 +982,13 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let _bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
-        let err =
-            grant_user_access(&pool, &alice_id, &created.space.id, "bob", "superadmin")
-                .await
-                .unwrap_err();
+        let err = grant_user_access(&pool, &alice_id, &created.space.id, "bob", "superadmin")
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::Validation(_)));
     }
 
@@ -981,10 +1006,9 @@ mod tests {
         let bob_id = seed_user(&pool, "bob").await;
         let _charlie_id = seed_user(&pool, "charlie").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         // Grant bob write.
         SpaceAccess::grant(&pool, &created.space.id, "user", &bob_id, "write")
@@ -992,10 +1016,9 @@ mod tests {
             .unwrap();
 
         // Bob (write) tries to grant charlie — should fail.
-        let err =
-            grant_user_access(&pool, &bob_id, &created.space.id, "charlie", "read")
-                .await
-                .unwrap_err();
+        let err = grant_user_access(&pool, &bob_id, &created.space.id, "charlie", "read")
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::Forbidden));
     }
 
@@ -1012,10 +1035,9 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         SpaceAccess::grant(&pool, &created.space.id, "user", &bob_id, "read")
             .await
@@ -1047,10 +1069,9 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         // Bob has no access — should get NotFound.
         let err = list_access(&pool, &bob_id, &created.space.id)
@@ -1085,10 +1106,9 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
         let bob_id = seed_user(&pool, "bob").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         SpaceAccess::grant(&pool, &created.space.id, "user", &bob_id, "write")
             .await
@@ -1124,14 +1144,12 @@ mod tests {
         let alice_id = seed_user(&pool, "alice").await;
 
         // Create two spaces.
-        let s1 =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S1")
-                .await
-                .unwrap();
-        let s2 =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S2")
-                .await
-                .unwrap();
+        let s1 = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S1")
+            .await
+            .unwrap();
+        let s2 = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S2")
+            .await
+            .unwrap();
 
         // Simulate reboot: fresh UnlockState.
         let fresh_state = UnlockState::new();
@@ -1204,10 +1222,9 @@ mod tests {
         let unlock_state = UnlockState::new();
         let alice_id = seed_user(&pool, "alice").await;
 
-        let created =
-            create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
-                .await
-                .unwrap();
+        let created = create_space(&pool, &config, &master_key, &unlock_state, &alice_id, "S")
+            .await
+            .unwrap();
 
         let err = grant_group_access(
             &pool,

@@ -72,7 +72,9 @@ async fn rocket() -> _ {
 
     match dotenv_result {
         Ok(path) => tracing::info!(path = %path.display(), "Loaded .env file"),
-        Err(e) => tracing::warn!("No .env file loaded ({e}); using environment variables / defaults"),
+        Err(e) => {
+            tracing::warn!("No .env file loaded ({e}); using environment variables / defaults")
+        }
     }
 
     let app_config = config::AppConfig::from_env();
@@ -88,15 +90,23 @@ async fn rocket() -> _ {
         .manage(app_config)
         .manage(services::rate_limit::RateLimiter::new())
         .attach(AdHoc::on_ignite("Database Setup", setup_database))
-        .attach(Template::fairing())
+        .attach(templates_fairing())
         .attach(security_headers_fairing())
         .attach(cache_control_fairing())
         .attach(AdHoc::on_liftoff("Background Workers", |rocket| {
             Box::pin(async move {
-                let pool = rocket.state::<SqlitePool>().expect("DbPool not managed").clone();
-                let config = rocket.state::<config::AppConfig>().expect("AppConfig not managed").clone();
-                let unlock_state = rocket.state::<services::unlock_state::UnlockState>()
-                    .expect("UnlockState not managed").clone();
+                let pool = rocket
+                    .state::<SqlitePool>()
+                    .expect("DbPool not managed")
+                    .clone();
+                let config = rocket
+                    .state::<config::AppConfig>()
+                    .expect("AppConfig not managed")
+                    .clone();
+                let unlock_state = rocket
+                    .state::<services::unlock_state::UnlockState>()
+                    .expect("UnlockState not managed")
+                    .clone();
                 services::background::BackgroundRunner::start(pool, config, unlock_state);
             })
         }))
@@ -115,7 +125,51 @@ fn rocket_figment(app_config: &config::AppConfig) -> rocket::figment::Figment {
     rocket::figment::Figment::from(rocket::Config::default())
         .merge(Toml::file("Rocket.toml").nested())
         .merge(Env::prefixed("ROCKET_").global())
-        .merge(Serialized::default("secret_key", &app_config.secret_key))
+        .merge(Serialized::default(
+            "secret_key",
+            app_config.rocket_secret_key(),
+        ))
+}
+
+/// Tera templates plus an `asset_v()` function returning a content hash of
+/// the CSS/JS bundle, used as a cache-busting query string. Static files are
+/// served with a one-year `immutable` cache, so the URL must change whenever
+/// their contents do.
+pub fn templates_fairing() -> impl rocket::fairing::Fairing {
+    let version = asset_version();
+    Template::custom(move |engines| {
+        let v = version.clone();
+        engines.tera.register_function(
+            "asset_v",
+            move |_: &std::collections::HashMap<String, rocket_dyn_templates::tera::Value>| {
+                Ok(rocket_dyn_templates::tera::Value::String(v.clone()))
+            },
+        );
+    })
+}
+
+/// Short SHA-256 over every file in static/css and static/js.
+fn asset_version() -> String {
+    use sha2::{Digest, Sha256};
+    let mut files: Vec<std::path::PathBuf> = ["static/css", "static/js"]
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return env!("CARGO_PKG_VERSION").to_string();
+    }
+    let mut hasher = Sha256::new();
+    for path in files {
+        if let Ok(bytes) = std::fs::read(&path) {
+            hasher.update(path.to_string_lossy().as_bytes());
+            hasher.update(&bytes);
+        }
+    }
+    hex::encode(&hasher.finalize()[..5])
 }
 
 /// Attach security headers to every response.
@@ -133,10 +187,14 @@ pub fn security_headers_fairing() -> AdHoc {
                 "Permissions-Policy",
                 "camera=(), microphone=(), geolocation=()",
             ));
-            res.set_header(Header::new(
-                "Content-Security-Policy",
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-            ));
+            // Responders serving user file content set a stricter sandbox CSP;
+            // don't overwrite it with the app-page policy.
+            if !res.headers().contains("Content-Security-Policy") {
+                res.set_header(Header::new(
+                    "Content-Security-Policy",
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+                ));
+            }
         })
     })
 }
@@ -211,12 +269,36 @@ impl<'r> Responder<'r, 'static> for CatcherJsonBody {
         });
 
         if wants_html {
-            let template_name = match self.status.code {
-                403 => "errors/403",
-                404 => "errors/404",
-                _ => "errors/500",
+            // Signed-out browsers go to the sign-in page instead of an error page.
+            if self.status == Status::Unauthorized {
+                return Response::build()
+                    .status(Status::SeeOther)
+                    .raw_header("Location", "/login")
+                    .ok();
+            }
+            let (title, message) = match self.status.code {
+                403 => (
+                    "You don't have access",
+                    "You don't have permission to view this page.",
+                ),
+                404 => (
+                    "Page not found",
+                    "This page doesn't exist, or it may have been moved or deleted.",
+                ),
+                400 | 409 | 422 => (
+                    "That didn't work",
+                    "The request couldn't be processed. Go back and try again.",
+                ),
+                _ => (
+                    "Something went wrong",
+                    "An unexpected error occurred on the server. Please try again in a moment.",
+                ),
             };
-            if let Ok(template) = Template::render(template_name, context! {}).respond_to(request) {
+            let page = Template::render(
+                "errors/error",
+                context! { code: self.status.code, title: title, message: message },
+            );
+            if let Ok(template) = page.respond_to(request) {
                 return Response::build_from(template).status(self.status).ok();
             }
         }

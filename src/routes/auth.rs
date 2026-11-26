@@ -10,6 +10,7 @@ use crate::guards::auth_guard::{extract_bearer_token, hash_token, AuthenticatedU
 use crate::services::auth_service;
 use crate::services::crypto_service::MasterKey;
 use crate::services::library_service;
+use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
 
 #[derive(Deserialize)]
@@ -85,8 +86,15 @@ impl<'r> rocket::request::FromRequest<'r> for RawBearerToken {
 pub async fn register(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    rate_limiter: &State<RateLimiter>,
+    client_ip: ClientIp,
     body: Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, AppError> {
+    // Same buckets as the HTML form, so API and page share one budget per IP.
+    if !rate_limiter.check(&format!("register:{}", client_ip.0), 5, 900) {
+        return Err(AppError::RateLimited);
+    }
+
     let result = auth_service::register(
         pool.inner(),
         config.inner(),
@@ -109,8 +117,14 @@ pub async fn register(
 pub async fn login(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
+    rate_limiter: &State<RateLimiter>,
+    client_ip: ClientIp,
     body: Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
+    if !rate_limiter.check(&format!("login:{}", client_ip.0), 10, 900) {
+        return Err(AppError::RateLimited);
+    }
+
     let result =
         auth_service::login(pool.inner(), config.inner(), &body.username, &body.password).await?;
 

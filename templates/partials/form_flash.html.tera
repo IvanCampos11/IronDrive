@@ -1,0 +1,6 @@
+{% if flash_msg is defined and flash_msg %}
+<div class="flex gap-3 items-start mb-6 px-4 py-3 rounded-xl text-sm {% if flash_kind is defined and flash_kind == 'error' %}bg-danger-container text-on-danger-container{% else %}bg-primary-container text-on-primary-container{% endif %}" role="{% if flash_kind is defined and flash_kind == 'error' %}alert{% else %}status{% endif %}">
+  <span class="ms">{% if flash_kind is defined and flash_kind == 'error' %}error{% else %}check_circle{% endif %}</span>
+  <span class="flex-1">{{ flash_msg }}</span>
+</div>
+{% endif %}

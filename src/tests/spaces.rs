@@ -9,7 +9,6 @@
 
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
-use rocket_dyn_templates::Template;
 use serde_json::Value;
 
 use crate::config::AppConfig;
@@ -71,6 +70,8 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         max_parallel_chunks: 4,
         integrity_scan_enabled: false,
         integrity_scan_interval_hours: 168,
+        registration_enabled: true,
+        secure_cookies: false,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());
@@ -107,7 +108,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
                 crate::catch_500,
             ],
         )
-        .attach(Template::fairing())
+        .attach(crate::templates_fairing())
         .attach(crate::security_headers_fairing())
         .attach(crate::cache_control_fairing());
 
@@ -166,12 +167,7 @@ async fn setup_library(client: &Client, token: &str) {
     assert_eq!(r.status(), Status::Ok, "setup-library failed");
 }
 
-async fn create_ready_user(
-    client: &Client,
-    username: &str,
-    email: &str,
-    password: &str,
-) -> String {
+async fn create_ready_user(client: &Client, username: &str, email: &str, password: &str) -> String {
     register_user(client, username, email, password).await;
     let token = login_user(client, username, password).await;
     setup_library(client, &token).await;
@@ -338,8 +334,7 @@ async fn grant_and_revoke_user_access() {
     let client = test_client(&tmp).await;
     let alice_token =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
-    let bob_token =
-        create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
+    let bob_token = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
 
     let space = api_create_space(&client, &alice_token, "Shared").await;
     let space_id = space["id"].as_str().unwrap();
@@ -356,8 +351,7 @@ async fn grant_and_revoke_user_access() {
     assert_eq!(list["spaces"].as_array().unwrap().len(), 0);
 
     // Grant bob read access
-    let (status, _) =
-        api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
+    let (status, _) = api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
     assert_eq!(status, Status::Ok);
 
     // Bob can now see it
@@ -466,7 +460,7 @@ async fn space_upload_download_delete() {
         ))
         .header(auth_header(&token))
         .header(ContentType::Binary)
-        .body(file_data.to_vec())
+        .body(file_data)
         .dispatch()
         .await;
 
@@ -490,7 +484,10 @@ async fn space_upload_download_delete() {
 
     // Delete
     let r = client
-        .delete(format!("/api/v1/spaces/{}/files/delete?path=hello.txt", space_id))
+        .delete(format!(
+            "/api/v1/spaces/{}/files/delete?path=hello.txt",
+            space_id
+        ))
         .header(auth_header(&token))
         .dispatch()
         .await;
@@ -514,15 +511,13 @@ async fn reader_cannot_upload_to_space() {
     let client = test_client(&tmp).await;
     let alice_token =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
-    let bob_token =
-        create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
+    let bob_token = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
 
     let space = api_create_space(&client, &alice_token, "ReadOnly").await;
     let space_id = space["id"].as_str().unwrap();
 
     // Grant bob read-only access
-    let (status, _) =
-        api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
+    let (status, _) = api_grant_user_access(&client, &alice_token, space_id, "bob", "read").await;
     assert_eq!(status, Status::Ok);
 
     // Bob tries to upload → should be forbidden
@@ -533,7 +528,7 @@ async fn reader_cannot_upload_to_space() {
         ))
         .header(auth_header(&bob_token))
         .header(ContentType::Binary)
-        .body(b"data".to_vec())
+        .body(b"data")
         .dispatch()
         .await;
 
@@ -574,9 +569,12 @@ async fn spaces_page_renders_for_authenticated_user() {
     assert_eq!(r.status(), Status::Ok);
 
     let body = r.into_string().await.unwrap();
-    assert!(body.contains("My Space"), "Space name should appear on page");
     assert!(
-        body.contains("Create Space"),
+        body.contains("My Space"),
+        "Space name should appear on page"
+    );
+    assert!(
+        body.contains("New space"),
         "Create space button should be present"
     );
 }
@@ -603,10 +601,7 @@ async fn space_browser_page_renders() {
     // Session login and visit browser
     session_login(&client, "alice", &alice_password()).await;
 
-    let r = client
-        .get(format!("/spaces/{}", space_id))
-        .dispatch()
-        .await;
+    let r = client.get(format!("/spaces/{}", space_id)).dispatch().await;
 
     assert_eq!(r.status(), Status::Ok);
     let body = r.into_string().await.unwrap();
@@ -640,11 +635,11 @@ async fn space_settings_page_renders() {
         "Space name should appear on settings page"
     );
     assert!(
-        body.contains("Rename Space"),
+        body.contains("/settings/rename"),
         "Admin should see rename section"
     );
     assert!(
-        body.contains("Danger Zone"),
+        body.contains("/settings/delete"),
         "Admin should see danger zone"
     );
 }
@@ -666,7 +661,7 @@ async fn space_rename_via_api() {
         ))
         .header(auth_header(&token))
         .header(ContentType::Binary)
-        .body(b"data".to_vec())
+        .body(b"data")
         .dispatch()
         .await;
 
@@ -701,8 +696,7 @@ async fn non_member_cannot_access_space() {
     let client = test_client(&tmp).await;
     let alice_token =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
-    let bob_token =
-        create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
+    let bob_token = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
 
     let space = api_create_space(&client, &alice_token, "Private").await;
     let space_id = space["id"].as_str().unwrap();

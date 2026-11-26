@@ -1,0 +1,117 @@
+{% extends "base" %}
+{% block title %}Admin – IronDrive{% endblock %}
+
+{% block content %}
+<div class="flex items-center h-16 px-6"><h1 class="page-title">Admin</h1></div>
+
+<div class="px-4 sm:px-6 pb-8 max-w-5xl space-y-6">
+  {# Overview #}
+  <div class="grid sm:grid-cols-3 gap-4">
+    <section class="section p-5">
+      <p class="text-[13px] text-muted">Users</p>
+      <p class="mt-1 text-[28px] leading-9">{{ user_count }}</p>
+      <p class="text-[13px] text-muted">{% if active_count == user_count %}All active{% else %}{{ user_count - active_count }} disabled{% endif %}</p>
+    </section>
+    <section class="section p-5">
+      <p class="text-[13px] text-muted">Sign-ups</p>
+      <p class="mt-1 text-lg">{% if registration_enabled %}Open to anyone{% else %}Closed{% endif %}</p>
+      <p class="text-[13px] text-muted">Set <code class="font-mono text-xs">IRONDRIVE_REGISTRATION_ENABLED</code> to change. New accounts get {{ default_quota }}.</p>
+    </section>
+    <section class="section p-5 flex flex-col">
+      <p class="text-[13px] text-muted">Integrity scans</p>
+      <p class="mt-1 text-lg">{% if scan_enabled %}Every {% if scan_interval_hours % 24 == 0 %}{{ scan_interval_hours / 24 }} day{% if scan_interval_hours != 24 %}s{% endif %}{% else %}{{ scan_interval_hours }} hours{% endif %}{% else %}Scheduled scans off{% endif %}</p>
+      <button type="button" class="btn-tonal btn-sm self-start mt-auto pt-0" id="admin-scan" {% if scan_running %}disabled{% endif %}>
+        <span class="ms">refresh</span>{% if scan_running %}Scan running…{% else %}Scan all files now{% endif %}
+      </button>
+    </section>
+  </div>
+
+  {# Open alerts #}
+  <section class="section">
+    <div class="flex items-center gap-3 h-14 pl-5 pr-3">
+      <h2 class="section-title flex-1">Open alerts {% if alerts | length > 0 %}<span class="text-muted font-normal">· {{ alerts | length }}</span>{% endif %}</h2>
+    </div>
+    <div class="border-t border-outline">
+      {% if alerts | length == 0 %}
+      <p class="flex items-center justify-center gap-2 px-5 py-8 text-muted"><span class="ms text-success">check_circle</span>No damaged files found.</p>
+      {% else %}
+      <ul>
+        {% for a in alerts %}
+        <li class="flex items-center gap-3 min-h-[60px] py-2 pl-5 pr-3 border-b border-outline/70 last:border-b-0" data-alert="{{ a.id }}">
+          <span class="ms ms-fill text-danger">error</span>
+          <div class="flex-1 min-w-0">
+            <p class="truncate font-medium" title="{{ a.file_path }}">{{ a.file_path }}</p>
+            <p class="text-[13px] text-muted truncate">{{ a.title }} · {{ a.location }} · {{ a.detected_by | replace(from="_", to=" ") }} · <time datetime="{{ a.created_at }}">{{ a.created_at }}</time></p>
+          </div>
+          <button type="button" class="btn-text btn-sm" data-dismiss-alert="{{ a.id }}">Dismiss</button>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+  </section>
+
+  {# Users #}
+  <section class="section">
+    <div class="flex items-center h-14 pl-5 pr-3"><h2 class="section-title">Users</h2></div>
+    <ul class="border-t border-outline">
+      {% for u in users %}
+      <li class="flex flex-wrap md:flex-nowrap items-center gap-x-4 gap-y-2 min-h-[64px] py-3 pl-5 pr-3 border-b border-outline/70 last:border-b-0">
+        <span class="avatar {% if not u.is_active %}bg-surface-3 text-muted{% endif %}">{{ u.username | truncate(length=1, end="") }}</span>
+        <div class="flex-1 min-w-[160px]">
+          <p class="flex items-center gap-2 font-medium {% if not u.is_active %}text-muted{% endif %}">
+            <span class="truncate">{{ u.username }}</span>
+            {% if u.role == 'admin' %}<span class="chip-primary">Admin</span>{% endif %}
+            {% if not u.is_active %}<span class="chip">Disabled</span>{% endif %}
+            {% if u.is_self %}<span class="text-xs text-muted font-normal">(you)</span>{% endif %}
+          </p>
+          <p class="text-[13px] text-muted truncate">{{ u.email }} · joined <time datetime="{{ u.created_at }}" data-full>{{ u.created_at }}</time></p>
+        </div>
+        <div class="w-full md:w-56 order-last md:order-none pl-11 md:pl-0">
+          {% if u.setup_complete %}
+          <div class="progress"><span class="{% if u.usage_pct >= 90 %}!bg-danger{% elif u.usage_pct >= 75 %}!bg-warning{% endif %}" style="width: {{ u.usage_pct }}%"></span></div>
+          <p class="mt-1.5 text-xs text-muted">{{ u.used }} of {{ u.quota }}</p>
+          {% else %}
+          <p class="text-xs text-muted">Hasn't set up a library yet · quota {{ u.quota }}</p>
+          {% endif %}
+        </div>
+        <button type="button" class="icon-btn" data-menu-trigger="user-menu-{{ loop.index }}" aria-haspopup="menu" aria-label="Actions for {{ u.username }}"><span class="ms">more_vert</span></button>
+        <div id="user-menu-{{ loop.index }}" class="menu" role="menu" hidden>
+          <button type="button" class="menu-item" role="menuitem" data-quota-user="{{ u.id }}" data-quota-name="{{ u.username }}" data-quota-value="{{ u.quota }}"><span class="ms">database</span>Change storage limit</button>
+          {% if not u.is_self %}
+          <form method="post" action="/admin/users/{{ u.id }}/active"
+                {% if u.is_active %}data-confirm="{{ u.username }} will be signed out everywhere and won't be able to sign in. Their files are kept." data-confirm-title="Disable {{ u.username }}?" data-confirm-label="Disable" data-confirm-danger{% endif %}>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="active" value="{% if u.is_active %}false{% else %}true{% endif %}">
+            {% if u.is_active %}
+            <button type="submit" class="menu-item-danger" role="menuitem"><span class="ms">block</span>Disable account</button>
+            {% else %}
+            <button type="submit" class="menu-item" role="menuitem"><span class="ms">check_circle</span>Enable account</button>
+            {% endif %}
+          </form>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>
+
+<dialog id="quota-dialog" class="dialog max-w-sm" aria-labelledby="quota-title">
+  <form method="post" action="">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <h2 id="quota-title" class="dialog-title">Storage limit</h2>
+    <label for="quota-input" class="field-label">Limit for <span data-quota-for></span></label>
+    <input type="text" id="quota-input" name="quota" class="field" required placeholder="e.g. 10 GB" autocomplete="off" spellcheck="false">
+    <p class="field-hint">Use units like MB, GB or TB. Existing files are never deleted if a user goes over.</p>
+    <div class="dialog-actions">
+      <button type="button" class="btn-text" data-close>Cancel</button>
+      <button type="submit" class="btn-text">Save</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/admin.js?v={{ asset_v() }}" defer></script>
+{% endblock %}

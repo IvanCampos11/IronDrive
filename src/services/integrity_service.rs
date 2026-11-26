@@ -23,7 +23,9 @@ pub struct IntegrityEvent {
     pub created_at: String,
 }
 
-/// Insert an integrity event.
+/// Record an integrity event, or return the open one already recorded for the
+/// same file and problem. Rescans must not pile up duplicate alerts; the
+/// partial unique index from migration 010 makes this safe under concurrency.
 pub async fn record_event(
     pool: &DbPool,
     target_type: &str,
@@ -33,22 +35,32 @@ pub async fn record_event(
     details: Option<&str>,
     detected_by: &str,
 ) -> Result<IntegrityEvent, AppError> {
-    let id = Uuid::new_v4().to_string();
-
-    let event = sqlx::query_as::<_, IntegrityEvent>(
+    sqlx::query(
         r#"
         INSERT INTO integrity_events (id, target_type, target_id, file_path, event_type, details, detected_by)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        RETURNING id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
+        ON CONFLICT (target_type, target_id, file_path, event_type) WHERE acknowledged = 0 DO NOTHING
         "#,
     )
-    .bind(&id)
+    .bind(Uuid::new_v4().to_string())
     .bind(target_type)
     .bind(target_id)
     .bind(file_path)
     .bind(event_type)
     .bind(details)
     .bind(detected_by)
+    .execute(pool)
+    .await?;
+
+    let event = sqlx::query_as::<_, IntegrityEvent>(
+        "SELECT id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
+         FROM integrity_events
+         WHERE target_type = ? AND target_id = ? AND file_path = ? AND event_type = ? AND acknowledged = 0",
+    )
+    .bind(target_type)
+    .bind(target_id)
+    .bind(file_path)
+    .bind(event_type)
     .fetch_one(pool)
     .await?;
 
@@ -100,12 +112,69 @@ pub async fn list_unacknowledged(
     Ok(events)
 }
 
+/// Fetch one event by id.
+pub async fn get_event(pool: &DbPool, event_id: &str) -> Result<Option<IntegrityEvent>, AppError> {
+    Ok(sqlx::query_as::<_, IntegrityEvent>(
+        "SELECT id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
+         FROM integrity_events WHERE id = ?",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Close every open event for one file (e.g. after it re-verifies clean).
+pub async fn resolve_events_for_path(
+    pool: &DbPool,
+    target_type: &str,
+    target_id: &str,
+    file_path: &str,
+) -> Result<u64, AppError> {
+    let r = sqlx::query(
+        "UPDATE integrity_events SET acknowledged = 1
+         WHERE target_type = ? AND target_id = ? AND file_path = ? AND acknowledged = 0",
+    )
+    .bind(target_type)
+    .bind(target_id)
+    .bind(file_path)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Unacknowledged events across every library and space, newest first (admin view).
+pub async fn list_all_unacknowledged(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<IntegrityEvent>, AppError> {
+    Ok(sqlx::query_as::<_, IntegrityEvent>(
+        "SELECT id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at
+         FROM integrity_events WHERE acknowledged = 0
+         ORDER BY created_at DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Plain-language description of an event type, for the UI.
+pub fn describe_event_type(event_type: &str) -> &'static str {
+    match event_type {
+        "checksum_mismatch" => "Data on disk is damaged",
+        "file_truncated" => "File is incomplete on disk",
+        "decrypt_failed" => "File can't be decrypted",
+        _ => "Integrity problem detected",
+    }
+}
+
 /// Mark an integrity event as acknowledged. Returns `true` if the row was updated.
 pub async fn acknowledge_event(pool: &DbPool, event_id: &str) -> Result<bool, AppError> {
-    let result = sqlx::query("UPDATE integrity_events SET acknowledged = 1 WHERE id = ? AND acknowledged = 0")
-        .bind(event_id)
-        .execute(pool)
-        .await?;
+    let result = sqlx::query(
+        "UPDATE integrity_events SET acknowledged = 1 WHERE id = ? AND acknowledged = 0",
+    )
+    .bind(event_id)
+    .execute(pool)
+    .await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -246,8 +315,7 @@ async fn scan_directory(
                     }
                     IntegrityStatus::DecryptionFailed(ref msg) => {
                         let rel = relative_path(root, &file_path);
-                        let event_type = if msg.contains("truncated") || msg.contains("too small")
-                        {
+                        let event_type = if msg.contains("truncated") || msg.contains("too small") {
                             "file_truncated"
                         } else {
                             "decrypt_failed"
@@ -291,4 +359,64 @@ fn relative_path(root: &Path, full: &Path) -> String {
         .unwrap_or(full)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// Scan every library and every space. Returns totals across all of them.
+/// Used by the periodic background worker and the admin "Scan now" action.
+pub async fn scan_everything(
+    pool: &DbPool,
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+) -> ScanResult {
+    let libraries: Vec<(String,)> = sqlx::query_as("SELECT id FROM personal_libraries")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    let spaces: Vec<(String,)> = sqlx::query_as("SELECT id FROM spaces")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    tracing::info!(
+        libraries = libraries.len(),
+        spaces = spaces.len(),
+        "Integrity scan: starting"
+    );
+    let mut total = ScanResult {
+        files_scanned: 0,
+        failures_found: 0,
+    };
+
+    let targets = libraries
+        .iter()
+        .map(|(id,)| ("library", id))
+        .chain(spaces.iter().map(|(id,)| ("space", id)));
+    for (kind, id) in targets {
+        let result = if kind == "library" {
+            scan_library(pool, config, unlock_state, id).await
+        } else {
+            scan_space(pool, config, unlock_state, id).await
+        };
+        match result {
+            Ok(r) => {
+                total.files_scanned += r.files_scanned;
+                total.failures_found += r.failures_found;
+                if r.failures_found > 0 {
+                    tracing::warn!(target_type = kind, target_id = %id, failures = r.failures_found, "Integrity scan: failures detected");
+                }
+            }
+            Err(e) => {
+                tracing::error!(target_type = kind, target_id = %id, error = %e, "Integrity scan: error")
+            }
+        }
+        // Throttle between targets to avoid sustained I/O pressure.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    tracing::info!(
+        files_scanned = total.files_scanned,
+        failures = total.failures_found,
+        "Integrity scan: complete"
+    );
+    total
 }

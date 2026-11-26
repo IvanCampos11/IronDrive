@@ -12,10 +12,10 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::csrf_guard::{ensure_csrf_token, validate_csrf, CsrfXhr};
 use crate::guards::session_guard::{SessionSetupComplete, SessionUser, COOKIE_NAME};
-use crate::models::library::PersonalLibrary;
-use crate::models::group::Group;
-use crate::models::user::User;
 use crate::guards::space_guard::{SessionSpaceAdmin, SessionSpaceReader, SessionSpaceWriter};
+use crate::models::group::Group;
+use crate::models::library::PersonalLibrary;
+use crate::models::user::User;
 use crate::services::crypto_service::MasterKey;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
@@ -167,9 +167,10 @@ pub struct UpdateMemberRoleForm {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn set_session_cookie(cookies: &CookieJar<'_>, token: &str) {
+fn set_session_cookie(cookies: &CookieJar<'_>, token: &str, secure: bool) {
     let mut cookie = Cookie::new(COOKIE_NAME, token.to_string());
     cookie.set_http_only(true);
+    cookie.set_secure(secure);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
     cookies.add(cookie);
@@ -180,14 +181,17 @@ fn clear_session_cookie(cookies: &CookieJar<'_>) {
 }
 
 /// Look up the user's personal library.
-async fn require_library(pool: &DbPool, user_id: &str) -> Result<PersonalLibrary, AppError> {
+pub(crate) async fn require_library(
+    pool: &DbPool,
+    user_id: &str,
+) -> Result<PersonalLibrary, AppError> {
     PersonalLibrary::find_by_user(pool, user_id)
         .await?
         .ok_or(AppError::NotFound)
 }
 
 /// Format bytes into something human readable.
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * 1024 * 1024;
@@ -272,7 +276,7 @@ pub async fn login_submit(
 
     match result {
         Ok(login_result) => {
-            set_session_cookie(cookies, &login_result.token);
+            set_session_cookie(cookies, &login_result.token, config.secure_cookies);
             if login_result.setup_complete {
                 Ok(Redirect::to(uri!(files_page(
                     path = Option::<String>::None
@@ -355,6 +359,10 @@ pub async fn register_submit(
         )),
         Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(uri!(register_page)), msg)),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(uri!(register_page)), msg)),
+        Err(AppError::RegistrationClosed) => Err(Flash::error(
+            Redirect::to(uri!(register_page)),
+            "Registration is disabled on this server. Ask an administrator for an account.",
+        )),
         Err(_) => Err(Flash::error(
             Redirect::to(uri!(register_page)),
             "Registration failed. Please try again.",
@@ -490,37 +498,27 @@ pub async fn files_page(
     let breadcrumbs = build_breadcrumbs(user_path);
 
     // Format entries for display
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let flagged = flagged_paths(pool.inner(), "library", &lib.id).await;
+    let display_entries: Vec<serde_json::Value> =
+        entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     let csrf_token = ensure_csrf_token(cookies);
 
     Ok(Template::render(
-        "files/browser",
+        "browser/page",
         context! {
             user: &user.0.username,
             csrf_token: csrf_token,
+            current_path: "files",
             chunk_size_bytes: config.chunk_size_bytes,
             max_parallel_chunks: config.max_parallel_chunks,
+            base_url: "/files",
+            root_name: "My files",
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
+            can_write: true,
+            is_admin: false,
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -554,31 +552,20 @@ pub async fn files_partial(
 
     let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let flagged = flagged_paths(pool.inner(), "library", &lib.id).await;
+    let display_entries: Vec<serde_json::Value> =
+        entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     Ok(Template::render(
-        "partials/file_list",
+        "browser/listing",
         context! {
+            base_url: "/files",
+            root_name: "My files",
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
+            can_write: true,
+            is_admin: false,
         },
     ))
 }
@@ -591,7 +578,10 @@ pub async fn files_folders(
     unlock_state: &State<UnlockState>,
     user: SessionSetupComplete,
     path: Option<String>,
-) -> Result<rocket::serde::json::Json<serde_json::Value>, (Status, rocket::serde::json::Json<serde_json::Value>)> {
+) -> Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+> {
     let lib = require_library(pool.inner(), &user.0.id)
         .await
         .map_err(|_| {
@@ -901,7 +891,7 @@ pub async fn bulk_delete(
     for path in &data.paths {
         match fs_service::delete_entry(config.inner(), &lib.id, path).await {
             Ok(_) => deleted += 1,
-            Err(e) => errors.push(format!("{}: {}", path, e)),
+            Err(e) => errors.push(bulk_error(path, &e)),
         }
     }
 
@@ -949,7 +939,7 @@ pub async fn bulk_move(
         let new_path = join_dir_and_name(&target_dir, &name);
         match fs_service::rename_entry(config.inner(), &lib.id, old_path, &new_path).await {
             Ok(_) => moved += 1,
-            Err(e) => errors.push(format!("{}: {}", old_path, e)),
+            Err(e) => errors.push(bulk_error(old_path, &e)),
         }
     }
 
@@ -1280,7 +1270,7 @@ pub async fn chunked_init_download(
         unlock_state.inner(),
         &user.0.id,
         &lib.id,
-        "library",
+        fs_service::TargetKind::Library,
         &path,
     )
     .await
@@ -1305,6 +1295,7 @@ pub async fn chunked_init_download(
 /// GET /files/chunked/download/chunk?<token>&<index> — stream one chunk for browser download.
 #[get("/files/chunked/download/chunk?<token>&<index>")]
 pub async fn chunked_download_chunk(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     user: SessionSetupComplete,
@@ -1314,10 +1305,21 @@ pub async fn chunked_download_chunk(
     crate::routes::library::FileChunkDownload,
     (Status, rocket::serde::json::Json<serde_json::Value>),
 > {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(|_| {
+            (
+                Status::NotFound,
+                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
+            )
+        })?;
+
     let result = chunk_service::serve_chunk(
         config.inner(),
         unlock_state.inner(),
         &user.0.id,
+        fs_service::TargetKind::Library,
+        &lib.id,
         &token,
         index,
     )
@@ -1329,25 +1331,8 @@ pub async fn chunked_download_chunk(
         )
     })?;
 
-    let content_type = result
-        .mime_type
-        .as_deref()
-        .and_then(|m| {
-            let parts: Vec<&str> = m.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                Some(rocket::http::ContentType::new(
-                    parts[0].to_string(),
-                    parts[1].to_string(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(rocket::http::ContentType::Binary);
-
     Ok(crate::routes::library::FileChunkDownload {
         data: result.data,
-        content_type,
         checksum_sha256: result.checksum_sha256,
         chunk_index: result.chunk_index,
         total_chunks: result.total_chunks,
@@ -1474,6 +1459,7 @@ pub async fn usage_page(
         "files/usage",
         context! {
             user: &user.0.username,
+            current_path: "usage",
             csrf_token: ensure_csrf_token(cookies),
             disk_bytes: usage.disk_bytes,
             disk_bytes_fmt: format_bytes(usage.disk_bytes),
@@ -1505,6 +1491,9 @@ pub async fn settings_page(
     Ok(Template::render(
         "settings/index",
         context! {
+            user: &user.0.username,
+            current_path: "settings",
+            version: env!("CARGO_PKG_VERSION"),
             user_id: &user.0.id,
             username: &user.0.username,
             csrf_token: ensure_csrf_token(cookies),
@@ -1542,7 +1531,7 @@ pub async fn groups_page(
                 "name": g.group.name,
                 "description": g.group.description,
                 "created_by": g.group.created_by,
-                "created_at": format_timestamp(&g.group.created_at),
+                "created_at": &g.group.created_at,
                 "member_count": g.member_count,
                 "user_role": g.user_role,
             })
@@ -1589,12 +1578,8 @@ pub async fn groups_create_submit(
             Redirect::to(uri!(groups_page)),
             format!("Group \"{}\" created.", g.group.name),
         )),
-        Err(AppError::Conflict(msg)) => {
-            Err(Flash::error(Redirect::to(uri!(groups_page)), msg))
-        }
-        Err(AppError::Validation(msg)) => {
-            Err(Flash::error(Redirect::to(uri!(groups_page)), msg))
-        }
+        Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(uri!(groups_page)), msg)),
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(uri!(groups_page)), msg)),
         Err(_) => Err(Flash::error(
             Redirect::to(uri!(groups_page)),
             "Failed to create group. Please try again.",
@@ -1636,7 +1621,7 @@ pub async fn group_detail_page(
                 "username": m.username,
                 "email": m.email,
                 "role": m.role,
-                "joined_at": format_timestamp(&m.joined_at),
+                "joined_at": &m.joined_at,
             })
         })
         .collect();
@@ -1652,7 +1637,7 @@ pub async fn group_detail_page(
                 "name": group_meta.group.name,
                 "description": group_meta.group.description,
                 "created_by": group_meta.group.created_by,
-                "created_at": format_timestamp(&group_meta.group.created_at),
+                "created_at": &group_meta.group.created_at,
             }),
             group_id: &group_meta.group.id,
             user_role: &group_meta.user_role,
@@ -1677,7 +1662,10 @@ pub async fn group_edit_submit(
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redirect_to = uri!(group_detail_page(id = id));
     validate_csrf(cookies, &form.csrf_token).map_err(|_| {
-        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+        Flash::error(
+            Redirect::to(redirect_to.clone()),
+            "Invalid request. Please try again.",
+        )
     })?;
 
     match group_service::update_group(
@@ -1689,10 +1677,7 @@ pub async fn group_edit_submit(
     )
     .await
     {
-        Ok(_) => Ok(Flash::success(
-            Redirect::to(redirect_to),
-            "Group updated.",
-        )),
+        Ok(_) => Ok(Flash::success(Redirect::to(redirect_to), "Group updated.")),
         Err(AppError::Forbidden) => Err(Flash::error(
             Redirect::to(redirect_to),
             "You don't have permission to edit this group.",
@@ -1749,17 +1734,13 @@ pub async fn group_add_member_submit(
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redirect_to = uri!(group_detail_page(id = id));
     validate_csrf(cookies, &form.csrf_token).map_err(|_| {
-        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+        Flash::error(
+            Redirect::to(redirect_to.clone()),
+            "Invalid request. Please try again.",
+        )
     })?;
 
-    match group_service::add_member(
-        pool.inner(),
-        &user.0.id,
-        id,
-        &form.username,
-        &form.role,
-    )
-    .await
+    match group_service::add_member(pool.inner(), &user.0.id, id, &form.username, &form.role).await
     {
         Ok(_) => Ok(Flash::success(
             Redirect::to(redirect_to),
@@ -1794,14 +1775,14 @@ pub async fn group_remove_member_submit(
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redirect_to = uri!(group_detail_page(id = id));
     validate_csrf(cookies, &form.csrf_token).map_err(|_| {
-        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+        Flash::error(
+            Redirect::to(redirect_to.clone()),
+            "Invalid request. Please try again.",
+        )
     })?;
 
     match group_service::remove_member(pool.inner(), &user.0.id, id, user_id).await {
-        Ok(_) => Ok(Flash::success(
-            Redirect::to(redirect_to),
-            "Member removed.",
-        )),
+        Ok(_) => Ok(Flash::success(Redirect::to(redirect_to), "Member removed.")),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
         Err(AppError::Forbidden) => Err(Flash::error(
             Redirect::to(redirect_to),
@@ -1826,16 +1807,15 @@ pub async fn group_update_member_role_submit(
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redirect_to = uri!(group_detail_page(id = id));
     validate_csrf(cookies, &form.csrf_token).map_err(|_| {
-        Flash::error(Redirect::to(redirect_to.clone()), "Invalid request. Please try again.")
+        Flash::error(
+            Redirect::to(redirect_to.clone()),
+            "Invalid request. Please try again.",
+        )
     })?;
 
-    match group_service::update_member_role(pool.inner(), &user.0.id, id, user_id, &form.role)
-        .await
+    match group_service::update_member_role(pool.inner(), &user.0.id, id, user_id, &form.role).await
     {
-        Ok(_) => Ok(Flash::success(
-            Redirect::to(redirect_to),
-            "Role updated.",
-        )),
+        Ok(_) => Ok(Flash::success(Redirect::to(redirect_to), "Role updated.")),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redirect_to), msg)),
         Err(AppError::Forbidden) => Err(Flash::error(
             Redirect::to(redirect_to),
@@ -1853,42 +1833,34 @@ pub async fn group_update_member_role_submit(
 // ---------------------------------------------------------------------------
 
 fn build_breadcrumbs(path: &str) -> Vec<serde_json::Value> {
-    let mut crumbs = vec![serde_json::json!({ "name": "Files", "path": "" })];
-    if !path.is_empty() {
-        let mut accumulated = String::new();
-        for segment in path.split('/') {
-            if segment.is_empty() {
-                continue;
-            }
-            if !accumulated.is_empty() {
-                accumulated.push('/');
-            }
-            accumulated.push_str(segment);
-            crumbs.push(serde_json::json!({
-                "name": segment,
-                "path": accumulated.clone(),
-            }));
+    let mut crumbs = Vec::new();
+    let mut accumulated = String::new();
+    for segment in path.split('/').filter(|s| !s.is_empty()) {
+        if !accumulated.is_empty() {
+            accumulated.push('/');
         }
+        accumulated.push_str(segment);
+        crumbs.push(serde_json::json!({ "name": segment, "path": accumulated.clone() }));
     }
     crumbs
 }
 
-fn parent_path(path: &str) -> String {
+pub(crate) fn parent_path(path: &str) -> String {
     match path.rfind('/') {
         Some(pos) => path[..pos].to_string(),
         None => String::new(),
     }
 }
 
-fn normalize_dir_path(path: &str) -> String {
+pub(crate) fn normalize_dir_path(path: &str) -> String {
     path.trim().trim_matches('/').to_string()
 }
 
-fn file_name_from_path(path: &str) -> String {
+pub(crate) fn file_name_from_path(path: &str) -> String {
     path.rsplit('/').next().unwrap_or("").to_string()
 }
 
-fn join_dir_and_name(dir: &str, name: &str) -> String {
+pub(crate) fn join_dir_and_name(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {
@@ -1897,7 +1869,8 @@ fn join_dir_and_name(dir: &str, name: &str) -> String {
 }
 
 fn format_timestamp(ts: &str) -> String {
-    // ISO-8601 → "Mar 19, 2026 14:30"
+    // ISO-8601 → "Mar 19, 2026 14:30" (UTC; the browser re-renders it in local time)
+    let ts = ts.trim_end_matches('Z');
     match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
         Ok(dt) => dt.format("%b %d, %Y %H:%M").to_string(),
         Err(_) => match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
@@ -1907,7 +1880,7 @@ fn format_timestamp(ts: &str) -> String {
     }
 }
 
-fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
+pub(crate) fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
     if is_dir {
         return "folder";
     }
@@ -1934,30 +1907,230 @@ fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
     }
 }
 
+/// Material Symbols glyph for a `file_icon` kind.
+pub(crate) fn icon_glyph(kind: &str) -> &'static str {
+    match kind {
+        "folder" => "folder",
+        "image" => "image",
+        "video" => "movie",
+        "audio" => "music_note",
+        "pdf" => "picture_as_pdf",
+        "archive" => "folder_zip",
+        "code" => "code",
+        "text" => "description",
+        "document" => "article",
+        "spreadsheet" => "table_chart",
+        "presentation" => "slideshow",
+        _ => "draft",
+    }
+}
+
+/// Template view-model for one directory entry (see templates/browser/item).
+pub(crate) fn entry_view(e: &fs_service::FsEntry, flagged: &[String]) -> serde_json::Value {
+    let icon = file_icon(&e.name, e.is_dir, e.mime_type.as_deref());
+    // "file": this file has an open integrity alert; "inside": a folder containing one.
+    let prefix = format!("{}/", e.path);
+    let problem = if flagged.contains(&e.path) {
+        Some("file")
+    } else if e.is_dir && flagged.iter().any(|p| p.starts_with(&prefix)) {
+        Some("inside")
+    } else {
+        None
+    };
+    serde_json::json!({
+        "name": e.name,
+        "path": e.path,
+        "is_dir": e.is_dir,
+        "size": e.size.map(format_bytes),
+        "raw_size": e.size.unwrap_or(0),
+        "modified": e.modified.as_deref().map(format_timestamp),
+        "raw_modified": e.modified,
+        "icon": icon,
+        "glyph": icon_glyph(icon),
+        "problem": problem,
+    })
+}
+
+/// Paths with open integrity alerts in a library or space.
+async fn flagged_paths(pool: &DbPool, target_type: &str, target_id: &str) -> Vec<String> {
+    crate::services::integrity_service::list_unacknowledged(pool, target_type, target_id)
+        .await
+        .map(|evs| evs.into_iter().map(|e| e.file_path).collect())
+        .unwrap_or_default()
+}
+
+/// Validate a single file/folder name typed by the user.
+fn validate_entry_name(name: &str) -> Result<&str, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::Validation("Name can't be empty.".into()));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(AppError::Validation("Names can't contain slashes.".into()));
+    }
+    if name.starts_with('.') {
+        return Err(AppError::Validation("Names can't start with a dot.".into()));
+    }
+    if name.len() > 255 {
+        return Err(AppError::Validation("That name is too long.".into()));
+    }
+    Ok(name)
+}
+
+/// JSON error body for XHR endpoints: `{"error": "<user-facing message>"}`.
+pub(crate) fn json_error(e: AppError) -> (Status, rocket::serde::json::Json<serde_json::Value>) {
+    if matches!(
+        e,
+        AppError::Internal(_) | AppError::Sqlx(_) | AppError::Io(_)
+    ) {
+        tracing::error!(error = %e, "File operation failed");
+    }
+    (
+        e.status(),
+        rocket::serde::json::Json(serde_json::json!({ "error": e.client_message() })),
+    )
+}
+
+/// One line per failed item in bulk responses, e.g. `report.pdf: Not found.`
+fn bulk_error(path: &str, e: &AppError) -> String {
+    format!("{}: {}", file_name_from_path(path), e.client_message())
+}
+
+/// `create_directory` is idempotent (mkdir -p); the UI wants "name taken" instead.
+async fn ensure_name_free(
+    config: &AppConfig,
+    kind: fs_service::TargetKind,
+    target_id: &str,
+    path: &str,
+) -> Result<(), (Status, rocket::serde::json::Json<serde_json::Value>)> {
+    if fs_service::entry_exists(config, kind, target_id, path)
+        .await
+        .map_err(json_error)?
+    {
+        return Err(json_error(AppError::Conflict(format!(
+            "“{}” already exists here.",
+            file_name_from_path(path)
+        ))));
+    }
+    Ok(())
+}
+
+pub(crate) type JsonResult = Result<
+    rocket::serde::json::Json<serde_json::Value>,
+    (Status, rocket::serde::json::Json<serde_json::Value>),
+>;
+
+#[derive(serde::Deserialize)]
+pub struct MkdirRequest {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct RenameRequest {
+    pub path: String,
+    pub new_name: String,
+}
+
+/// POST /files/api/mkdir — XHR: create a folder, returns `{"path"}`.
+#[post("/files/api/mkdir", data = "<body>")]
+pub async fn api_mkdir(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<MkdirRequest>,
+) -> JsonResult {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(json_error)?;
+    let name = validate_entry_name(&body.name).map_err(json_error)?;
+    let full = join_dir_and_name(&normalize_dir_path(&body.path), name);
+    ensure_name_free(
+        config.inner(),
+        fs_service::TargetKind::Library,
+        &lib.id,
+        &full,
+    )
+    .await?;
+    fs_service::create_directory(config.inner(), &lib.id, &full)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(
+        serde_json::json!({ "path": full }),
+    ))
+}
+
+/// POST /files/api/rename — XHR: rename in place, returns `{"path"}`.
+#[post("/files/api/rename", data = "<body>")]
+pub async fn api_rename(
+    pool: &State<DbPool>,
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    user: SessionSetupComplete,
+    body: rocket::serde::json::Json<RenameRequest>,
+) -> JsonResult {
+    let lib = require_library(pool.inner(), &user.0.id)
+        .await
+        .map_err(json_error)?;
+    let name = validate_entry_name(&body.new_name).map_err(json_error)?;
+    let new_path = join_dir_and_name(&parent_path(&body.path), name);
+    fs_service::rename_entry(config.inner(), &lib.id, &body.path, &new_path)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(
+        serde_json::json!({ "path": new_path }),
+    ))
+}
+
+/// POST /spaces/<space_id>/api/mkdir — XHR: create a folder in a space.
+#[post("/spaces/<space_id>/api/mkdir", data = "<body>")]
+pub async fn space_api_mkdir(
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    body: rocket::serde::json::Json<MkdirRequest>,
+) -> JsonResult {
+    let name = validate_entry_name(&body.name).map_err(json_error)?;
+    let full = join_dir_and_name(&normalize_dir_path(&body.path), name);
+    ensure_name_free(
+        config.inner(),
+        fs_service::TargetKind::Space,
+        space_id,
+        &full,
+    )
+    .await?;
+    fs_service::create_space_directory(config.inner(), space_id, &full)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(
+        serde_json::json!({ "path": full }),
+    ))
+}
+
+/// POST /spaces/<space_id>/api/rename — XHR: rename an entry in a space.
+#[post("/spaces/<space_id>/api/rename", data = "<body>")]
+pub async fn space_api_rename(
+    config: &State<AppConfig>,
+    _csrf: CsrfXhr,
+    _writer: SessionSpaceWriter,
+    space_id: &str,
+    body: rocket::serde::json::Json<RenameRequest>,
+) -> JsonResult {
+    let name = validate_entry_name(&body.new_name).map_err(json_error)?;
+    let new_path = join_dir_and_name(&parent_path(&body.path), name);
+    fs_service::rename_space_entry(config.inner(), space_id, &body.path, &new_path)
+        .await
+        .map_err(json_error)?;
+    Ok(rocket::serde::json::Json(
+        serde_json::json!({ "path": new_path }),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Spaces — page routes
 // ---------------------------------------------------------------------------
-
-fn build_space_breadcrumbs(space_name: &str, path: &str) -> Vec<serde_json::Value> {
-    let mut crumbs = vec![serde_json::json!({ "name": space_name, "path": "" })];
-    if !path.is_empty() {
-        let mut accumulated = String::new();
-        for segment in path.split('/') {
-            if segment.is_empty() {
-                continue;
-            }
-            if !accumulated.is_empty() {
-                accumulated.push('/');
-            }
-            accumulated.push_str(segment);
-            crumbs.push(serde_json::json!({
-                "name": segment,
-                "path": accumulated.clone(),
-            }));
-        }
-    }
-    crumbs
-}
 
 /// GET /spaces — list all spaces the user can access
 #[get("/spaces")]
@@ -1979,7 +2152,7 @@ pub async fn spaces_page(
                 "name": s.space.name,
                 "owner_type": s.space.owner_type,
                 "owner_id": s.space.owner_id,
-                "created_at": format_timestamp(&s.space.created_at),
+                "created_at": &s.space.created_at,
                 "grantee_count": s.grantee_count,
                 "user_permission": s.user_permission,
             })
@@ -2031,9 +2204,7 @@ pub async fn spaces_create_submit(
             Redirect::to(format!("/spaces/{}", s.space.id)),
             format!("Space \"{}\" created.", s.space.name),
         )),
-        Err(AppError::Validation(msg)) => {
-            Err(Flash::error(Redirect::to(uri!(spaces_page)), msg))
-        }
+        Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(uri!(spaces_page)), msg)),
         Err(_) => Err(Flash::error(
             Redirect::to(uri!(spaces_page)),
             "Failed to create space. Please try again.",
@@ -2043,7 +2214,9 @@ pub async fn spaces_create_submit(
 
 /// GET /spaces/<space_id> — space file browser
 #[get("/spaces/<space_id>?<path>")]
+#[allow(clippy::too_many_arguments)] // Rocket handler: one argument per guard/param
 pub async fn space_browser_page(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
@@ -2064,25 +2237,11 @@ pub async fn space_browser_page(
     .await
     .unwrap_or_default();
 
-    let breadcrumbs = build_space_breadcrumbs(&reader.space.space.name, user_path);
+    let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let flagged = flagged_paths(pool.inner(), "space", space_id).await;
+    let display_entries: Vec<serde_json::Value> =
+        entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
@@ -2091,21 +2250,21 @@ pub async fn space_browser_page(
     let csrf_token = ensure_csrf_token(cookies);
 
     Template::render(
-        "spaces/browser",
+        "browser/page",
         context! {
             user: &reader.user.username,
             csrf_token: csrf_token,
+            current_path: "spaces",
             chunk_size_bytes: config.chunk_size_bytes,
             max_parallel_chunks: config.max_parallel_chunks,
+            base_url: format!("/spaces/{space_id}"),
+            root_name: &reader.space.space.name,
             space_id: space_id,
-            space_name: &reader.space.space.name,
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
             can_write: can_write,
             is_admin: is_admin,
-            current_path: "spaces",
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -2115,6 +2274,7 @@ pub async fn space_browser_page(
 /// GET /spaces/<space_id>/partial?<path> — HTMX partial for space file list swap
 #[get("/spaces/<space_id>/partial?<path>")]
 pub async fn space_browser_partial(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     reader: SessionSpaceReader,
@@ -2133,38 +2293,25 @@ pub async fn space_browser_partial(
     .await
     .unwrap_or_default();
 
-    let breadcrumbs = build_space_breadcrumbs(&reader.space.space.name, user_path);
+    let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "path": e.path,
-                "is_dir": e.is_dir,
-                "size": e.size.map(format_bytes),
-                "raw_size": e.size.unwrap_or(0),
-                "disk_size": e.disk_size.map(format_bytes),
-                "mime_type": e.mime_type,
-                "modified": e.modified.as_deref().map(format_timestamp),
-                "raw_modified": e.modified,
-                "icon": file_icon(&e.name, e.is_dir, e.mime_type.as_deref()),
-            })
-        })
-        .collect();
+    let flagged = flagged_paths(pool.inner(), "space", space_id).await;
+    let display_entries: Vec<serde_json::Value> =
+        entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
     let is_admin = reader.space.user_permission == "admin";
 
     Ok(Template::render(
-        "partials/space_file_list",
+        "browser/listing",
         context! {
+            base_url: format!("/spaces/{space_id}"),
+            root_name: &reader.space.space.name,
             space_id: space_id,
             path: user_path,
             entries: display_entries,
             breadcrumbs: breadcrumbs,
-            is_root: user_path.is_empty(),
             can_write: can_write,
             is_admin: is_admin,
         },
@@ -2225,7 +2372,9 @@ pub async fn search_grantees(
 ) -> Result<rocket::serde::json::Json<serde_json::Value>, Status> {
     let q = q.trim();
     if q.is_empty() || q.len() > 100 {
-        return Ok(rocket::serde::json::Json(serde_json::json!({ "results": [] })));
+        return Ok(rocket::serde::json::Json(
+            serde_json::json!({ "results": [] }),
+        ));
     }
 
     let users = User::search_by_prefix(pool.inner(), q, 5)
@@ -2252,7 +2401,9 @@ pub async fn search_grantees(
         }));
     }
 
-    Ok(rocket::serde::json::Json(serde_json::json!({ "results": results })))
+    Ok(rocket::serde::json::Json(
+        serde_json::json!({ "results": results }),
+    ))
 }
 
 /// GET /spaces/<space_id>/settings — space settings & access management
@@ -2276,7 +2427,7 @@ pub async fn space_settings_page(
                 "grantee_id": a.grantee_id,
                 "grantee_name": a.grantee_name,
                 "permission": a.permission,
-                "granted_at": format_timestamp(&a.granted_at),
+                "granted_at": &a.granted_at,
             })
         })
         .collect();
@@ -2292,7 +2443,7 @@ pub async fn space_settings_page(
                 "name": admin.space.space.name,
                 "owner_type": admin.space.space.owner_type,
                 "owner_id": admin.space.space.owner_id,
-                "created_at": format_timestamp(&admin.space.space.created_at),
+                "created_at": &admin.space.space.created_at,
                 "grantee_count": admin.space.grantee_count,
             }),
             space_id: space_id,
@@ -2315,8 +2466,12 @@ pub async fn space_rename_submit(
     form: Form<RenameSpaceForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redir_url = format!("/spaces/{}/settings", space_id);
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     match space_service::update_space(pool.inner(), &_admin.user.id, space_id, &form.name).await {
         Ok(s) => Ok(Flash::success(
@@ -2324,7 +2479,10 @@ pub async fn space_rename_submit(
             format!("Space renamed to \"{}\".", s.name),
         )),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
-        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to rename space.")),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redir_url),
+            "Failed to rename space.",
+        )),
     }
 }
 
@@ -2376,8 +2534,12 @@ pub async fn space_grant_access_submit(
     form: Form<GrantAccessForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redir_url = format!("/spaces/{}/settings", space_id);
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     let result = match form.grantee_type.as_str() {
         "user" => {
@@ -2407,14 +2569,28 @@ pub async fn space_grant_access_submit(
             )
             .await
         }
-        _ => return Err(Flash::error(Redirect::to(redir_url.clone()), "Invalid grantee type.")),
+        _ => {
+            return Err(Flash::error(
+                Redirect::to(redir_url.clone()),
+                "Invalid grantee type.",
+            ))
+        }
     };
 
     match result {
-        Ok(_) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Access granted.")),
-        Err(AppError::NotFound) => Err(Flash::error(Redirect::to(redir_url.clone()), "User or group not found.")),
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            "Access granted.",
+        )),
+        Err(AppError::NotFound) => Err(Flash::error(
+            Redirect::to(redir_url.clone()),
+            "User or group not found.",
+        )),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
-        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to grant access.")),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redir_url),
+            "Failed to grant access.",
+        )),
     }
 }
 
@@ -2428,8 +2604,12 @@ pub async fn space_update_access_submit(
     form: Form<UpdateAccessForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redir_url = format!("/spaces/{}/settings", space_id);
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     match space_service::update_access_permission(
         pool.inner(),
@@ -2441,9 +2621,15 @@ pub async fn space_update_access_submit(
     )
     .await
     {
-        Ok(_) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Permission updated.")),
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            "Permission updated.",
+        )),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
-        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to update permission.")),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redir_url),
+            "Failed to update permission.",
+        )),
     }
 }
 
@@ -2457,8 +2643,12 @@ pub async fn space_revoke_access_submit(
     form: Form<RevokeAccessForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redir_url = format!("/spaces/{}/settings", space_id);
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     match space_service::revoke_access(
         pool.inner(),
@@ -2469,8 +2659,14 @@ pub async fn space_revoke_access_submit(
     )
     .await
     {
-        Ok(()) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Access revoked.")),
-        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to revoke access.")),
+        Ok(()) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            "Access revoked.",
+        )),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redir_url),
+            "Failed to revoke access.",
+        )),
     }
 }
 
@@ -2490,8 +2686,12 @@ pub async fn space_mkdir_submit(
         format!("/spaces/{}?path={}", space_id, return_path)
     };
 
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     let full_path = if form.path.is_empty() {
         form.name.clone()
@@ -2506,7 +2706,10 @@ pub async fn space_mkdir_submit(
         )),
         Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
-        Err(_) => Err(Flash::error(Redirect::to(redir_url), "Failed to create folder.")),
+        Err(_) => Err(Flash::error(
+            Redirect::to(redir_url),
+            "Failed to create folder.",
+        )),
     }
 }
 
@@ -2526,8 +2729,12 @@ pub async fn space_rename_entry_submit(
         format!("/spaces/{}?path={}", space_id, return_parent)
     };
 
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     let parent = parent_path(&form.old_path);
     let new_path = if parent.is_empty() {
@@ -2558,12 +2765,19 @@ pub async fn space_move_entry_submit(
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
     let redir_url = format!("/spaces/{}", space_id);
 
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     let name = file_name_from_path(&form.old_path);
     if name.is_empty() {
-        return Err(Flash::error(Redirect::to(redir_url), "Invalid source path."));
+        return Err(Flash::error(
+            Redirect::to(redir_url),
+            "Invalid source path.",
+        ));
     }
 
     let target_dir = normalize_dir_path(&form.target_dir);
@@ -2571,7 +2785,10 @@ pub async fn space_move_entry_submit(
 
     match fs_service::rename_space_entry(config.inner(), space_id, &form.old_path, &new_path).await
     {
-        Ok(_) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Moved successfully.")),
+        Ok(_) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            "Moved successfully.",
+        )),
         Err(AppError::Validation(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
         Err(AppError::Conflict(msg)) => Err(Flash::error(Redirect::to(redir_url.clone()), msg)),
         Err(_) => Err(Flash::error(Redirect::to(redir_url), "Move failed.")),
@@ -2594,11 +2811,18 @@ pub async fn space_delete_entry_submit(
         format!("/spaces/{}?path={}", space_id, parent)
     };
 
-    validate_csrf(cookies, &form.csrf_token)
-        .map_err(|_| Flash::error(Redirect::to(redir_url.clone()), "Invalid request. Please try again."))?;
+    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
+        Flash::error(
+            Redirect::to(redir_url.clone()),
+            "Invalid request. Please try again.",
+        )
+    })?;
 
     match fs_service::delete_space_entry(config.inner(), space_id, &form.path).await {
-        Ok(()) => Ok(Flash::success(Redirect::to(redir_url.clone()), "Deleted successfully.")),
+        Ok(()) => Ok(Flash::success(
+            Redirect::to(redir_url.clone()),
+            "Deleted successfully.",
+        )),
         Err(_) => Err(Flash::error(Redirect::to(redir_url), "Delete failed.")),
     }
 }
@@ -2612,13 +2836,19 @@ pub async fn space_bulk_delete(
     space_id: &str,
     data: rocket::serde::json::Json<BulkDeleteRequest>,
 ) -> rocket::serde::json::Json<serde_json::Value> {
+    if data.paths.is_empty() || data.paths.len() > 500 {
+        return rocket::serde::json::Json(
+            serde_json::json!({"deleted": 0, "errors": ["Invalid number of paths (1–500)."]}),
+        );
+    }
+
     let mut deleted = 0u64;
     let mut errors: Vec<String> = Vec::new();
 
     for path in &data.paths {
         match fs_service::delete_space_entry(config.inner(), space_id, path).await {
             Ok(()) => deleted += 1,
-            Err(e) => errors.push(format!("{}: {}", path, e)),
+            Err(e) => errors.push(bulk_error(path, &e)),
         }
     }
 
@@ -2650,7 +2880,7 @@ pub async fn space_bulk_move(
         let new_path = join_dir_and_name(&target_dir, &name);
         match fs_service::rename_space_entry(config.inner(), space_id, path, &new_path).await {
             Ok(_) => moved += 1,
-            Err(e) => errors.push(format!("{}: {}", path, e)),
+            Err(e) => errors.push(bulk_error(path, &e)),
         }
     }
 
@@ -2730,19 +2960,15 @@ pub async fn space_download_file(
     space_id: &str,
     path: String,
 ) -> Result<crate::routes::library::FileDownload, Flash<Redirect>> {
-    let result = fs_service::download_space_file(
-        config.inner(),
-        unlock_state.inner(),
-        space_id,
-        &path,
-    )
-    .await
-    .map_err(|_| {
-        Flash::error(
-            Redirect::to(format!("/spaces/{}", space_id)),
-            "Download failed.",
-        )
-    })?;
+    let result =
+        fs_service::download_space_file(config.inner(), unlock_state.inner(), space_id, &path)
+            .await
+            .map_err(|_| {
+                Flash::error(
+                    Redirect::to(format!("/spaces/{}", space_id)),
+                    "Download failed.",
+                )
+            })?;
 
     let content_type = result
         .mime_type
@@ -2817,7 +3043,10 @@ pub async fn space_chunked_init_upload(
 
 /// PUT /spaces/<space_id>/chunked/upload/<upload_id>/<chunk_index> — receive one chunk.
 #[allow(clippy::too_many_arguments)]
-#[put("/spaces/<space_id>/chunked/upload/<upload_id>/<chunk_index>", data = "<data>")]
+#[put(
+    "/spaces/<space_id>/chunked/upload/<upload_id>/<chunk_index>",
+    data = "<data>"
+)]
 pub async fn space_chunked_receive_chunk(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
@@ -2972,7 +3201,7 @@ pub async fn space_chunked_init_download(
         unlock_state.inner(),
         &reader.user.id,
         space_id,
-        "space",
+        fs_service::TargetKind::Space,
         &path,
     )
     .await
@@ -3000,17 +3229,21 @@ pub async fn space_chunked_download_chunk(
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     reader: SessionSpaceReader,
-    #[allow(unused)] space_id: &str,
+    space_id: &str,
     token: String,
     index: u32,
 ) -> Result<
     crate::routes::library::FileChunkDownload,
     (Status, rocket::serde::json::Json<serde_json::Value>),
 > {
+    // `reader` has just re-checked access to `space_id`; serve_chunk rejects
+    // tokens minted for any other target.
     let result = chunk_service::serve_chunk(
         config.inner(),
         unlock_state.inner(),
         &reader.user.id,
+        fs_service::TargetKind::Space,
+        space_id,
         &token,
         index,
     )
@@ -3022,25 +3255,8 @@ pub async fn space_chunked_download_chunk(
         )
     })?;
 
-    let content_type = result
-        .mime_type
-        .as_deref()
-        .and_then(|m| {
-            let parts: Vec<&str> = m.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                Some(rocket::http::ContentType::new(
-                    parts[0].to_string(),
-                    parts[1].to_string(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(rocket::http::ContentType::Binary);
-
     Ok(crate::routes::library::FileChunkDownload {
         data: result.data,
-        content_type,
         checksum_sha256: result.checksum_sha256,
         chunk_index: result.chunk_index,
         total_chunks: result.total_chunks,
@@ -3071,6 +3287,8 @@ pub fn routes() -> Vec<Route> {
         delete_submit,
         bulk_delete,
         bulk_move,
+        api_mkdir,
+        api_rename,
         upload_file,
         chunked_init_upload,
         chunked_receive_chunk,
@@ -3108,6 +3326,8 @@ pub fn routes() -> Vec<Route> {
         space_delete_entry_submit,
         space_bulk_delete,
         space_bulk_move,
+        space_api_mkdir,
+        space_api_rename,
         space_upload_file,
         space_download_file,
         space_chunked_init_upload,

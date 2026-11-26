@@ -1,0 +1,18 @@
+{% extends "base" %}
+{% block title %}{{ title }} – IronDrive{% endblock %}
+{% block body %}
+<main class="min-h-dvh flex items-center justify-center p-6">
+  <div class="text-center max-w-md">
+    <a href="/" class="inline-flex items-center gap-2.5 mb-10" aria-label="IronDrive home">
+      {% include "partials/logo" %}
+      <span class="text-[22px] text-muted">IronDrive</span>
+    </a>
+    <p class="text-sm font-medium text-muted tracking-wide">Error {{ code }}</p>
+    <h1 class="mt-2 text-[28px] leading-9 text-fg">{{ title }}</h1>
+    <p class="mt-3 text-muted leading-relaxed">{{ message }}</p>
+    <div class="mt-8 flex justify-center gap-2">
+      <a href="/" class="btn-filled">Go to My files</a>
+    </div>
+  </div>
+</main>
+{% endblock %}

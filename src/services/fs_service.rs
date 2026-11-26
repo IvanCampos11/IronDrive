@@ -128,9 +128,7 @@ fn try_data_key(unlock_state: &UnlockState, library_id: &str) -> Option<DataKey>
 
 /// Retrieve the data key for a space from [`UnlockState`].
 fn require_space_key(unlock_state: &UnlockState, space_id: &str) -> Result<DataKey, AppError> {
-    unlock_state
-        .get_space_key(space_id)
-        .ok_or(AppError::Locked)
+    unlock_state.get_space_key(space_id).ok_or(AppError::Locked)
 }
 
 /// Like `require_space_key` but returns `None` instead of erroring.
@@ -195,6 +193,120 @@ const ENCRYPTION_OVERHEAD: u64 = 3 + 12 + 16 + 32; // 63 bytes
 
 fn plaintext_size_from_disk(disk_size: u64) -> u64 {
     disk_size.saturating_sub(ENCRYPTION_OVERHEAD)
+}
+
+/// Plaintext size of an encrypted file, correct for both single-shot and
+/// STREAM formats. Falls back to the single-shot estimate if the file can't
+/// be parsed (e.g. corrupt), so listings still render.
+async fn plaintext_size_of(path: &Path, disk_size: u64) -> u64 {
+    match crypto_service::plaintext_size(path).await {
+        Ok(size) => size,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Could not read plaintext size");
+            plaintext_size_from_disk(disk_size)
+        }
+    }
+}
+
+/// Which kind of storage root a file lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind {
+    Library,
+    Space,
+}
+
+impl TargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TargetKind::Library => "library",
+            TargetKind::Space => "space",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "library" => Some(TargetKind::Library),
+            "space" => Some(TargetKind::Space),
+            _ => None,
+        }
+    }
+}
+
+/// Whether anything (file or folder) exists at `user_path` in a library or space.
+pub async fn entry_exists(
+    config: &AppConfig,
+    kind: TargetKind,
+    target_id: &str,
+    user_path: &str,
+) -> Result<bool, AppError> {
+    let root = match kind {
+        TargetKind::Library => library_root(config, target_id),
+        TargetKind::Space => space_root(config, target_id),
+    };
+    let path = safe_join_async(root, user_path.to_string()).await?;
+    Ok(fs::try_exists(&path).await.unwrap_or(false))
+}
+
+/// An existing encrypted file, resolved and ready to read — nothing decrypted yet.
+pub struct ReadableFile {
+    pub path: PathBuf,
+    pub data_key: DataKey,
+    pub filename: String,
+    pub mime_type: Option<String>,
+    pub plaintext_size: u64,
+}
+
+/// Resolve `user_path` inside a library or space to an existing file and its
+/// data key, without reading or decrypting the file body.
+pub async fn resolve_readable_file(
+    config: &AppConfig,
+    unlock_state: &UnlockState,
+    kind: TargetKind,
+    target_id: &str,
+    user_path: &str,
+) -> Result<ReadableFile, AppError> {
+    if user_path.is_empty() {
+        return Err(AppError::Validation("File path must not be empty.".into()));
+    }
+
+    let (data_key, root) = match kind {
+        TargetKind::Library => (
+            require_data_key(unlock_state, target_id)?,
+            library_root(config, target_id),
+        ),
+        TargetKind::Space => (
+            require_space_key(unlock_state, target_id)?,
+            space_root(config, target_id),
+        ),
+    };
+    let path = safe_join_async(root, user_path.to_string()).await?;
+
+    let meta = fs::metadata(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Internal(format!("Cannot read file metadata: {e}"))
+        }
+    })?;
+    if meta.is_dir() {
+        return Err(AppError::Validation(
+            "The specified path is a directory, not a file.".into(),
+        ));
+    }
+
+    let plaintext_size = crypto_service::plaintext_size(&path).await?;
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    Ok(ReadableFile {
+        mime_type: mime_from_filename(&filename),
+        filename,
+        path,
+        data_key,
+        plaintext_size,
+    })
 }
 
 /// Async wrapper for [`safe_join`] — moves the blocking path validation
@@ -296,7 +408,7 @@ pub async fn list_directory(
         let size = if is_dir {
             None
         } else {
-            Some(plaintext_size_from_disk(entry_meta.len()))
+            Some(plaintext_size_of(&dir_entry.path(), entry_meta.len()).await)
         };
 
         let mime_type = if is_dir {
@@ -774,7 +886,7 @@ pub async fn get_entry_info(
     let size = if is_dir {
         None
     } else {
-        Some(plaintext_size_from_disk(meta.len()))
+        Some(plaintext_size_of(&target, meta.len()).await)
     };
 
     let name = target
@@ -978,7 +1090,7 @@ pub async fn list_space_directory(
         let size = if is_dir {
             None
         } else {
-            Some(plaintext_size_from_disk(entry_meta.len()))
+            Some(plaintext_size_of(&dir_entry.path(), entry_meta.len()).await)
         };
         let mime_type = if is_dir {
             None
@@ -1160,9 +1272,7 @@ pub async fn delete_space_entry(
     user_path: &str,
 ) -> Result<(), AppError> {
     if user_path.is_empty() {
-        return Err(AppError::Validation(
-            "Cannot delete the space root.".into(),
-        ));
+        return Err(AppError::Validation("Cannot delete the space root.".into()));
     }
 
     let root = space_root(config, space_id);
@@ -1179,9 +1289,7 @@ pub async fn delete_space_entry(
     let canonical_root = canonicalize_async(root).await?;
     let canonical_target = canonicalize_async(target.clone()).await?;
     if !canonical_target.starts_with(&canonical_root) || canonical_target == canonical_root {
-        return Err(AppError::Validation(
-            "Path escapes the space root.".into(),
-        ));
+        return Err(AppError::Validation("Path escapes the space root.".into()));
     }
 
     tracing::info!(
@@ -1212,9 +1320,7 @@ pub async fn rename_space_entry(
     new_path: &str,
 ) -> Result<RenameResult, AppError> {
     if old_path.is_empty() {
-        return Err(AppError::Validation(
-            "Cannot rename the space root.".into(),
-        ));
+        return Err(AppError::Validation("Cannot rename the space root.".into()));
     }
     if new_path.is_empty() {
         return Err(AppError::Validation("New path must not be empty.".into()));
@@ -1282,7 +1388,7 @@ pub async fn get_space_entry_info(
     let size = if is_dir {
         None
     } else {
-        Some(plaintext_size_from_disk(meta.len()))
+        Some(plaintext_size_of(&target, meta.len()).await)
     };
 
     let name = target
@@ -1441,6 +1547,8 @@ mod tests {
             max_parallel_chunks: 4,
             integrity_scan_enabled: false,
             integrity_scan_interval_hours: 168,
+            registration_enabled: true,
+            secure_cookies: false,
         }
     }
 
@@ -2274,8 +2382,7 @@ mod tests {
         let status = info.integrity.unwrap();
         // File hash check catches the tamper before decryption is even attempted.
         assert!(
-            status.contains("file_hash_mismatch")
-                || status.contains("decryption_failed"),
+            status.contains("file_hash_mismatch") || status.contains("decryption_failed"),
             "expected failure status, got: {status}"
         );
     }

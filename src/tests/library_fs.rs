@@ -14,7 +14,6 @@
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::serde_json;
-use rocket_dyn_templates::Template;
 use serde_json::Value;
 
 use crate::config::AppConfig;
@@ -76,6 +75,8 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         max_parallel_chunks: 4,
         integrity_scan_enabled: false,
         integrity_scan_interval_hours: 168,
+        registration_enabled: true,
+        secure_cookies: false,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());
@@ -111,7 +112,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
                 crate::catch_500,
             ],
         )
-        .attach(Template::fairing());
+        .attach(crate::templates_fairing());
 
     Client::tracked(rocket)
         .await

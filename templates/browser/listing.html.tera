@@ -1,0 +1,93 @@
+{# Swappable file listing (HTMX target #file-browser-content).
+   Context: base_url, root_name, path, breadcrumbs, entries, can_write, is_admin, space_id? #}
+{% set folders = entries | filter(attribute="is_dir", value=true) %}
+{% set files = entries | filter(attribute="is_dir", value=false) %}
+<div class="browser-view flex flex-col min-h-full" data-path="{{ path }}" data-title="{% if breadcrumbs | length > 0 %}{{ breadcrumbs | last | get(key='name') }}{% else %}{{ root_name }}{% endif %}">
+  <div class="sticky top-0 z-20 bg-surface rounded-t-2xl">
+    {# Toolbar: breadcrumbs + view controls #}
+    <div class="flex items-center gap-2 h-16 pl-3 pr-3 sm:pl-4">
+      <nav aria-label="Breadcrumb" class="flex items-center min-w-0 flex-1 overflow-hidden">
+        <a href="{{ base_url }}" hx-get="{{ base_url }}/partial" hx-target="#file-browser-content" hx-push-url="{{ base_url }}"
+           class="shrink-0 flex items-center h-10 px-3 rounded-full text-[22px] leading-none hover:bg-fg/[0.06] {% if breadcrumbs | length > 0 %}text-muted{% else %}text-fg{% endif %}"
+           {% if breadcrumbs | length == 0 %}aria-current="page"{% endif %} data-drop-path="">{{ root_name }}</a>
+        {% for crumb in breadcrumbs %}
+          <span class="ms text-subtle shrink-0">chevron_right</span>
+          {% if loop.last %}
+          <span class="truncate h-10 flex items-center px-3 text-[22px] leading-none" aria-current="page">{{ crumb.name }}</span>
+          {% else %}
+          <a href="{{ base_url }}?path={{ crumb.path | urlencode }}" hx-get="{{ base_url }}/partial?path={{ crumb.path | urlencode }}" hx-target="#file-browser-content" hx-push-url="{{ base_url }}?path={{ crumb.path | urlencode }}"
+             class="truncate min-w-[3rem] h-10 flex items-center px-3 rounded-full text-[22px] leading-none text-muted hover:bg-fg/[0.06]" data-drop-path="{{ crumb.path }}">{{ crumb.name }}</a>
+          {% endif %}
+        {% endfor %}
+      </nav>
+      {% if not can_write %}<span class="chip hidden sm:inline-flex"><span class="ms text-[16px]">visibility</span>View only</span>{% endif %}
+      {% if is_admin %}
+      <a href="/spaces/{{ space_id }}/settings" class="icon-btn" title="Space settings" aria-label="Space settings"><span class="ms">settings</span></a>
+      {% endif %}
+      <button type="button" class="icon-btn shrink-0" data-details-toggle aria-pressed="false" aria-controls="details" title="Details" aria-label="Show details"><span class="ms">info</span></button>
+      <div class="flex items-center h-9 rounded-full border border-outline overflow-hidden shrink-0" role="group" aria-label="View">
+        <button type="button" class="h-full px-3 flex items-center hover:bg-fg/[0.06] aria-pressed:bg-primary-container aria-pressed:text-on-primary-container" data-view-btn="list" aria-pressed="true" title="List view"><span class="ms">view_list</span></button>
+        <button type="button" class="h-full px-3 flex items-center border-l border-outline hover:bg-fg/[0.06] aria-pressed:bg-primary-container aria-pressed:text-on-primary-container" data-view-btn="grid" aria-pressed="false" title="Grid view"><span class="ms">grid_view</span></button>
+      </div>
+    </div>
+
+    {# Selection bar: replaces the toolbar while items are selected #}
+    <div id="selection-bar" class="absolute inset-x-2 top-2 h-12 flex items-center gap-1 pl-1 pr-2 rounded-full bg-surface-2" hidden>
+      <button type="button" class="icon-btn" data-sel="clear" aria-label="Clear selection" title="Clear selection"><span class="ms">close</span></button>
+      <span id="selection-count" class="text-sm font-medium mr-3 whitespace-nowrap">0 selected</span>
+      <button type="button" class="icon-btn" data-sel="download" title="Download" aria-label="Download selected"><span class="ms">download</span></button>
+      {% if can_write %}
+      <button type="button" class="icon-btn" data-sel="move" title="Move" aria-label="Move selected"><span class="ms">drive_file_move</span></button>
+      <button type="button" class="icon-btn" data-sel="delete" title="Delete" aria-label="Delete selected"><span class="ms">delete</span></button>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if entries | length == 0 %}
+  <div class="flex-1 flex flex-col items-center justify-center text-center px-6 py-16">
+    <div class="w-28 h-28 rounded-full bg-surface-2 flex items-center justify-center mb-6">
+      <span class="ms text-muted" style="font-size:56px">{% if path %}folder_open{% else %}cloud{% endif %}</span>
+    </div>
+    {% if path %}
+    <h2 class="text-lg text-fg">This folder is empty</h2>
+    {% else %}
+    <h2 class="text-lg text-fg">Nothing here yet</h2>
+    {% endif %}
+    {% if can_write %}
+    <p class="mt-1.5 text-muted">Drop files here, or add some with the buttons below.</p>
+    <div class="mt-6 flex flex-wrap justify-center gap-2">
+      <button type="button" class="btn-tonal" data-action="upload-files"><span class="ms">upload</span>Upload files</button>
+      <button type="button" class="btn-outline" data-action="new-folder"><span class="ms">create_new_folder</span>New folder</button>
+    </div>
+    {% else %}
+    <p class="mt-1.5 text-muted">Files added to this space will show up here.</p>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="listing" data-view="list" role="grid" aria-label="Files" aria-multiselectable="true">
+    <div class="listing-head" role="row">
+      <span class="flex items-center justify-center"><input type="checkbox" class="check" id="select-all" aria-label="Select all"></span>
+      <button type="button" class="flex items-center gap-1 h-full text-left hover:text-fg" data-sort="name">Name <span class="ms text-[18px] sort-ind">arrow_upward</span></button>
+      <button type="button" class="col-meta flex items-center gap-1 h-full text-left hover:text-fg" data-sort="modified">Last modified <span class="ms text-[18px] sort-ind" hidden>arrow_upward</span></button>
+      <button type="button" class="col-meta flex items-center gap-1 h-full text-left hover:text-fg" data-sort="size">File size <span class="ms text-[18px] sort-ind" hidden>arrow_upward</span></button>
+      <span></span>
+    </div>
+    {% if folders | length > 0 %}
+    <section aria-label="Folders">
+      <h3 class="group-title">Folders</h3>
+      <div class="items">
+        {% for entry in folders %}{% include "browser/item" %}{% endfor %}
+      </div>
+    </section>
+    {% endif %}
+    {% if files | length > 0 %}
+    <section aria-label="Files">
+      <h3 class="group-title">Files</h3>
+      <div class="items">
+        {% for entry in files %}{% include "browser/item" %}{% endfor %}
+      </div>
+    </section>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

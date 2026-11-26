@@ -11,7 +11,6 @@
 
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
-use rocket_dyn_templates::Template;
 use serde_json::Value;
 
 use crate::config::AppConfig;
@@ -77,6 +76,8 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
         max_parallel_chunks: 4,
         integrity_scan_enabled: false,
         integrity_scan_interval_hours: 168,
+        registration_enabled: true,
+        secure_cookies: false,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());
@@ -113,7 +114,7 @@ async fn test_client(tmp: &tempfile::TempDir) -> Client {
                 crate::catch_500,
             ],
         )
-        .attach(Template::fairing())
+        .attach(crate::templates_fairing())
         .attach(crate::security_headers_fairing())
         .attach(crate::cache_control_fairing());
 
@@ -173,12 +174,7 @@ async fn setup_library(client: &Client, token: &str) {
 }
 
 /// Register + login + setup-library. Returns bearer token.
-async fn create_ready_user(
-    client: &Client,
-    username: &str,
-    email: &str,
-    password: &str,
-) -> String {
+async fn create_ready_user(client: &Client, username: &str, email: &str, password: &str) -> String {
     register_user(client, username, email, password).await;
     let token = login_user(client, username, password).await;
     setup_library(client, &token).await;
@@ -497,8 +493,13 @@ async fn member_cannot_add_or_remove_or_edit() {
     let alice_tok =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
     let bob_tok = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
-    let _charlie_tok =
-        create_ready_user(&client, "charlie", "charlie@example.com", &charlie_password()).await;
+    let _charlie_tok = create_ready_user(
+        &client,
+        "charlie",
+        "charlie@example.com",
+        &charlie_password(),
+    )
+    .await;
 
     let group = api_create_group(&client, &alice_tok, "Strict", None).await;
     let id = group["id"].as_str().unwrap();
@@ -520,7 +521,11 @@ async fn member_cannot_add_or_remove_or_edit() {
         .dispatch()
         .await;
 
-    assert_eq!(r.status(), Status::Forbidden, "member should not edit group");
+    assert_eq!(
+        r.status(),
+        Status::Forbidden,
+        "member should not edit group"
+    );
 
     // Bob tries to delete group — should fail
     let r = client
@@ -572,7 +577,10 @@ async fn groups_page_renders_for_authenticated_user() {
     let r = client
         .post("/login")
         .header(ContentType::Form)
-        .body(format!("username=alice&password={}&csrf_token={}", pw, csrf))
+        .body(format!(
+            "username=alice&password={}&csrf_token={}",
+            pw, csrf
+        ))
         .dispatch()
         .await;
     assert_eq!(r.status(), Status::SeeOther);
@@ -606,7 +614,10 @@ async fn group_detail_page_renders() {
     client
         .post("/login")
         .header(ContentType::Form)
-        .body(format!("username=alice&password={}&csrf_token={}", pw, csrf))
+        .body(format!(
+            "username=alice&password={}&csrf_token={}",
+            pw, csrf
+        ))
         .dispatch()
         .await;
 
@@ -651,7 +662,10 @@ async fn csrf_required_on_group_form_posts() {
     client
         .post("/login")
         .header(ContentType::Form)
-        .body(format!("username=alice&password={}&csrf_token={}", pw, csrf))
+        .body(format!(
+            "username=alice&password={}&csrf_token={}",
+            pw, csrf
+        ))
         .dispatch()
         .await;
 
@@ -677,8 +691,13 @@ async fn manager_can_add_members_and_edit() {
     let alice_tok =
         create_ready_user(&client, "alice", "alice@example.com", &alice_password()).await;
     let bob_tok = create_ready_user(&client, "bob", "bob@example.com", &bob_password()).await;
-    let _charlie_tok =
-        create_ready_user(&client, "charlie", "charlie@example.com", &charlie_password()).await;
+    let _charlie_tok = create_ready_user(
+        &client,
+        "charlie",
+        "charlie@example.com",
+        &charlie_password(),
+    )
+    .await;
 
     let group = api_create_group(&client, &alice_tok, "Team", None).await;
     let id = group["id"].as_str().unwrap();
@@ -763,7 +782,11 @@ async fn add_duplicate_member_conflict() {
 
     // Try adding bob again
     let (s, _) = api_add_member(&client, &alice_tok, id, "bob", "member").await;
-    assert_eq!(s, Status::Conflict, "adding duplicate member should conflict");
+    assert_eq!(
+        s,
+        Status::Conflict,
+        "adding duplicate member should conflict"
+    );
 }
 
 #[tokio::test]
@@ -802,5 +825,9 @@ async fn member_can_self_leave() {
         .dispatch()
         .await;
 
-    assert_eq!(r.status(), Status::Ok, "member should be able to self-leave");
+    assert_eq!(
+        r.status(),
+        Status::Ok,
+        "member should be able to self-leave"
+    );
 }

@@ -1,0 +1,18 @@
+{% extends "base" %}
+{# Centered card layout for sign-in, registration and first-run setup. #}
+{% block flash %}{% endblock %}
+{% block body %}
+<main class="min-h-dvh flex flex-col items-center justify-center p-4 sm:p-6">
+  <div class="w-full max-w-[448px] sm:bg-surface sm:rounded-4xl sm:border sm:border-outline px-2 py-8 sm:px-10 sm:py-10">
+    <div class="flex items-center gap-2.5 mb-8">
+      {% include "partials/logo" %}
+      <span class="text-[22px] leading-none text-muted">IronDrive</span>
+    </div>
+    {% block card %}{% endblock %}
+  </div>
+  <button type="button" id="theme-toggle" class="mt-6 btn-text text-muted" aria-label="Toggle dark mode">
+    <span class="ms dark:hidden">dark_mode</span><span class="ms hidden dark:inline-block">light_mode</span>
+    <span class="dark:hidden">Dark mode</span><span class="hidden dark:inline">Light mode</span>
+  </button>
+</main>
+{% endblock %}

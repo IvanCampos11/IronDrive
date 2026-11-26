@@ -105,8 +105,7 @@ pub async fn notifications(
     user: SetupComplete,
 ) -> Result<Json<NotificationsResponse>, AppError> {
     let lib = require_library(pool.inner(), &user.0.id).await?;
-    let events =
-        integrity_service::list_unacknowledged(pool.inner(), "library", &lib.id).await?;
+    let events = integrity_service::list_unacknowledged(pool.inner(), "library", &lib.id).await?;
     let count = events.len();
     Ok(Json(NotificationsResponse { count, events }))
 }
@@ -166,15 +165,14 @@ pub async fn admin_scan(
             .await?
         }
         "space" => {
-            integrity_service::scan_space(
-                pool.inner(),
-                config.inner(),
-                unlock_state.inner(),
-                t_id,
-            )
-            .await?
+            integrity_service::scan_space(pool.inner(), config.inner(), unlock_state.inner(), t_id)
+                .await?
         }
-        _ => return Err(AppError::Validation("target_type must be 'library' or 'space'".into())),
+        _ => {
+            return Err(AppError::Validation(
+                "target_type must be 'library' or 'space'".into(),
+            ))
+        }
     };
 
     Ok(Json(ScanResponse {

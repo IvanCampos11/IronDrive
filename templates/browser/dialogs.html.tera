@@ -1,0 +1,60 @@
+{# Dialogs for file operations. Forms post to the classic endpoints when JS is off;
+   browser.js intercepts them and uses the JSON endpoints instead. #}
+<dialog id="mkdir-dialog" class="dialog max-w-sm" aria-labelledby="mkdir-dialog-title">
+  <form method="post" action="{{ base_url }}/mkdir" data-op="mkdir">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="path" value="{{ path }}">
+    <h2 id="mkdir-dialog-title" class="dialog-title">New folder</h2>
+    <input type="text" name="name" class="field" value="Untitled folder" required maxlength="255" aria-label="Folder name" autocomplete="off" spellcheck="false">
+    <p class="field-hint text-danger" data-error hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn-text" data-close>Cancel</button>
+      <button type="submit" class="btn-text">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="rename-dialog" class="dialog max-w-sm" aria-labelledby="rename-dialog-title">
+  <form method="post" action="{{ base_url }}/rename" data-op="rename">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="old_path" value="">
+    <h2 id="rename-dialog-title" class="dialog-title">Rename</h2>
+    <input type="text" name="new_name" class="field" required maxlength="255" aria-label="New name" autocomplete="off" spellcheck="false">
+    <p class="field-hint text-danger" data-error hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn-text" data-close>Cancel</button>
+      <button type="submit" class="btn-text">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="move-dialog" class="dialog p-0 overflow-hidden" aria-labelledby="move-dialog-title">
+  <div class="px-6 pt-6 pb-2">
+    <h2 id="move-dialog-title" class="dialog-title mb-1">Move</h2>
+    <p id="move-dialog-subtitle" class="text-[13px] text-muted truncate"></p>
+  </div>
+  <div class="flex items-center gap-1 h-12 px-3 border-b border-outline">
+    <button type="button" class="icon-btn-sm" id="move-up" aria-label="Up one level" title="Up one level"><span class="ms">arrow_back</span></button>
+    <span id="move-location" class="flex-1 truncate font-medium"></span>
+  </div>
+  <ul id="move-folders" class="h-64 overflow-y-auto py-1" role="listbox" aria-label="Folders"></ul>
+  <div class="dialog-actions px-6 pb-5 mt-0 pt-4 border-t border-outline">
+    <button type="button" class="btn-text" data-close>Cancel</button>
+    <button type="button" class="btn-filled" id="move-confirm">Move here</button>
+  </div>
+</dialog>
+
+<dialog id="conflict-dialog" class="dialog" aria-labelledby="conflict-dialog-title">
+  <form method="dialog">
+    <h2 id="conflict-dialog-title" class="dialog-title">Upload options</h2>
+    <p id="conflict-dialog-message" class="text-muted leading-relaxed"></p>
+    <div class="mt-4 flex flex-col gap-1">
+      <label class="flex items-center gap-3 h-10 cursor-pointer"><input type="radio" name="conflict" value="keep" class="accent-[rgb(var(--c-primary))] w-4 h-4" checked> Keep both (rename the upload)</label>
+      <label class="flex items-center gap-3 h-10 cursor-pointer"><input type="radio" name="conflict" value="replace" class="accent-[rgb(var(--c-primary))] w-4 h-4"> Replace existing</label>
+    </div>
+    <div class="dialog-actions">
+      <button type="submit" value="cancel" class="btn-text">Cancel upload</button>
+      <button type="submit" value="ok" class="btn-text">Upload</button>
+    </div>
+  </form>
+</dialog>

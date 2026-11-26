@@ -1,64 +1,133 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <meta name="description" content="IronDrive — Encrypted file storage">
-  <meta name="theme-color" content="#0f172a">
   <title>{% block title %}IronDrive{% endblock %}</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=0.4.0">
+  <link rel="preload" href="/static/fonts/material-symbols-rounded.woff2?v=2e730b4fa4" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v() }}">
+  <script src="/static/js/theme.js?v={{ asset_v() }}"></script>
   <script src="/static/vendor/htmx.min.js?v=2.0.4" defer></script>
-  <script src="/static/js/app.js?v=0.4.0" defer></script>
+  <script src="/static/js/core.js?v={{ asset_v() }}" defer></script>
+  {% block head %}{% endblock %}
 </head>
-<body class="h-full bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans antialiased" hx-boost="false">
-  {% block nav %}
-    {% include "partials/nav" %}
-  {% endblock %}
+<body>
+{% block body %}
+<div class="h-dvh flex flex-col">
+  {# ── Top bar ─────────────────────────────────────────────────────── #}
+  <header class="h-16 flex items-center gap-1 px-2 sm:px-3 shrink-0">
+    <button type="button" class="icon-btn" id="sidebar-toggle" aria-label="Main menu" aria-controls="sidebar">
+      <span class="ms ms-lg">menu</span>
+    </button>
+    <a href="/files" class="flex items-center gap-2.5 pl-1 pr-2 lg:w-[218px] shrink-0" aria-label="IronDrive home">
+      {% include "partials/logo" %}
+      <span class="text-[22px] leading-none text-muted hidden sm:inline">IronDrive</span>
+    </a>
+    <div class="flex-1 min-w-0 max-w-[720px] hidden md:block">
+      {% block search %}{% endblock %}
+    </div>
+    <div class="ml-auto flex items-center gap-1">
+      <div id="alerts" class="contents" hx-get="/notifications" hx-trigger="load, alerts-refresh from:body" hx-swap="innerHTML"></div>
+      <button type="button" class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode" title="Toggle dark mode">
+        <span class="ms dark:hidden">dark_mode</span>
+        <span class="ms hidden dark:inline-block">light_mode</span>
+      </button>
+      <button type="button" class="ml-1 mr-1 rounded-full" data-menu-trigger="account-menu" aria-label="Account menu" title="{{ user }}">
+        <span class="avatar w-9 h-9">{{ user | truncate(length=1, end="") }}</span>
+      </button>
+    </div>
+  </header>
 
-  <div class="flex h-full">
-    <main id="main-content" class="flex-1 min-w-0 overflow-x-hidden {% if user is defined and user %}sm:ml-60{% endif %} min-h-screen flex flex-col transition-[margin] duration-200">
-      <!-- Toast notifications -->
-      <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none">
-        <div class="pointer-events-auto">
-          {% include "partials/flash" %}
-        </div>
-      </div>
-
-      <!-- HTMX loading indicator -->
-      <div id="htmx-loading" class="hidden fixed top-0 left-0 right-0 z-50">
-        <div class="h-0.5 bg-blue-600 animate-pulse"></div>
-      </div>
-
-      {% if user is defined and user %}
-      <!-- Sidebar toggle in content area (desktop only) -->
-      <div class="hidden sm:flex items-center px-4 sm:px-6 lg:px-8 pt-4 pb-0">
-        <button id="content-sidebar-toggle" type="button" class="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors" title="Toggle sidebar">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/></svg>
+  <div class="flex flex-1 min-h-0">
+    {# ── Sidebar ───────────────────────────────────────────────────── #}
+    <aside id="sidebar" class="w-64 shrink-0 flex flex-col pb-4 pl-2 lg:pl-3 bg-bg">
+      <div class="pt-1 pb-4 pl-1 lg:pl-0">
+        <button type="button" class="new-btn" data-menu-trigger="new-menu" aria-haspopup="menu">
+          <span class="ms ms-lg">add</span>
+          New
         </button>
       </div>
-      {% endif %}
 
-      <div class="flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-4">
-        {% block content %}{% endblock %}
+      <nav class="flex flex-col gap-0.5 pr-3" aria-label="Main">
+        <a href="/files" class="nav-item" {% if current_path is defined and current_path == "files" %}aria-current="page"{% endif %}>
+          <span class="ms">folder</span> My files
+        </a>
+        <a href="/spaces" class="nav-item" {% if current_path is defined and current_path == "spaces" %}aria-current="page"{% endif %}>
+          <span class="ms">workspaces</span> Spaces
+        </a>
+        <div id="nav-spaces" class="flex flex-col gap-0.5" hx-get="/nav/extra" hx-trigger="load" hx-swap="innerHTML"></div>
+        <a href="/groups" class="nav-item" {% if current_path is defined and current_path == "groups" %}aria-current="page"{% endif %}>
+          <span class="ms">group</span> Groups
+        </a>
+        <a href="/usage" class="nav-item" {% if current_path is defined and current_path == "usage" %}aria-current="page"{% endif %}>
+          <span class="ms">database</span> Storage
+        </a>
+        <div id="nav-admin"></div>
+      </nav>
+
+      <div class="mt-auto pt-4 pl-4 pr-6" id="sidebar-usage" hx-get="/usage/sidebar" hx-trigger="load" hx-swap="innerHTML">
+        <div class="progress"><span style="width:0%"></span></div>
+        <p class="mt-2 text-xs text-muted">&nbsp;</p>
       </div>
+    </aside>
 
-      <footer class="border-t border-gray-200/60 dark:border-gray-800/60">
-        <div class="mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between text-xs text-gray-400 dark:text-gray-600">
-          <span>IronDrive v{{ "0.1.0" }}</span>
-          <span class="flex items-center gap-1">
-            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
-            End-to-end encrypted
-          </span>
-        </div>
-      </footer>
+    {# ── Content ───────────────────────────────────────────────────── #}
+    <main id="main" class="panel flex-1 min-w-0 overflow-auto relative mx-2 mb-2 lg:ml-0 lg:mr-4 lg:mb-4">
+      {% block content %}{% endblock %}
     </main>
   </div>
+</div>
 
-  {% block scripts %}{% endblock %}
+{# Mobile: the sidebar's New button becomes a floating action button #}
+<button type="button" class="lg:hidden fixed z-30 right-5 bottom-5 w-14 h-14 rounded-2xl bg-primary-container text-on-primary-container shadow-3 flex items-center justify-center"
+        data-menu-trigger="new-menu" aria-label="New" aria-haspopup="menu">
+  <span class="ms ms-lg">add</span>
+</button>
+
+<div id="sidebar-scrim" class="fixed inset-0 z-30 bg-black/40" hidden></div>
+
+{# ── Menus ───────────────────────────────────────────────────────── #}
+<div id="account-menu" class="menu" role="menu" hidden>
+  <div class="px-4 pt-1 pb-3 flex items-center gap-3">
+    <span class="avatar w-10 h-10 text-base">{{ user | truncate(length=1, end="") }}</span>
+    <div class="min-w-0">
+      <p class="font-medium truncate">{{ user }}</p>
+      <p class="text-xs text-muted">Signed in</p>
+    </div>
+  </div>
+  <div class="menu-sep mt-0"></div>
+  <a href="/settings" class="menu-item" role="menuitem"><span class="ms">settings</span>Settings</a>
+  <a href="/usage" class="menu-item" role="menuitem"><span class="ms">database</span>Storage</a>
+  <div id="account-admin"></div>
+  <div class="menu-sep"></div>
+  <form method="post" action="/logout">
+    {% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <button type="submit" class="menu-item" role="menuitem"><span class="ms">logout</span>Sign out</button>
+  </form>
+</div>
+
+<div id="new-menu" class="menu" role="menu" hidden>
+  {% block new_menu %}
+  <a href="/files?new=folder" class="menu-item" role="menuitem"><span class="ms">create_new_folder</span>New folder</a>
+  <div class="menu-sep"></div>
+  <a href="/files?new=files" class="menu-item" role="menuitem"><span class="ms">upload_file</span>File upload</a>
+  <a href="/files?new=folder-upload" class="menu-item" role="menuitem"><span class="ms">drive_folder_upload</span>Folder upload</a>
+  <div class="menu-sep"></div>
+  <a href="/spaces?new=1" class="menu-item" role="menuitem"><span class="ms">workspaces</span>New space</a>
+  <a href="/groups?new=1" class="menu-item" role="menuitem"><span class="ms">group_add</span>New group</a>
+  {% endblock %}
+</div>
+
+{% include "partials/transfers" %}
+{% endblock body %}
+
+{% include "partials/confirm_dialog" %}
+<div id="snackbars" class="fixed bottom-4 left-4 right-4 sm:right-auto z-[60] flex flex-col items-start gap-2 pointer-events-none" aria-live="polite">
+  {% block flash %}{% include "partials/flash" %}{% endblock %}
+</div>
+
+{% block scripts %}{% endblock %}
 </body>
 </html>

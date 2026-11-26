@@ -1,0 +1,16 @@
+{# Typeahead for users (and optionally groups). Driven by static/js/picker.js.
+   Set picker_types = "user" or "user,group" before including. #}
+<div class="relative" data-picker data-picker-types="{% if picker_types is defined %}{{ picker_types }}{% else %}user{% endif %}">
+  <label for="picker-input" class="field-label">{% if picker_types is defined and picker_types == "user,group" %}Person or group{% else %}Person{% endif %}</label>
+  <div class="relative" data-picker-search>
+    <span class="ms absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none">search</span>
+    <input type="text" id="picker-input" class="field pl-10" autocomplete="off" spellcheck="false" placeholder="Search by name…"
+           role="combobox" aria-expanded="false" aria-controls="picker-results" aria-autocomplete="list">
+  </div>
+  <div class="hidden items-center gap-3 h-11 pl-2 pr-1 rounded-lg border border-outline" data-picker-chosen>
+    <span class="avatar w-7 h-7 text-xs" data-picker-avatar></span>
+    <span class="flex-1 truncate font-medium" data-picker-label></span>
+    <button type="button" class="icon-btn-sm" data-picker-clear aria-label="Choose someone else"><span class="ms">close</span></button>
+  </div>
+  <ul id="picker-results" class="absolute left-0 right-0 mt-1 py-2 max-h-60 overflow-y-auto rounded-lg bg-surface shadow-3 border border-outline/60 z-10" role="listbox" hidden></ul>
+</div>

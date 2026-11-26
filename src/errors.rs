@@ -25,6 +25,12 @@ pub enum AppError {
     #[error("quota exceeded")]
     QuotaExceeded,
 
+    #[error("registration closed")]
+    RegistrationClosed,
+
+    #[error("rate limited")]
+    RateLimited,
+
     #[error("library/space is locked — unlock first")]
     Locked,
 
@@ -67,6 +73,8 @@ impl AppError {
             AppError::Forbidden => Status::Forbidden,
             AppError::Conflict(_) => Status::Conflict,
             AppError::QuotaExceeded => Status::PayloadTooLarge,
+            AppError::RegistrationClosed => Status::Forbidden,
+            AppError::RateLimited => Status::TooManyRequests,
             AppError::Locked => Status::Locked,
             AppError::RecoveryNotAvailable => Status::UnprocessableEntity,
             AppError::Validation(_) => Status::BadRequest,
@@ -78,13 +86,16 @@ impl AppError {
     }
 
     /// Client-safe description. Server errors return a generic message.
-    fn client_message(&self) -> String {
+    /// Message that is safe to show end users (no internal details).
+    pub fn client_message(&self) -> String {
         match self {
             AppError::NotFound => "The requested resource was not found.".into(),
             AppError::Unauthorized => "Authentication required.".into(),
             AppError::Forbidden => "You do not have permission to perform this action.".into(),
             AppError::Conflict(msg) => msg.clone(),
             AppError::QuotaExceeded => "Storage quota exceeded.".into(),
+            AppError::RegistrationClosed => "Registration is disabled on this server.".into(),
+            AppError::RateLimited => "Too many attempts. Please wait and try again later.".into(),
             AppError::Locked => "Library or space is locked. Unlock it first.".into(),
             AppError::RecoveryNotAvailable => {
                 "Recovery is not available for this encryption mode.".into()
