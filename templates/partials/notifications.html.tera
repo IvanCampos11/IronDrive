@@ -1,0 +1,38 @@
+{# Bell button + alerts menu. Loaded into #alerts by HTMX; refreshed on the "alerts-refresh" event. #}
+<button type="button" class="icon-btn relative" data-menu-trigger="alerts-menu" aria-haspopup="menu"
+        aria-label="{% if count > 0 %}{{ count }} file {% if count == 1 %}problem{% else %}problems{% endif %}{% else %}Alerts{% endif %}" title="Alerts">
+  <span class="ms {% if count > 0 %}ms-fill text-danger{% endif %}">notifications</span>
+  {% if count > 0 %}
+  <span class="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-danger text-surface text-[10px] font-medium leading-4 text-center">{% if count > 9 %}9+{% else %}{{ count }}{% endif %}</span>
+  {% endif %}
+</button>
+<div id="alerts-menu" class="menu w-[360px] max-w-[calc(100vw-1rem)] py-0 overflow-hidden" role="menu" hidden>
+  <div class="flex items-center h-12 px-4 border-b border-outline">
+    <h2 class="flex-1 font-medium">Alerts</h2>
+    {% if count > 0 %}<span class="text-xs text-muted">{{ count }} open</span>{% endif %}
+  </div>
+  {% if count == 0 %}
+  <div class="flex flex-col items-center text-center px-6 py-8">
+    <span class="ms ms-lg text-success">check_circle</span>
+    <p class="mt-2 font-medium">No problems found</p>
+    <p class="mt-1 text-[13px] text-muted">Damaged or unreadable files will show up here.</p>
+  </div>
+  {% else %}
+  <ul class="max-h-[60vh] overflow-y-auto">
+    {% for a in alerts %}
+    <li class="flex gap-3 pl-4 pr-2 py-3 border-b border-outline/70 last:border-b-0" data-alert="{{ a.id }}">
+      <span class="ms text-danger mt-0.5">error</span>
+      <div class="flex-1 min-w-0">
+        <p class="text-[13px] font-medium">{{ a.title }}</p>
+        <a href="{{ a.href }}" class="block truncate text-[13px] text-primary hover:underline" title="{{ a.file_path }}">{{ a.file_name }}</a>
+        <p class="text-xs text-muted truncate">{{ a.location }} · <time datetime="{{ a.created_at }}">{{ a.created_at }}</time></p>
+      </div>
+      {% if a.can_dismiss %}
+      <button type="button" class="icon-btn-sm shrink-0" data-dismiss-alert="{{ a.id }}" title="Dismiss" aria-label="Dismiss alert for {{ a.file_name }}"><span class="ms">close</span></button>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="px-4 py-2.5 text-xs text-muted bg-surface-2/60 border-t border-outline">Restore damaged files from a backup, or delete them. Dismissing only hides the alert.</p>
+  {% endif %}
+</div>

@@ -24,6 +24,7 @@
       {% if is_admin %}
       <a href="/spaces/{{ space_id }}/settings" class="icon-btn" title="Space settings" aria-label="Space settings"><span class="ms">settings</span></a>
       {% endif %}
+      <button type="button" class="icon-btn shrink-0" data-details-toggle aria-pressed="false" aria-controls="details" title="Details" aria-label="Show details"><span class="ms">info</span></button>
       <div class="flex items-center h-9 rounded-full border border-outline overflow-hidden shrink-0" role="group" aria-label="View">
         <button type="button" class="h-full px-3 flex items-center hover:bg-fg/[0.06] aria-pressed:bg-primary-container aria-pressed:text-on-primary-container" data-view-btn="list" aria-pressed="true" title="List view"><span class="ms">view_list</span></button>
         <button type="button" class="h-full px-3 flex items-center border-l border-outline hover:bg-fg/[0.06] aria-pressed:bg-primary-container aria-pressed:text-on-primary-container" data-view-btn="grid" aria-pressed="false" title="Grid view"><span class="ms">grid_view</span></button>

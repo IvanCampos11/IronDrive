@@ -181,14 +181,14 @@ fn clear_session_cookie(cookies: &CookieJar<'_>) {
 }
 
 /// Look up the user's personal library.
-async fn require_library(pool: &DbPool, user_id: &str) -> Result<PersonalLibrary, AppError> {
+pub(crate) async fn require_library(pool: &DbPool, user_id: &str) -> Result<PersonalLibrary, AppError> {
     PersonalLibrary::find_by_user(pool, user_id)
         .await?
         .ok_or(AppError::NotFound)
 }
 
 /// Format bytes into something human readable.
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * 1024 * 1024;
@@ -495,7 +495,8 @@ pub async fn files_page(
     let breadcrumbs = build_breadcrumbs(user_path);
 
     // Format entries for display
-    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
+    let flagged = flagged_paths(pool.inner(), "library", &lib.id).await;
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     let csrf_token = ensure_csrf_token(cookies);
 
@@ -547,7 +548,8 @@ pub async fn files_partial(
 
     let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
+    let flagged = flagged_paths(pool.inner(), "library", &lib.id).await;
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     Ok(Template::render(
         "browser/listing",
@@ -1844,22 +1846,22 @@ fn build_breadcrumbs(path: &str) -> Vec<serde_json::Value> {
     crumbs
 }
 
-fn parent_path(path: &str) -> String {
+pub(crate) fn parent_path(path: &str) -> String {
     match path.rfind('/') {
         Some(pos) => path[..pos].to_string(),
         None => String::new(),
     }
 }
 
-fn normalize_dir_path(path: &str) -> String {
+pub(crate) fn normalize_dir_path(path: &str) -> String {
     path.trim().trim_matches('/').to_string()
 }
 
-fn file_name_from_path(path: &str) -> String {
+pub(crate) fn file_name_from_path(path: &str) -> String {
     path.rsplit('/').next().unwrap_or("").to_string()
 }
 
-fn join_dir_and_name(dir: &str, name: &str) -> String {
+pub(crate) fn join_dir_and_name(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {
@@ -1879,7 +1881,7 @@ fn format_timestamp(ts: &str) -> String {
     }
 }
 
-fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
+pub(crate) fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
     if is_dir {
         return "folder";
     }
@@ -1907,7 +1909,7 @@ fn file_icon(name: &str, is_dir: bool, mime: Option<&str>) -> &'static str {
 }
 
 /// Material Symbols glyph for a `file_icon` kind.
-fn icon_glyph(kind: &str) -> &'static str {
+pub(crate) fn icon_glyph(kind: &str) -> &'static str {
     match kind {
         "folder" => "folder",
         "image" => "image",
@@ -1925,8 +1927,17 @@ fn icon_glyph(kind: &str) -> &'static str {
 }
 
 /// Template view-model for one directory entry (see templates/browser/item).
-fn entry_view(e: &fs_service::FsEntry) -> serde_json::Value {
+pub(crate) fn entry_view(e: &fs_service::FsEntry, flagged: &[String]) -> serde_json::Value {
     let icon = file_icon(&e.name, e.is_dir, e.mime_type.as_deref());
+    // "file": this file has an open integrity alert; "inside": a folder containing one.
+    let prefix = format!("{}/", e.path);
+    let problem = if flagged.contains(&e.path) {
+        Some("file")
+    } else if e.is_dir && flagged.iter().any(|p| p.starts_with(&prefix)) {
+        Some("inside")
+    } else {
+        None
+    };
     serde_json::json!({
         "name": e.name,
         "path": e.path,
@@ -1937,7 +1948,16 @@ fn entry_view(e: &fs_service::FsEntry) -> serde_json::Value {
         "raw_modified": e.modified,
         "icon": icon,
         "glyph": icon_glyph(icon),
+        "problem": problem,
     })
+}
+
+/// Paths with open integrity alerts in a library or space.
+async fn flagged_paths(pool: &DbPool, target_type: &str, target_id: &str) -> Vec<String> {
+    crate::services::integrity_service::list_unacknowledged(pool, target_type, target_id)
+        .await
+        .map(|evs| evs.into_iter().map(|e| e.file_path).collect())
+        .unwrap_or_default()
 }
 
 /// Validate a single file/folder name typed by the user.
@@ -1959,7 +1979,7 @@ fn validate_entry_name(name: &str) -> Result<&str, AppError> {
 }
 
 /// JSON error body for XHR endpoints: `{"error": "<user-facing message>"}`.
-fn json_error(e: AppError) -> (Status, rocket::serde::json::Json<serde_json::Value>) {
+pub(crate) fn json_error(e: AppError) -> (Status, rocket::serde::json::Json<serde_json::Value>) {
     if matches!(e, AppError::Internal(_) | AppError::Sqlx(_) | AppError::Io(_)) {
         tracing::error!(error = %e, "File operation failed");
     }
@@ -1993,7 +2013,7 @@ async fn ensure_name_free(
     Ok(())
 }
 
-type JsonResult = Result<
+pub(crate) type JsonResult = Result<
     rocket::serde::json::Json<serde_json::Value>,
     (Status, rocket::serde::json::Json<serde_json::Value>),
 >;
@@ -2170,7 +2190,9 @@ pub async fn spaces_create_submit(
 
 /// GET /spaces/<space_id> — space file browser
 #[get("/spaces/<space_id>?<path>")]
+#[allow(clippy::too_many_arguments)] // Rocket handler: one argument per guard/param
 pub async fn space_browser_page(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
@@ -2193,7 +2215,8 @@ pub async fn space_browser_page(
 
     let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
+    let flagged = flagged_paths(pool.inner(), "space", space_id).await;
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
@@ -2226,6 +2249,7 @@ pub async fn space_browser_page(
 /// GET /spaces/<space_id>/partial?<path> — HTMX partial for space file list swap
 #[get("/spaces/<space_id>/partial?<path>")]
 pub async fn space_browser_partial(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     reader: SessionSpaceReader,
@@ -2246,7 +2270,8 @@ pub async fn space_browser_partial(
 
     let breadcrumbs = build_breadcrumbs(user_path);
 
-    let display_entries: Vec<serde_json::Value> = entries.iter().map(entry_view).collect();
+    let flagged = flagged_paths(pool.inner(), "space", space_id).await;
+    let display_entries: Vec<serde_json::Value> = entries.iter().map(|e| entry_view(e, &flagged)).collect();
 
     let can_write =
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";

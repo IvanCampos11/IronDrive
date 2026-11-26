@@ -10,7 +10,7 @@
   font-style: normal;
   font-weight: 400 700;
   font-display: swap;
-  src: url("/static/fonts/roboto-latin.woff2") format("woff2");
+  src: url("/static/fonts/roboto-latin.woff2?v=1404ca348b") format("woff2");
 }
 
 @font-face {
@@ -19,7 +19,7 @@
   font-weight: 400;
   /* block: never flash ligature names like "folder" as text */
   font-display: block;
-  src: url("/static/fonts/material-symbols-rounded.woff2") format("woff2");
+  src: url("/static/fonts/material-symbols-rounded.woff2?v=2e730b4fa4") format("woff2");
 }
 
 /* ---------------------------------------------------------------------------
@@ -568,4 +568,46 @@
   html.sidebar-collapsed #main {
     margin-left: 1rem;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Details panel, rubber-band selection, alert flags
+   ------------------------------------------------------------------------ */
+@layer components {
+  .details-panel {
+    @apply w-[340px] shrink-0 flex flex-col border-l border-outline bg-surface rounded-r-2xl;
+  }
+  .details-row {
+    @apply flex flex-col gap-0.5 py-2.5;
+  }
+  .details-row dt {
+    @apply text-xs text-muted;
+  }
+  .details-row dd {
+    @apply text-sm text-fg break-words;
+  }
+  .item-flag {
+    @apply inline-flex shrink-0;
+  }
+  .rubber-band {
+    @apply absolute z-[25] pointer-events-none rounded-sm border border-primary bg-primary/10;
+  }
+}
+
+@media (max-width: 1023px) {
+  .details-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(100vw, 380px);
+    z-index: 45;
+    border-radius: 0;
+    box-shadow: 0 4px 8px 3px rgb(0 0 0 / 0.10), 0 1px 3px 0 rgb(0 0 0 / 0.15);
+  }
+}
+
+/* The column header sticks below the 64px toolbar, not under it. */
+.listing[data-view="list"] .listing-head {
+  top: 4rem;
 }

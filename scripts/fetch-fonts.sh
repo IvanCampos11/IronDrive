@@ -18,6 +18,8 @@ ICONS=(
   menu more_vert movie music_note person_add person_remove picture_as_pdf
   schedule search settings shield slideshow table_chart upload upload_file
   view_list visibility workspaces
+  admin_panel_settings block info notifications refresh select_all verified_user
+  warning
 )
 NAMES=$(printf '%s\n' "${ICONS[@]}" | sort -u | paste -sd, -)
 
@@ -32,5 +34,14 @@ curl -fsS "$url" -o "$OUT/material-symbols-rounded.woff2"
 css=$(fetch_css "https://fonts.googleapis.com/css2?family=Roboto:wght@400..700&display=swap")
 url=$(printf '%s' "$css" | awk '/\/\* latin \*\//{f=1} f && /woff2/{print; exit}' | grep -o 'url(https://[^)]*)' | sed 's/^url(//; s/)$//')
 curl -fsS "$url" -o "$OUT/roboto-latin.woff2"
+
+# Font URLs carry a content hash (?v=...) so browsers drop a cached copy as
+# soon as the glyph set changes; otherwise new icons render as their names.
+for font in material-symbols-rounded roboto-latin; do
+  v=$(sha256sum "$OUT/$font.woff2" | cut -c1-10)
+  sed -i -E "s#(/static/fonts/$font\.woff2)(\?v=[0-9a-f]+)?#\1?v=$v#g" \
+    static/css/input.css templates/base.html.tera
+done
+[ -x ./tailwindcss ] && ./tailwindcss -i static/css/input.css -o static/css/style.css --minify
 
 ls -l "$OUT"

@@ -6,7 +6,7 @@
   <meta name="robots" content="noindex, nofollow">
   <title>{% block title %}IronDrive{% endblock %}</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="preload" href="/static/fonts/material-symbols-rounded.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/material-symbols-rounded.woff2?v=2e730b4fa4" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v() }}">
   <script src="/static/js/theme.js?v={{ asset_v() }}"></script>
   <script src="/static/vendor/htmx.min.js?v=2.0.4" defer></script>
@@ -29,6 +29,7 @@
       {% block search %}{% endblock %}
     </div>
     <div class="ml-auto flex items-center gap-1">
+      <div id="alerts" class="contents" hx-get="/notifications" hx-trigger="load, alerts-refresh from:body" hx-swap="innerHTML"></div>
       <button type="button" class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode" title="Toggle dark mode">
         <span class="ms dark:hidden">dark_mode</span>
         <span class="ms hidden dark:inline-block">light_mode</span>
@@ -56,12 +57,14 @@
         <a href="/spaces" class="nav-item" {% if current_path is defined and current_path == "spaces" %}aria-current="page"{% endif %}>
           <span class="ms">workspaces</span> Spaces
         </a>
+        <div id="nav-spaces" class="flex flex-col gap-0.5" hx-get="/nav/extra" hx-trigger="load" hx-swap="innerHTML"></div>
         <a href="/groups" class="nav-item" {% if current_path is defined and current_path == "groups" %}aria-current="page"{% endif %}>
           <span class="ms">group</span> Groups
         </a>
         <a href="/usage" class="nav-item" {% if current_path is defined and current_path == "usage" %}aria-current="page"{% endif %}>
           <span class="ms">database</span> Storage
         </a>
+        <div id="nav-admin"></div>
       </nav>
 
       <div class="mt-auto pt-4 pl-4 pr-6" id="sidebar-usage" hx-get="/usage/sidebar" hx-trigger="load" hx-swap="innerHTML">
@@ -97,6 +100,7 @@
   <div class="menu-sep mt-0"></div>
   <a href="/settings" class="menu-item" role="menuitem"><span class="ms">settings</span>Settings</a>
   <a href="/usage" class="menu-item" role="menuitem"><span class="ms">database</span>Storage</a>
+  <div id="account-admin"></div>
   <div class="menu-sep"></div>
   <form method="post" action="/logout">
     {% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}

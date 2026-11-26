@@ -148,6 +148,34 @@ impl User {
         Ok(users)
     }
 
+    /// Every account, oldest first (admin view).
+    pub async fn list_all(pool: &DbPool) -> Result<Vec<User>, AppError> {
+        Ok(sqlx::query_as::<_, User>(
+            "SELECT id, username, email, role, quota_bytes, is_active, setup_complete, created_at, updated_at
+             FROM users ORDER BY rowid",
+        )
+        .fetch_all(pool)
+        .await?)
+    }
+
+    pub async fn set_quota(pool: &DbPool, user_id: &str, quota_bytes: i64) -> Result<bool, AppError> {
+        let r = sqlx::query("UPDATE users SET quota_bytes = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(quota_bytes)
+            .bind(user_id)
+            .execute(pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn set_active(pool: &DbPool, user_id: &str, active: bool) -> Result<bool, AppError> {
+        let r = sqlx::query("UPDATE users SET is_active = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(active)
+            .bind(user_id)
+            .execute(pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
     pub async fn mark_setup_complete(pool: &DbPool, user_id: &str) -> Result<(), AppError> {
         let result = sqlx::query(
             "UPDATE users SET setup_complete = 1, updated_at = datetime('now') WHERE id = ?",

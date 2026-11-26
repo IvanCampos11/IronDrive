@@ -255,6 +255,10 @@
   var openTrigger = null;
 
   function closeMenus() {
+    if (openMenu && openMenu.id === 'alerts-menu' && alertsDirty) {
+      alertsDirty = false;
+      setTimeout(refreshAlerts, 0);
+    }
     if (openMenu) openMenu.hidden = true;
     if (openTrigger) openTrigger.setAttribute('aria-expanded', 'false');
     openMenu = null;
@@ -331,6 +335,45 @@
   });
   window.addEventListener('resize', closeMenus);
   document.addEventListener('scroll', closeMenus, true);
+
+  // -------------------------------------------------------------------------
+  // Integrity alerts (bell menu)
+  // -------------------------------------------------------------------------
+  var alertsDirty = false;
+
+  function refreshAlerts() {
+    if (window.htmx) window.htmx.trigger(document.body, 'alerts-refresh');
+  }
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-dismiss-alert]');
+    if (!b) return;
+    e.stopPropagation();
+    var id = b.getAttribute('data-dismiss-alert');
+    b.disabled = true;
+    request('/notifications/' + encodeURIComponent(id) + '/dismiss', { method: 'POST' }).then(function () {
+      var li = b.closest('[data-alert]');
+      var list = li && li.parentNode;
+      if (li) li.remove();
+      // In the bell menu, refresh once it closes; elsewhere (admin page) right away.
+      if (b.closest('#alerts-menu')) alertsDirty = true; else refreshAlerts();
+      if (list && !list.children.length) { closeMenus(); }
+    }).catch(function (err) {
+      b.disabled = false;
+      toast(err.message, { error: true });
+    });
+  });
+
+  // Highlight the sidebar link for the current space / admin page.
+  function markNav() {
+    var path = window.location.pathname;
+    document.querySelectorAll('[data-nav-space]').forEach(function (a) {
+      var href = a.getAttribute('data-nav-space');
+      if (path === href || path.indexOf(href + '/') === 0) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
+    });
+  }
+  document.addEventListener('htmx:afterSettle', markNav);
 
   // -------------------------------------------------------------------------
   // Theme + sidebar
@@ -559,5 +602,6 @@
     el: el,
     icon: icon,
     errorMessage: errorMessage,
+    refreshAlerts: refreshAlerts,
   };
 })();

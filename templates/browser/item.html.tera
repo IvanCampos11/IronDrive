@@ -6,6 +6,7 @@
   <div class="item-main">
     <span class="ms item-icon kind-{{ entry.icon }} {% if entry.is_dir %}ms-fill{% endif %}" aria-hidden="true">{{ entry.glyph }}</span>
     <div class="min-w-0 flex flex-col">
+      <div class="flex items-center gap-1.5 min-w-0">
       {% if entry.is_dir %}
       <a class="item-name" href="{{ base_url }}?path={{ entry.path | urlencode }}" tabindex="-1"
          hx-get="{{ base_url }}/partial?path={{ entry.path | urlencode }}" hx-target="#file-browser-content"
@@ -13,6 +14,9 @@
       {% else %}
       <a class="item-name" href="{{ base_url }}/download?path={{ entry.path | urlencode }}" tabindex="-1" data-download>{{ entry.name }}</a>
       {% endif %}
+      {% if entry.problem == "file" %}<span class="item-flag" title="This file is damaged — see Alerts"><span class="ms ms-fill text-danger text-[18px]">error</span><span class="sr-only">Damaged file</span></span>
+      {% elif entry.problem == "inside" %}<span class="item-flag" title="Contains a damaged file"><span class="ms text-warning text-[18px]">warning</span><span class="sr-only">Contains a damaged file</span></span>{% endif %}
+      </div>
       <span class="item-sub text-xs text-muted truncate">{% if entry.raw_modified %}<time datetime="{{ entry.raw_modified }}">{{ entry.modified }}</time>{% endif %}{% if not entry.is_dir and entry.size %} · {{ entry.size }}{% endif %}</span>
     </div>
   </div>

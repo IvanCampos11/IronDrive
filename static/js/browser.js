@@ -61,6 +61,8 @@
   }
 
   function onListingSwapped() {
+    detailsCache.clear();
+    syncDetailsToggle();
     selection.clear();
     anchorPath = null;
     applyView();
@@ -229,6 +231,7 @@
       selectAll.checked = visible > 0 && selection.size === visible;
       selectAll.indeterminate = selection.size > 0 && selection.size < visible;
     }
+    updateDetails();
   }
 
   function selectOnly(item) {
@@ -267,6 +270,7 @@
 
   // Click handling: name link opens, checkbox toggles, row click selects.
   document.addEventListener('click', function (e) {
+    if (suppressClick) { suppressClick = false; return; }
     var item = e.target.closest('#file-browser-content .item');
     if (!item) {
       // Click on empty space in the content area clears the selection.
@@ -1030,6 +1034,258 @@
     }
     return Promise.all(roots.map(function (r) { return walk(r, ''); })).then(function () { return out; });
   }
+
+  // -------------------------------------------------------------------------
+  // Details panel
+  // -------------------------------------------------------------------------
+  var detailsPanel = document.getElementById('details');
+  var detailsBody = document.getElementById('details-body');
+  var detailsTitle = document.getElementById('details-title');
+  var detailsCache = new Map();
+  var detailsTimer = null;
+  var detailsSeq = 0;
+  var detailsOpen = false;
+  try { detailsOpen = localStorage.getItem('irondrive-details') === 'open'; } catch (_) { /* ignore */ }
+  // On small screens the panel is an overlay, so never start it open there.
+  if (!window.matchMedia('(min-width: 1024px)').matches) detailsOpen = false;
+
+  function syncDetailsToggle() {
+    if (detailsPanel) detailsPanel.hidden = !detailsOpen;
+    document.querySelectorAll('[data-details-toggle]').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(detailsOpen));
+    });
+  }
+
+  function setDetailsOpen(open) {
+    detailsOpen = open;
+    try { localStorage.setItem('irondrive-details', open ? 'open' : 'closed'); } catch (_) { /* ignore */ }
+    syncDetailsToggle();
+    if (open) updateDetails(true);
+  }
+
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('[data-details-toggle]')) { setDetailsOpen(!detailsOpen); return; }
+    if (e.target.closest('[data-details-close]')) setDetailsOpen(false);
+  });
+
+  function updateDetails(immediate) {
+    if (!detailsOpen || !detailsBody) return;
+    clearTimeout(detailsTimer);
+    detailsTimer = setTimeout(renderDetails, immediate ? 0 : 120);
+  }
+
+  function row(label, value) {
+    var d = ID.el('div', 'details-row');
+    d.appendChild(ID.el('dt', '', label));
+    var dd = ID.el('dd');
+    if (value instanceof Node) dd.appendChild(value); else dd.textContent = value;
+    d.appendChild(dd);
+    return d;
+  }
+
+  function hero(glyph, kind, filled) {
+    var box = ID.el('div', 'flex items-center justify-center h-40 rounded-xl bg-surface-2 mb-5');
+    var ic = ID.icon(glyph, 'kind-' + kind + (filled ? ' ms-fill' : ''));
+    ic.style.fontSize = '72px';
+    box.appendChild(ic);
+    return box;
+  }
+
+  function placeholder(text) {
+    detailsTitle.textContent = 'Details';
+    var wrap = ID.el('div', 'flex flex-col items-center text-center pt-10');
+    var ic = ID.icon('info', 'text-subtle');
+    ic.style.fontSize = '56px';
+    wrap.appendChild(ic);
+    wrap.appendChild(ID.el('p', 'mt-4 text-muted', text));
+    detailsBody.replaceChildren(wrap);
+  }
+
+  function renderDetails() {
+    var sel = selectedItems();
+    if (sel.length > 1) {
+      var files = sel.filter(function (i) { return !isDir(i); });
+      var bytes = files.reduce(function (n, i) { return n + (+i.getAttribute('data-size') || 0); }, 0);
+      detailsTitle.textContent = plural(sel.length, 'item') + ' selected';
+      var dl = ID.el('dl', 'divide-y divide-outline/70');
+      dl.appendChild(row('Files', String(files.length)));
+      dl.appendChild(row('Folders', String(sel.length - files.length)));
+      dl.appendChild(row('Size of selected files', ID.formatBytes(bytes)));
+      detailsBody.replaceChildren(hero('select_all', 'file', false), dl);
+      return;
+    }
+    var path = sel.length ? pathOf(sel[0]) : currentPath();
+    if (!path) { placeholder('Select a file or folder to see its details.'); return; }
+
+    var mine = ++detailsSeq;
+    var cached = detailsCache.get(path);
+    var load = cached ? Promise.resolve(cached) : ID.request(BASE + '/info?path=' + encodeURIComponent(path));
+    if (!cached) detailsBody.replaceChildren(ID.el('p', 'pt-6 text-muted', 'Loading…'));
+    load.then(function (info) {
+      detailsCache.set(path, info);
+      if (mine !== detailsSeq) return;
+      renderInfo(info, !sel.length);
+    }).catch(function (err) {
+      if (mine !== detailsSeq) return;
+      placeholder(err.message);
+    });
+  }
+
+  function renderInfo(info, isCurrentFolder) {
+    detailsTitle.textContent = info.name;
+    detailsTitle.title = info.name;
+    var nodes = [hero(info.glyph, info.icon, info.is_dir)];
+    if (isCurrentFolder) nodes.push(ID.el('p', 'text-xs text-muted -mt-2 mb-3', 'This folder'));
+
+    if (info.problems && info.problems.length) {
+      var box = ID.el('div', 'mb-4 p-3 rounded-xl bg-danger-container text-on-danger-container');
+      var head = ID.el('p', 'flex items-center gap-2 font-medium');
+      head.appendChild(ID.icon('error', 'ms-fill'));
+      head.appendChild(document.createTextNode(info.is_dir
+        ? plural(info.problems.length, 'damaged file') + ' inside'
+        : info.problems[0].title));
+      box.appendChild(head);
+      if (info.is_dir) {
+        var ul = ID.el('ul', 'mt-2 space-y-1 text-[13px]');
+        info.problems.slice(0, 5).forEach(function (p) { ul.appendChild(ID.el('li', 'truncate', p.file_path)); });
+        box.appendChild(ul);
+      } else {
+        box.appendChild(ID.el('p', 'mt-1 text-[13px]', 'Restore it from a backup, or delete it.'));
+      }
+      nodes.push(box);
+    }
+
+    var dl = ID.el('dl', 'divide-y divide-outline/70');
+    dl.appendChild(row('Type', info.type));
+    if (info.is_dir && info.contents) {
+      dl.appendChild(row('Contains', plural(info.contents.files, 'file') + ', ' + plural(info.contents.folders, 'folder')));
+      dl.appendChild(row('Size on disk', info.contents.disk_size));
+    } else {
+      dl.appendChild(row('Size', info.size || '—'));
+      if (info.disk_size) dl.appendChild(row('Size on disk (encrypted)', info.disk_size));
+    }
+    dl.appendChild(row('Location', info.location));
+    if (info.modified) {
+      var t = ID.el('time', '', info.modified);
+      t.setAttribute('datetime', info.modified);
+      t.setAttribute('data-full', '');
+      dl.appendChild(row('Modified', t));
+    }
+    if (info.mime_type) dl.appendChild(row('Media type', info.mime_type));
+    nodes.push(dl);
+
+    if (!info.is_dir) {
+      var check = ID.el('button', 'btn-outline w-full mt-5');
+      check.type = 'button';
+      check.appendChild(ID.icon('verified_user'));
+      check.appendChild(document.createTextNode('Check integrity'));
+      check.addEventListener('click', function () { verifyFile(info.path, check); });
+      nodes.push(check);
+      nodes.push(ID.el('p', 'mt-2 text-xs text-muted', 'Reads and decrypts the whole file to confirm nothing on disk is damaged.'));
+    }
+
+    detailsBody.replaceChildren.apply(detailsBody, nodes);
+    ID.localizeTimes(detailsBody);
+  }
+
+  function verifyFile(path, btn) {
+    btn.disabled = true;
+    var label = btn.lastChild;
+    label.textContent = 'Checking…';
+    ID.request(BASE + '/verify?path=' + encodeURIComponent(path), { method: 'POST' }).then(function (res) {
+      ID.toast(res.message, { error: !res.ok });
+      detailsCache.delete(path);
+      if (!res.ok || res.resolved) { ID.refreshAlerts(); refresh([path]); } else updateDetails(true);
+    }).catch(function (err) {
+      ID.toast(err.message, { error: true });
+    }).finally(function () {
+      btn.disabled = false;
+      label.textContent = 'Check integrity';
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Rubber-band selection: drag on empty space to select a rectangle
+  // -------------------------------------------------------------------------
+  var band = null;
+  var suppressClick = false;
+
+  browser.addEventListener('mousedown', function (e) {
+    if (e.button !== 0 || coarsePointer.matches) return;
+    if (e.target.closest('.item, a, button, input, label, .listing-head, #selection-bar, nav, dialog, .menu')) return;
+    if (!items().length) return;
+    var rect = browser.getBoundingClientRect();
+    band = {
+      x0: e.clientX - rect.left + browser.scrollLeft,
+      y0: e.clientY - rect.top + browser.scrollTop,
+      base: (e.ctrlKey || e.metaKey || e.shiftKey) ? new Set(selection) : new Set(),
+      el: null,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      timer: null,
+    };
+    e.preventDefault(); // no text selection while dragging
+  });
+
+  function bandUpdate() {
+    if (!band) return;
+    var rect = browser.getBoundingClientRect();
+    var x1 = band.lastX - rect.left + browser.scrollLeft;
+    var y1 = band.lastY - rect.top + browser.scrollTop;
+    var left = Math.min(band.x0, x1);
+    var top = Math.min(band.y0, y1);
+    var w = Math.abs(x1 - band.x0);
+    var h = Math.abs(y1 - band.y0);
+    if (!band.el) {
+      if (w < 5 && h < 5) return; // still a click, not a drag
+      band.el = ID.el('div', 'rubber-band');
+      browser.appendChild(band.el);
+    }
+    band.el.style.left = left + 'px';
+    band.el.style.top = top + 'px';
+    band.el.style.width = w + 'px';
+    band.el.style.height = h + 'px';
+
+    // Compare in viewport coordinates.
+    var vx0 = left - browser.scrollLeft + rect.left;
+    var vy0 = top - browser.scrollTop + rect.top;
+    var vx1 = vx0 + w;
+    var vy1 = vy0 + h;
+    selection = new Set(band.base);
+    visibleItems().forEach(function (i) {
+      var r = i.getBoundingClientRect();
+      if (r.right > vx0 && r.left < vx1 && r.bottom > vy0 && r.top < vy1) selection.add(pathOf(i));
+    });
+    renderSelection();
+  }
+
+  // Auto-scroll while dragging near the top/bottom edge.
+  function bandAutoScroll() {
+    if (!band || !band.el) return;
+    var rect = browser.getBoundingClientRect();
+    var edge = 40;
+    var dy = band.lastY < rect.top + edge + 64 ? -12 : band.lastY > rect.bottom - edge ? 12 : 0;
+    if (dy) { browser.scrollTop += dy; bandUpdate(); }
+  }
+
+  document.addEventListener('mousemove', function (e) {
+    if (!band) return;
+    band.lastX = e.clientX;
+    band.lastY = e.clientY;
+    bandUpdate();
+    if (!band.timer) band.timer = setInterval(bandAutoScroll, 30);
+  });
+
+  document.addEventListener('mouseup', function () {
+    if (!band) return;
+    clearInterval(band.timer);
+    if (band.el) {
+      band.el.remove();
+      suppressClick = true; // the click that follows mouseup must not clear the selection
+      setTimeout(function () { suppressClick = false; }, 0);
+    }
+    band = null;
+  });
 
   // -------------------------------------------------------------------------
   // "New" menu + empty-state buttons

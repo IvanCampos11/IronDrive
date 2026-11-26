@@ -25,22 +25,33 @@
 {% endblock %}
 
 {% block content %}
-<div id="browser" class="min-h-full"
-     data-base="{{ base_url }}"
-     data-can-write="{{ can_write }}"
-     data-chunk-size-bytes="{{ chunk_size_bytes }}"
-     data-max-parallel-chunks="{{ max_parallel_chunks }}">
-  <div id="file-browser-content" class="min-h-full">
-    {% include "browser/listing" %}
-  </div>
+<div class="flex h-full">
+  <div id="browser" class="flex-1 min-w-0 overflow-auto relative"
+       data-base="{{ base_url }}"
+       data-can-write="{{ can_write }}"
+       data-chunk-size-bytes="{{ chunk_size_bytes }}"
+       data-max-parallel-chunks="{{ max_parallel_chunks }}">
+    <div id="file-browser-content" class="min-h-full">
+      {% include "browser/listing" %}
+    </div>
 
-  {# Shown while files are dragged in from the desktop #}
-  <div id="drop-zone" class="absolute inset-0 z-30 rounded-2xl border-2 border-dashed border-primary bg-primary-container/60 items-center justify-center pointer-events-none hidden">
-    <div class="px-6 py-4 rounded-2xl bg-surface shadow-2 text-center">
-      <span class="ms ms-lg text-primary">upload</span>
-      <p class="mt-1 font-medium">Drop to upload to <span id="drop-zone-target">{{ root_name }}</span></p>
+    {# Shown while files are dragged in from the desktop #}
+    <div id="drop-zone" class="absolute inset-0 z-30 rounded-2xl border-2 border-dashed border-primary bg-primary-container/60 items-center justify-center pointer-events-none hidden">
+      <div class="px-6 py-4 rounded-2xl bg-surface shadow-2 text-center">
+        <span class="ms ms-lg text-primary">upload</span>
+        <p class="mt-1 font-medium">Drop to upload to <span id="drop-zone-target">{{ root_name }}</span></p>
+      </div>
     </div>
   </div>
+
+  {# Details panel (filled by browser.js) #}
+  <aside id="details" class="details-panel" aria-label="Details" hidden>
+    <div class="flex items-center gap-2 h-16 pl-5 pr-2 shrink-0">
+      <h2 id="details-title" class="flex-1 text-base font-medium truncate">Details</h2>
+      <button type="button" class="icon-btn" data-details-close aria-label="Close details"><span class="ms">close</span></button>
+    </div>
+    <div id="details-body" class="flex-1 overflow-y-auto px-5 pb-6"></div>
+  </aside>
 </div>
 
 {% if can_write %}

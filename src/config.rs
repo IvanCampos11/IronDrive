@@ -235,7 +235,7 @@ fn env_size(key: &str, default: u64) -> u64 {
 }
 
 /// Parse a human-readable size string into bytes. Returns `None` on invalid input.
-fn parse_size(s: &str) -> Option<u64> {
+pub fn parse_size(s: &str) -> Option<u64> {
     let s = s.trim();
 
     if let Ok(n) = s.parse::<u64>() {
