@@ -63,6 +63,7 @@ pub(super) async fn page_test_client(tmp: &tempfile::TempDir) -> Client {
         integrity_scan_interval_hours: 168,
         registration_enabled: true,
         secure_cookies: false,
+        trash_retention_days: 30,
     };
 
     let db_url = format!("sqlite:{}/irondrive.db?mode=rwc", db_dir.display());
@@ -569,8 +570,12 @@ async fn file_browser_page_renders_shell() {
         "assets should carry a cache-busting version"
     );
     assert!(
-        !page.contains("/shares") && !page.contains("/trash"),
+        !page.contains("/shares"),
         "links to unimplemented pages must be gone"
+    );
+    assert!(
+        page.contains("href=\"/trash\""),
+        "sidebar links to the trash"
     );
 }
 

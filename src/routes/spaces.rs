@@ -16,9 +16,9 @@ use crate::guards::setup_guard::SetupComplete;
 use crate::guards::space_guard::{SpaceAdmin, SpaceReader, SpaceWriter};
 use crate::services::crypto_service::MasterKey;
 use crate::services::fs_service::{self, FsEntry, TargetKind};
-use crate::services::quota_service;
 use crate::services::space_service;
 use crate::services::unlock_state::UnlockState;
+use crate::services::{quota_service, trash_service};
 use crate::utils::format_bytes;
 
 // Request and response DTOs.
@@ -136,6 +136,10 @@ pub struct RenameResponse {
 #[derive(Serialize)]
 pub struct DeleteResponse {
     pub message: String,
+    /// Set when the entry went to the trash; pass it to the trash restore
+    /// endpoint to undo. Absent for `permanent=true` deletes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trash_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -608,17 +612,36 @@ pub async fn download(
 }
 
 /// DELETE /api/v1/spaces/<_id>/files/delete?path=<path>
-#[delete("/api/v1/spaces/<_id>/files/delete?<path>")]
+#[delete("/api/v1/spaces/<_id>/files/delete?<path>&<permanent>")]
 pub async fn delete_file(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     _id: &str,
     writer: SpaceWriter,
     path: String,
+    permanent: Option<bool>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    fs_service::delete_space_entry(config.inner(), &writer.space.space.id, &path).await?;
+    let space_id = &writer.space.space.id;
+    if permanent.unwrap_or(false) {
+        fs_service::delete_space_entry(config.inner(), space_id, &path).await?;
+        return Ok(Json(DeleteResponse {
+            message: "Entry deleted permanently.".into(),
+            trash_id: None,
+        }));
+    }
 
+    let item = trash_service::move_to_trash(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Space,
+        space_id,
+        &path,
+        Some(&writer.user.id),
+    )
+    .await?;
     Ok(Json(DeleteResponse {
-        message: "Entry deleted successfully.".into(),
+        message: "Moved to trash.".into(),
+        trash_id: Some(item.id),
     }))
 }
 

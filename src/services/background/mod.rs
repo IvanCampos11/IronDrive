@@ -1,6 +1,7 @@
 mod chunk_cleanup;
 mod integrity_scan;
 mod session_cleanup;
+mod trash_cleanup;
 
 use sqlx::SqlitePool;
 
@@ -28,7 +29,12 @@ impl BackgroundRunner {
 
         tokio::spawn(session_cleanup::session_cleanup_loop(pool.clone()));
 
-        tokio::spawn(chunk_cleanup::chunk_cleanup_loop(pool, config));
+        tokio::spawn(chunk_cleanup::chunk_cleanup_loop(
+            pool.clone(),
+            config.clone(),
+        ));
+
+        tokio::spawn(trash_cleanup::trash_cleanup_loop(pool, config));
 
         tracing::info!("BackgroundRunner: all workers launched");
     }

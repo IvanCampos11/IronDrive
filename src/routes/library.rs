@@ -14,7 +14,7 @@ use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
 use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::unlock_state::UnlockState;
-use crate::services::{chunk_service, quota_service};
+use crate::services::{chunk_service, quota_service, trash_service};
 use crate::utils::format_bytes;
 
 // Request and response types.
@@ -46,6 +46,10 @@ pub struct RenameResponse {
 #[derive(Serialize)]
 pub struct DeleteResponse {
     pub message: String,
+    /// Set when the entry went to the trash; pass it to the trash restore
+    /// endpoint to undo. Absent for `permanent=true` deletes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trash_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -405,19 +409,36 @@ pub async fn download(
 /// DELETE /api/v1/library/delete?path=<path>
 ///
 /// Delete a file or directory (recursively) from the user's personal library.
-#[delete("/api/v1/library/delete?<path>")]
+#[delete("/api/v1/library/delete?<path>&<permanent>")]
 pub async fn delete(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     user: SetupComplete,
     path: String,
+    permanent: Option<bool>,
 ) -> Result<Json<DeleteResponse>, AppError> {
     let lib = require_library(pool.inner(), &user.0.id).await?;
 
-    fs_service::delete_entry(config.inner(), &lib.id, &path).await?;
+    if permanent.unwrap_or(false) {
+        fs_service::delete_entry(config.inner(), &lib.id, &path).await?;
+        return Ok(Json(DeleteResponse {
+            message: "Entry deleted permanently.".into(),
+            trash_id: None,
+        }));
+    }
 
+    let item = trash_service::move_to_trash(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &path,
+        Some(&user.0.id),
+    )
+    .await?;
     Ok(Json(DeleteResponse {
-        message: "Entry deleted successfully.".into(),
+        message: "Moved to trash.".into(),
+        trash_id: Some(item.id),
     }))
 }
 

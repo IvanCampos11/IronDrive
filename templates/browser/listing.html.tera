@@ -21,6 +21,9 @@
         {% endfor %}
       </nav>
       {% if not can_write %}<span class="chip hidden sm:inline-flex"><span class="ms text-[16px]">visibility</span>View only</span>{% endif %}
+      {% if space_id is defined and can_write %}
+      <a href="/spaces/{{ space_id }}/trash" class="icon-btn" title="Trash for this space" aria-label="Trash for this space"><span class="ms">delete</span></a>
+      {% endif %}
       {% if is_admin %}
       <a href="/spaces/{{ space_id }}/settings" class="icon-btn" title="Space settings" aria-label="Space settings"><span class="ms">settings</span></a>
       {% endif %}

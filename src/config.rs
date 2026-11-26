@@ -24,6 +24,9 @@ pub struct AppConfig {
     pub registration_enabled: bool,
     /// Mark session/CSRF cookies `Secure`. Enable when served over HTTPS.
     pub secure_cookies: bool,
+    /// Days a deleted item stays in the trash before it's removed for good.
+    /// 0 keeps items until someone empties the trash.
+    pub trash_retention_days: u64,
 }
 
 /// Hand-written so `{:?}` (e.g. in logs or panics) never prints the secret.
@@ -46,6 +49,7 @@ impl std::fmt::Debug for AppConfig {
             )
             .field("registration_enabled", &self.registration_enabled)
             .field("secure_cookies", &self.secure_cookies)
+            .field("trash_retention_days", &self.trash_retention_days)
             .finish()
     }
 }
@@ -78,6 +82,7 @@ impl AppConfig {
             ),
             registration_enabled: env_parse("IRONDRIVE_REGISTRATION_ENABLED", true),
             secure_cookies: env_parse("IRONDRIVE_SECURE_COOKIES", false),
+            trash_retention_days: env_parse("IRONDRIVE_TRASH_RETENTION_DAYS", 30),
         }
     }
 

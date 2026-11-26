@@ -230,6 +230,7 @@ pub async fn delete_space(
     require_permission(pool, user_id, space_id, PERM_ADMIN).await?;
 
     Space::delete_by_id(pool, space_id).await?;
+    crate::services::trash_service::forget_space(pool, space_id).await?;
 
     // Remove the key from memory.
     unlock_state.remove_space_key(space_id);
@@ -554,6 +555,7 @@ mod tests {
             integrity_scan_interval_hours: 168,
             registration_enabled: true,
             secure_cookies: false,
+            trash_retention_days: 30,
         }
     }
 

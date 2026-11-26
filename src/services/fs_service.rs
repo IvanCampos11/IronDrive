@@ -111,6 +111,14 @@ fn space_root(config: &AppConfig, space_id: &str) -> PathBuf {
         .join(space_id)
 }
 
+/// Root directory of a library or space.
+pub(crate) fn root_of(config: &AppConfig, kind: TargetKind, target_id: &str) -> PathBuf {
+    match kind {
+        TargetKind::Library => library_root(config, target_id),
+        TargetKind::Space => space_root(config, target_id),
+    }
+}
+
 /// Retrieve the data key for a library from [`UnlockState`], returning
 /// [`AppError::Locked`] if it's not available.
 fn require_data_key(unlock_state: &UnlockState, library_id: &str) -> Result<DataKey, AppError> {
@@ -328,14 +336,14 @@ pub async fn resolve_readable_file(
 /// Async wrapper for [`safe_join`] — moves the blocking path validation
 /// (which calls `std::fs::canonicalize` and `std::fs::symlink_metadata`)
 /// onto a blocking thread pool.
-async fn safe_join_async(root: PathBuf, user_path: String) -> Result<PathBuf, AppError> {
+pub(crate) async fn safe_join_async(root: PathBuf, user_path: String) -> Result<PathBuf, AppError> {
     tokio::task::spawn_blocking(move || safe_join(&root, &user_path))
         .await
         .map_err(|e| AppError::Internal(format!("Path validation task failed: {e}")))?
 }
 
 /// Async wrapper for [`std::fs::canonicalize`].
-async fn canonicalize_async(path: PathBuf) -> Result<PathBuf, AppError> {
+pub(crate) async fn canonicalize_async(path: PathBuf) -> Result<PathBuf, AppError> {
     tokio::task::spawn_blocking(move || {
         std::fs::canonicalize(&path)
             .map_err(|e| AppError::Internal(format!("Cannot resolve path: {e}")))
@@ -1566,6 +1574,7 @@ mod tests {
             integrity_scan_interval_hours: 168,
             registration_enabled: true,
             secure_cookies: false,
+            trash_retention_days: 30,
         }
     }
 

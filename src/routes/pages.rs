@@ -22,7 +22,7 @@ use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
 use crate::services::{
     auth_service, chunk_service, fs_service, group_service, library_service, quota_service,
-    space_service,
+    space_service, trash_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -839,7 +839,16 @@ pub async fn delete_submit(
 
     let parent = parent_path(&form.path);
 
-    match fs_service::delete_entry(config.inner(), &lib.id, &form.path).await {
+    match trash_service::move_to_trash(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &form.path,
+        Some(&user.0.id),
+    )
+    .await
+    {
         Ok(_) => Ok(Flash::success(
             Redirect::to(uri!(files_page(
                 path = if parent.is_empty() {
@@ -848,7 +857,7 @@ pub async fn delete_submit(
                     Some(parent)
                 }
             ))),
-            "Deleted successfully.",
+            "Moved to trash.",
         )),
         Err(_) => Err(Flash::error(
             Redirect::to(uri!(files_page(
@@ -861,6 +870,28 @@ pub async fn delete_submit(
             "Delete failed.",
         )),
     }
+}
+
+/// Move each path to the trash. Returns the trash ids (for Undo) and
+/// user-facing errors for the paths that failed.
+async fn trash_paths(
+    pool: &DbPool,
+    config: &AppConfig,
+    kind: TargetKind,
+    target_id: &str,
+    paths: &[String],
+    user_id: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut ids = Vec::new();
+    let mut errors = Vec::new();
+    for path in paths {
+        match trash_service::move_to_trash(pool, config, kind, target_id, path, Some(user_id)).await
+        {
+            Ok(item) => ids.push(item.id),
+            Err(e) => errors.push(bulk_error(path, &e)),
+        }
+    }
+    (ids, errors)
 }
 
 /// POST /files/bulk-delete — XHR JSON endpoint for multi-file delete
@@ -887,18 +918,19 @@ pub async fn bulk_delete(
         );
     }
 
-    let mut deleted = 0u32;
-    let mut errors: Vec<String> = Vec::new();
-
-    for path in &data.paths {
-        match fs_service::delete_entry(config.inner(), &lib.id, path).await {
-            Ok(_) => deleted += 1,
-            Err(e) => errors.push(bulk_error(path, &e)),
-        }
-    }
+    let (trash_ids, errors) = trash_paths(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &data.paths,
+        &user.0.id,
+    )
+    .await;
 
     rocket::serde::json::Json(serde_json::json!({
-        "deleted": deleted,
+        "deleted": trash_ids.len(),
+        "trash_ids": trash_ids,
         "errors": errors,
     }))
 }
@@ -1902,7 +1934,7 @@ pub(crate) fn join_dir_and_name(dir: &str, name: &str) -> String {
     }
 }
 
-fn format_timestamp(ts: &str) -> String {
+pub(crate) fn format_timestamp(ts: &str) -> String {
     // ISO-8601 → "Mar 19, 2026 14:30" (UTC; the browser re-renders it in local time)
     let ts = ts.trim_end_matches('Z');
     match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
@@ -2832,9 +2864,10 @@ pub async fn space_move_entry_submit(
 /// POST /spaces/<space_id>/delete (file/dir delete within space)
 #[post("/spaces/<space_id>/delete", data = "<form>")]
 pub async fn space_delete_entry_submit(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     cookies: &CookieJar<'_>,
-    _writer: SessionSpaceWriter,
+    writer: SessionSpaceWriter,
     space_id: &str,
     form: Form<DeleteForm>,
 ) -> Result<Flash<Redirect>, Flash<Redirect>> {
@@ -2852,10 +2885,19 @@ pub async fn space_delete_entry_submit(
         )
     })?;
 
-    match fs_service::delete_space_entry(config.inner(), space_id, &form.path).await {
-        Ok(()) => Ok(Flash::success(
+    match trash_service::move_to_trash(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Space,
+        space_id,
+        &form.path,
+        Some(&writer.user.id),
+    )
+    .await
+    {
+        Ok(_) => Ok(Flash::success(
             Redirect::to(redir_url.clone()),
-            "Deleted successfully.",
+            "Moved to trash.",
         )),
         Err(_) => Err(Flash::error(Redirect::to(redir_url), "Delete failed.")),
     }
@@ -2864,9 +2906,10 @@ pub async fn space_delete_entry_submit(
 /// POST /spaces/<space_id>/bulk-delete — XHR JSON endpoint
 #[post("/spaces/<space_id>/bulk-delete", data = "<data>")]
 pub async fn space_bulk_delete(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     _csrf: CsrfXhr,
-    _writer: SessionSpaceWriter,
+    writer: SessionSpaceWriter,
     space_id: &str,
     data: rocket::serde::json::Json<BulkDeleteRequest>,
 ) -> rocket::serde::json::Json<serde_json::Value> {
@@ -2876,18 +2919,19 @@ pub async fn space_bulk_delete(
         );
     }
 
-    let mut deleted = 0u64;
-    let mut errors: Vec<String> = Vec::new();
-
-    for path in &data.paths {
-        match fs_service::delete_space_entry(config.inner(), space_id, path).await {
-            Ok(()) => deleted += 1,
-            Err(e) => errors.push(bulk_error(path, &e)),
-        }
-    }
+    let (trash_ids, errors) = trash_paths(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Space,
+        space_id,
+        &data.paths,
+        &writer.user.id,
+    )
+    .await;
 
     rocket::serde::json::Json(serde_json::json!({
-        "deleted": deleted,
+        "deleted": trash_ids.len(),
+        "trash_ids": trash_ids,
         "errors": errors,
     }))
 }

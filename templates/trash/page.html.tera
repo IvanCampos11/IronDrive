@@ -1,0 +1,80 @@
+{% extends "base" %}
+{# Trash for a personal library (/trash) or a space (/spaces/<id>/trash). #}
+{% block title %}Trash – {{ root_name }} – IronDrive{% endblock %}
+
+{% block content %}
+<div id="trash" class="flex flex-col min-h-full" data-base="{{ base_url }}">
+  <div class="sticky top-0 z-20 bg-surface rounded-t-2xl">
+    <div class="flex items-center gap-2 h-16 pl-3 pr-3 sm:pl-4">
+      {% if space_id %}
+      <a href="{{ back_url }}" class="icon-btn" title="Back to {{ root_name }}" aria-label="Back to {{ root_name }}"><span class="ms">arrow_back</span></a>
+      {% endif %}
+      <h1 class="flex-1 min-w-0 truncate px-2 text-[22px] leading-none">{% if space_id %}Trash · {{ root_name }}{% else %}Trash{% endif %}</h1>
+      {% if items | length > 0 %}
+      <button type="button" class="btn-text" data-trash="empty"><span class="ms">delete_forever</span>Empty trash</button>
+      {% endif %}
+    </div>
+
+    <div id="trash-selection" class="absolute inset-x-2 top-2 h-12 flex items-center gap-1 pl-1 pr-2 rounded-full bg-surface-2" hidden>
+      <button type="button" class="icon-btn" data-trash="clear" aria-label="Clear selection" title="Clear selection"><span class="ms">close</span></button>
+      <span id="trash-count" class="text-sm font-medium mr-3 whitespace-nowrap">0 selected</span>
+      <button type="button" class="btn-text btn-sm" data-trash="restore"><span class="ms">restore_from_trash</span>Restore</button>
+      <button type="button" class="btn-text btn-sm text-danger" data-trash="delete"><span class="ms">delete_forever</span>Delete forever</button>
+    </div>
+
+    {% if items | length > 0 %}
+    <p class="mx-4 mb-2 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-2 text-[13px] text-muted">
+      <span class="ms text-[18px]">info</span>
+      {% if retention_days > 0 %}Items in the trash are deleted forever after {{ retention_days }} days.{% else %}Items stay in the trash until you delete them.{% endif %}
+      They still count toward {% if space_id %}the space owner's{% else %}your{% endif %} storage ({{ total_size }}).
+    </p>
+    <div class="trash-head" role="row">
+      <span class="item-check"><input type="checkbox" class="check" id="trash-all" aria-label="Select all"></span>
+      <span>Name</span>
+      <span class="col-meta">Deleted from</span>
+      <span class="col-meta">Deleted</span>
+      <span class="col-meta">Size</span>
+      <span></span>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if items | length == 0 %}
+  <div class="flex-1 flex flex-col items-center justify-center text-center px-6 py-16">
+    <div class="w-28 h-28 rounded-full bg-surface-2 flex items-center justify-center mb-6">
+      <span class="ms text-muted" style="font-size:56px">delete</span>
+    </div>
+    <h2 class="text-lg text-fg">Trash is empty</h2>
+    <p class="mt-1.5 text-muted max-w-sm">Things you delete end up here{% if retention_days > 0 %} for {{ retention_days }} days{% endif %}, so you can put them back if you change your mind.</p>
+  </div>
+  {% else %}
+  <div role="grid" aria-label="Deleted items" aria-multiselectable="true">
+    {% for item in items %}
+    <div class="trash-row" role="row" aria-selected="false" data-id="{{ item.id }}" data-name="{{ item.name }}">
+      <span class="item-check"><input type="checkbox" class="check" aria-label="Select {{ item.name }}"></span>
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="ms kind-{{ item.icon }} {% if item.is_dir %}ms-fill{% endif %}" aria-hidden="true">{{ item.glyph }}</span>
+        <div class="min-w-0">
+          <p class="truncate" title="{{ item.original_path }}">{{ item.name }}</p>
+          <p class="text-xs text-muted truncate">
+            {% if item.is_dir %}{{ item.file_count }} {% if item.file_count == 1 %}file{% else %}files{% endif %} · {% endif %}{% if item.days_left is number %}{% if item.days_left == 0 %}Deleted forever today{% elif item.days_left == 1 %}1 day left{% else %}{{ item.days_left }} days left{% endif %}{% endif %}
+          </p>
+        </div>
+      </div>
+      <span class="col-meta truncate text-muted" title="{{ item.location }}">{{ item.location }}</span>
+      <span class="col-meta text-muted"><time datetime="{{ item.raw_deleted }}">{{ item.deleted }}</time></span>
+      <span class="col-meta text-muted">{{ item.size }}</span>
+      <div class="flex justify-end gap-1">
+        <button type="button" class="icon-btn-sm" data-row="restore" title="Restore" aria-label="Restore {{ item.name }}"><span class="ms">restore_from_trash</span></button>
+        <button type="button" class="icon-btn-sm" data-row="delete" title="Delete forever" aria-label="Delete {{ item.name }} forever"><span class="ms">delete_forever</span></button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/trash.js?v={{ asset_v() }}" defer></script>
+{% endblock %}

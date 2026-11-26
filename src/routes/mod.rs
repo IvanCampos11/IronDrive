@@ -5,6 +5,7 @@ pub mod integrity;
 pub mod library;
 pub mod pages;
 pub mod spaces;
+pub mod trash;
 pub mod ui;
 
 use rocket::fs::FileServer;
@@ -20,6 +21,7 @@ pub fn all_routes() -> Vec<Route> {
     routes.extend(spaces::routes());
     routes.extend(pages::routes());
     routes.extend(ui::routes());
+    routes.extend(trash::routes());
     routes
 }
 

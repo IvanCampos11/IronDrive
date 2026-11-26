@@ -19,7 +19,7 @@
   font-weight: 400;
   /* block: never flash ligature names like "folder" as text */
   font-display: block;
-  src: url("/static/fonts/material-symbols-rounded.woff2?v=2e730b4fa4") format("woff2");
+  src: url("/static/fonts/material-symbols-rounded.woff2?v=11a399e25e") format("woff2");
 }
 
 /* ---------------------------------------------------------------------------
@@ -429,6 +429,40 @@
       @apply hidden;
     }
     .listing[data-view="list"] .item-quick {
+      @apply hidden;
+    }
+  }
+
+  /* Trash list */
+  .trash-head,
+  .trash-row {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) minmax(0, 200px) 150px 96px 88px;
+    align-items: center;
+    @apply gap-x-0 pr-2;
+  }
+  .trash-head {
+    @apply h-11 text-[13px] font-medium text-muted border-b border-outline;
+  }
+  .trash-row {
+    @apply h-14 border-b border-outline/70 text-[14px] hover:bg-fg/[0.04];
+  }
+  .trash-row > .col-meta {
+    @apply text-[13px] pr-4;
+  }
+  .trash-row[aria-selected="true"] {
+    @apply bg-primary-container/70 border-transparent;
+  }
+  .trash-row.is-leaving {
+    @apply opacity-0 transition-opacity duration-200;
+  }
+  @media (max-width: 767px) {
+    .trash-head,
+    .trash-row {
+      grid-template-columns: 40px minmax(0, 1fr) 0 0 0 88px;
+    }
+    .trash-head > .col-meta,
+    .trash-row > .col-meta {
       @apply hidden;
     }
   }

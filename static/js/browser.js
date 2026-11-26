@@ -10,6 +10,8 @@
   if (!ID || !browser) return;
 
   var BASE = browser.getAttribute('data-base');
+  // Personal trash is /trash; a space's is /spaces/<id>/trash.
+  var TRASH_BASE = BASE === '/files' ? '/trash' : BASE + '/trash';
   var CAN_WRITE = browser.getAttribute('data-can-write') === 'true';
   var CHUNK_SIZE = positiveInt(browser.getAttribute('data-chunk-size-bytes'), 8 * 1024 * 1024);
   var MAX_PARALLEL_CHUNKS = Math.min(positiveInt(browser.getAttribute('data-max-parallel-chunks'), 4), 8);
@@ -451,26 +453,37 @@
     return ok;
   }
 
+  // Delete moves items to the trash, so there's no confirmation: the snackbar
+  // offers Undo instead.
   function deleteItems(list) {
-    if (!CAN_WRITE) return;
+    if (!CAN_WRITE || !list.length) return;
     var names = list.map(nameOf);
-    var hasFolder = list.some(isDir);
-    ID.confirm({
-      title: list.length === 1 ? 'Delete “' + names[0] + '”?' : 'Delete ' + plural(list.length, 'item') + '?',
-      message: (hasFolder ? 'Folders are deleted with everything inside them. ' : '') + 'This can’t be undone.',
-      confirmLabel: 'Delete',
-      danger: true,
-    }).then(function (yes) {
-      if (!yes) return;
-      return ID.request(BASE + '/bulk-delete', { method: 'POST', json: { paths: list.map(pathOf) } })
-        .then(function (res) {
-          var ok = reportBulk(res, 'deleted', list.length);
-          if (ok && !(res.errors || []).length) {
-            ID.toast(list.length === 1 ? '“' + names[0] + '” deleted' : plural(ok, 'item') + ' deleted');
-          }
-          refresh();
-        });
-    }).catch(function (err) { ID.toast(err.message, { error: true }); });
+    ID.request(BASE + '/bulk-delete', { method: 'POST', json: { paths: list.map(pathOf) } })
+      .then(function (res) {
+        var ok = reportBulk(res, 'deleted', list.length);
+        var ids = res.trash_ids || [];
+        if (ok && !(res.errors || []).length) {
+          ID.toast(list.length === 1 ? '“' + names[0] + '” moved to trash' : plural(ok, 'item') + ' moved to trash', {
+            timeout: 8000,
+            action: ids.length ? { label: 'Undo', onClick: function () { undoDelete(ids); } } : null,
+          });
+        }
+        refresh();
+        ID.refreshUsage();
+      })
+      .catch(function (err) { ID.toast(err.message, { error: true }); });
+  }
+
+  function undoDelete(ids) {
+    ID.request(TRASH_BASE + '/restore', { method: 'POST', json: { ids: ids } })
+      .then(function (res) {
+        var restored = (res.restored || []).map(function (r) { return r.path; });
+        if ((res.errors || []).length) ID.toast(res.errors[0], { error: true });
+        // Select what came back if it's in the folder being shown.
+        refresh(restored);
+        ID.refreshUsage();
+      })
+      .catch(function (err) { ID.toast(err.message, { error: true }); });
   }
 
   // New folder ---------------------------------------------------------------
@@ -864,7 +877,7 @@
       if (completedFolders.has(currentPath()) || Array.from(completedFolders).some(function (d) { return parentOf(d) === currentPath(); })) {
         refresh(Array.from(selection));
       }
-      if (!activeUploads && !queue.length) completedFolders.clear();
+      if (!activeUploads && !queue.length) { completedFolders.clear(); ID.refreshUsage(); }
     }, activeUploads || queue.length ? 1500 : 250);
   }
 

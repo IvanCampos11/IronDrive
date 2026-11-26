@@ -732,6 +732,7 @@ mod token_binding_tests {
             integrity_scan_interval_hours: 1,
             registration_enabled: true,
             secure_cookies: false,
+            trash_retention_days: 30,
         }
     }
 
