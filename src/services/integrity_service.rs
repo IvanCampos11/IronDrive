@@ -35,12 +35,12 @@ pub async fn record_event(
     details: Option<&str>,
     detected_by: &str,
 ) -> Result<IntegrityEvent, AppError> {
-    sqlx::query(
-        r#"
-        INSERT INTO integrity_events (id, target_type, target_id, file_path, event_type, details, detected_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (target_type, target_id, file_path, event_type) WHERE acknowledged = 0 DO NOTHING
-        "#,
+    // A plain INSERT, with a unique violation meaning "already open". (An
+    // ON CONFLICT clause would be matched against the connection's cached
+    // schema at prepare time, which can predate the index.)
+    let inserted = sqlx::query(
+        "INSERT INTO integrity_events (id, target_type, target_id, file_path, event_type, details, detected_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(Uuid::new_v4().to_string())
     .bind(target_type)
@@ -50,7 +50,12 @@ pub async fn record_event(
     .bind(details)
     .bind(detected_by)
     .execute(pool)
-    .await?;
+    .await;
+    match inserted {
+        Ok(_) => {}
+        Err(e) if crate::db::is_unique_violation(&e) => {}
+        Err(e) => return Err(e.into()),
+    }
 
     let event = sqlx::query_as::<_, IntegrityEvent>(
         "SELECT id, target_type, target_id, file_path, event_type, details, detected_by, acknowledged, created_at

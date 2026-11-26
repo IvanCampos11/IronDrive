@@ -17,10 +17,12 @@ use crate::models::group::Group;
 use crate::models::library::PersonalLibrary;
 use crate::models::user::User;
 use crate::services::crypto_service::MasterKey;
+use crate::services::fs_service::TargetKind;
 use crate::services::rate_limit::{ClientIp, RateLimiter};
 use crate::services::unlock_state::UnlockState;
 use crate::services::{
-    auth_service, chunk_service, fs_service, group_service, library_service, space_service,
+    auth_service, chunk_service, fs_service, group_service, library_service, quota_service,
+    space_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -604,7 +606,7 @@ pub async fn files_folders(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -974,9 +976,7 @@ pub async fn upload_file(
             )
         })?;
 
-    let max_bytes = config.max_upload_bytes;
-    let hard_cap: u64 = 50 * 1024 * 1024;
-    let allowed = std::cmp::min(max_bytes, hard_cap);
+    let allowed = config.direct_upload_limit();
     let stream = data.open(allowed.bytes()).into_bytes().await.map_err(|e| {
         (
             Status::InternalServerError,
@@ -988,19 +988,31 @@ pub async fn upload_file(
         return Err((
             Status::PayloadTooLarge,
             rocket::serde::json::Json(
-                serde_json::json!({"error": format!("File exceeds maximum size of {} bytes.", allowed)}),
+                serde_json::json!({"error": format!("File exceeds the {} limit for a single upload.", format_bytes(allowed))}),
             ),
         ));
     }
 
     let bytes = stream.into_inner();
 
-    match fs_service::upload_file(
+    quota_service::ensure_room(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Library,
+        &lib.id,
+        quota_service::estimated_disk_size(bytes.len() as u64, config.chunk_size_bytes),
+        Some(&path),
+        None,
+    )
+    .await
+    .map_err(json_error)?;
+
+    match fs_service::upload_file_owned(
         config.inner(),
         unlock_state.inner(),
         &lib.id,
         &path,
-        &bytes,
+        bytes,
         false,
     )
     .await
@@ -1015,7 +1027,7 @@ pub async fn upload_file(
         }))),
         Err(e) => Err((
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )),
     }
 }
@@ -1068,7 +1080,7 @@ pub async fn chunked_init_upload(
         );
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -1139,7 +1151,7 @@ pub async fn chunked_receive_chunk(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -1187,7 +1199,7 @@ pub async fn chunked_complete_upload(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -1234,7 +1246,7 @@ pub async fn chunked_cancel_upload(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -1277,7 +1289,7 @@ pub async fn chunked_init_download(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -1327,7 +1339,7 @@ pub async fn chunked_download_chunk(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -1395,6 +1407,15 @@ pub async fn download_file(
 // Sidebar usage snippet (HTMX partial)
 // ---------------------------------------------------------------------------
 
+/// Percentage of `quota` used, 0–100. A quota of 0 or less means unlimited.
+pub(crate) fn usage_percent(used: u64, quota: i64) -> u64 {
+    if quota > 0 {
+        (used as f64 / quota as f64 * 100.0).min(100.0) as u64
+    } else {
+        0
+    }
+}
+
 /// GET /usage/sidebar — tiny HTMX partial for the sidebar storage bar
 #[get("/usage/sidebar")]
 pub async fn usage_sidebar(
@@ -1402,30 +1423,17 @@ pub async fn usage_sidebar(
     config: &State<AppConfig>,
     user: SessionSetupComplete,
 ) -> Result<Template, Status> {
-    let lib = require_library(pool.inner(), &user.0.id)
+    let usage = quota_service::usage_for_user(pool.inner(), config.inner(), &user.0.id, None)
         .await
-        .map_err(|_| Status::NotFound)?;
-
-    let usage = fs_service::calculate_usage(config.inner(), &lib.id, "")
-        .await
-        .unwrap_or(fs_service::UsageResult {
-            disk_bytes: 0,
-            file_count: 0,
-            dir_count: 0,
-        });
-
-    let pct = if user.0.quota_bytes > 0 {
-        (usage.disk_bytes as f64 / user.0.quota_bytes as f64 * 100.0).min(100.0) as u64
-    } else {
-        0u64
-    };
+        .unwrap_or_default();
+    let used = usage.total();
 
     Ok(Template::render(
         "partials/sidebar_usage",
         context! {
-            disk_bytes_fmt: format_bytes(usage.disk_bytes),
-            quota_bytes_fmt: format_bytes(user.0.quota_bytes as u64),
-            usage_pct: pct,
+            disk_bytes_fmt: format_bytes(used),
+            quota_bytes_fmt: format_bytes(user.0.quota_bytes.max(0) as u64),
+            usage_pct: usage_percent(used, user.0.quota_bytes),
         },
     ))
 }
@@ -1447,13 +1455,37 @@ pub async fn usage_page(
         Err(_) => return Err(Redirect::to(uri!(setup_page))),
     };
 
-    let usage = fs_service::calculate_usage(config.inner(), &lib.id, "")
+    let counts = fs_service::calculate_usage(config.inner(), &lib.id, "")
         .await
         .unwrap_or(fs_service::UsageResult {
             disk_bytes: 0,
             file_count: 0,
             dir_count: 0,
         });
+    let usage = quota_service::usage_for_user(pool.inner(), config.inner(), &user.0.id, None)
+        .await
+        .unwrap_or_default();
+    let used = usage.total();
+    let quota = user.0.quota_bytes.max(0) as u64;
+
+    let breakdown: Vec<serde_json::Value> = [
+        ("My files", "folder", usage.files, "/files"),
+        ("Spaces you own", "workspaces", usage.spaces, "/spaces"),
+        ("Trash", "delete", usage.trash, "/trash"),
+        ("Uploads in progress", "upload", usage.pending, ""),
+    ]
+    .into_iter()
+    .filter(|(label, _, bytes, _)| *bytes > 0 || *label != "Uploads in progress")
+    .map(|(label, icon, bytes, href)| {
+        serde_json::json!({
+            "label": label,
+            "icon": icon,
+            "bytes": format_bytes(bytes),
+            "pct": usage_percent(bytes, used.max(1) as i64),
+            "href": href,
+        })
+    })
+    .collect();
 
     Ok(Template::render(
         "files/usage",
@@ -1461,13 +1493,15 @@ pub async fn usage_page(
             user: &user.0.username,
             current_path: "usage",
             csrf_token: ensure_csrf_token(cookies),
-            disk_bytes: usage.disk_bytes,
-            disk_bytes_fmt: format_bytes(usage.disk_bytes),
-            file_count: usage.file_count,
-            dir_count: usage.dir_count,
+            disk_bytes: used,
+            disk_bytes_fmt: format_bytes(used),
+            available_fmt: format_bytes(quota.saturating_sub(used)),
+            file_count: counts.file_count,
+            dir_count: counts.dir_count,
             quota_bytes: user.0.quota_bytes,
-            quota_bytes_fmt: format_bytes(user.0.quota_bytes as u64),
-            usage_pct: if user.0.quota_bytes > 0 { (usage.disk_bytes as f64 / user.0.quota_bytes as f64 * 100.0).min(100.0) as u64 } else { 0u64 },
+            quota_bytes_fmt: format_bytes(quota),
+            usage_pct: usage_percent(used, user.0.quota_bytes),
+            breakdown: breakdown,
         },
     ))
 }
@@ -2892,7 +2926,9 @@ pub async fn space_bulk_move(
 
 /// POST /spaces/<space_id>/upload — single-file upload
 #[post("/spaces/<space_id>/upload?<path>", data = "<data>")]
+#[allow(clippy::too_many_arguments)]
 pub async fn space_upload_file(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     _csrf: CsrfXhr,
@@ -2906,8 +2942,8 @@ pub async fn space_upload_file(
 > {
     use rocket::data::ToByteUnit;
 
-    let allowed = (config.max_upload_bytes + 1).bytes();
-    let stream = data.open(allowed).into_bytes().await.map_err(|e| {
+    let allowed = config.direct_upload_limit();
+    let stream = data.open(allowed.bytes()).into_bytes().await.map_err(|e| {
         (
             Status::InternalServerError,
             rocket::serde::json::Json(
@@ -2920,26 +2956,35 @@ pub async fn space_upload_file(
         return Err((
             Status::PayloadTooLarge,
             rocket::serde::json::Json(serde_json::json!({
-                "error": format!("Upload exceeds the maximum size of {} bytes.", config.max_upload_bytes)
+                "error": format!("File exceeds the {} limit for a single upload.", format_bytes(allowed))
             })),
         ));
     }
 
-    let result = fs_service::upload_space_file(
+    let bytes = stream.into_inner();
+
+    quota_service::ensure_room(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Space,
+        space_id,
+        quota_service::estimated_disk_size(bytes.len() as u64, config.chunk_size_bytes),
+        Some(&path),
+        None,
+    )
+    .await
+    .map_err(json_error)?;
+
+    let result = fs_service::upload_space_file_owned(
         config.inner(),
         unlock_state.inner(),
         space_id,
         &path,
-        &stream.into_inner(),
+        bytes,
         true,
     )
     .await
-    .map_err(|e| {
-        (
-            e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
+    .map_err(json_error)?;
 
     Ok(rocket::serde::json::Json(serde_json::json!({
         "success": true,
@@ -3028,7 +3073,7 @@ pub async fn space_chunked_init_upload(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -3095,7 +3140,7 @@ pub async fn space_chunked_receive_chunk(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -3135,7 +3180,7 @@ pub async fn space_chunked_complete_upload(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -3174,7 +3219,7 @@ pub async fn space_chunked_cancel_upload(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -3208,7 +3253,7 @@ pub async fn space_chunked_init_download(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 
@@ -3251,7 +3296,7 @@ pub async fn space_chunked_download_chunk(
     .map_err(|e| {
         (
             e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.to_string()})),
+            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
         )
     })?;
 

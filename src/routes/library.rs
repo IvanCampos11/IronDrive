@@ -12,9 +12,9 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
-use crate::services::chunk_service;
 use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::unlock_state::UnlockState;
+use crate::services::{chunk_service, quota_service};
 use crate::utils::format_bytes;
 
 // Request and response types.
@@ -326,11 +326,8 @@ pub async fn upload(
     let lib = require_library(pool.inner(), &user.0.id).await?;
     let write_verify = verify.unwrap_or(false);
 
-    // Read the body up to the configured max upload size, but enforce a smaller
-    // hard cap for this non-chunked endpoint to avoid excessive RAM usage.
-    let max_bytes = config.max_upload_bytes;
-    let hard_cap_bytes: u64 = 50 * 1024 * 1024; // 50 MiB hard in-memory limit.
-    let allowed_bytes = std::cmp::min(max_bytes.bytes(), hard_cap_bytes.bytes());
+    // This endpoint buffers the body in memory, so it has its own smaller cap.
+    let allowed_bytes = config.direct_upload_limit().bytes();
     let stream = data
         .open(allowed_bytes)
         .into_bytes()
@@ -346,12 +343,23 @@ pub async fn upload(
 
     let bytes = stream.into_inner();
 
-    let result = fs_service::upload_file(
+    quota_service::ensure_room(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Library,
+        &lib.id,
+        quota_service::estimated_disk_size(bytes.len() as u64, config.chunk_size_bytes),
+        Some(&path),
+        None,
+    )
+    .await?;
+
+    let result = fs_service::upload_file_owned(
         config.inner(),
         unlock_state.inner(),
         &lib.id,
         &path,
-        &bytes,
+        bytes,
         write_verify,
     )
     .await?;

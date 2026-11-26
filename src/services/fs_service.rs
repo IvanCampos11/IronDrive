@@ -256,6 +256,22 @@ pub struct ReadableFile {
     pub plaintext_size: u64,
 }
 
+/// On-disk size of the file at `user_path`, or `None` if there's no file there.
+pub async fn existing_file_size(
+    config: &AppConfig,
+    kind: TargetKind,
+    target_id: &str,
+    user_path: &str,
+) -> Option<u64> {
+    let root = match kind {
+        TargetKind::Library => library_root(config, target_id),
+        TargetKind::Space => space_root(config, target_id),
+    };
+    let path = safe_join_async(root, user_path.to_string()).await.ok()?;
+    let meta = fs::metadata(&path).await.ok()?;
+    meta.is_file().then_some(meta.len())
+}
+
 /// Resolve `user_path` inside a library or space to an existing file and its
 /// data key, without reading or decrypting the file body.
 pub async fn resolve_readable_file(
@@ -496,6 +512,7 @@ pub async fn create_directory(
 /// The `data` is the plaintext file content. It will be encrypted with
 /// the library's data key and written to disk, followed by an optional
 /// write-verify pass.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn upload_file(
     config: &AppConfig,
     unlock_state: &UnlockState,
@@ -1159,13 +1176,13 @@ pub async fn create_space_directory(
     Ok(user_path.to_string())
 }
 
-/// Upload (encrypt and write) a file into a space.
-pub async fn upload_space_file(
+/// Upload (encrypt and write) a file into a space, taking ownership of the buffer.
+pub async fn upload_space_file_owned(
     config: &AppConfig,
     unlock_state: &UnlockState,
     space_id: &str,
     user_path: &str,
-    data: &[u8],
+    data: Vec<u8>,
     write_verify: bool,
 ) -> Result<UploadResult, AppError> {
     if user_path.is_empty() {
@@ -1182,11 +1199,11 @@ pub async fn upload_space_file(
             .map_err(|e| AppError::Internal(format!("Failed to create parent directories: {e}")))?;
     }
 
-    let checksum = crypto_service::sha256_bytes(data);
+    let checksum = crypto_service::sha256_bytes(&data);
     let checksum_hex = hex::encode(checksum);
     let plaintext_size = data.len() as u64;
 
-    match encrypt_and_write_file_owned(&data_key, data.to_vec(), &target, write_verify).await {
+    match encrypt_and_write_file_owned(&data_key, data, &target, write_verify).await {
         Ok(()) => {}
         Err(e) => {
             if let Ok(meta) = fs::metadata(&target).await {

@@ -29,6 +29,7 @@ use crate::routes::pages::{
 };
 use crate::services::fs_service::{self, TargetKind};
 use crate::services::integrity_service::{self, IntegrityEvent};
+use crate::services::quota_service;
 use crate::services::unlock_state::UnlockState;
 
 // ---------------------------------------------------------------------------
@@ -475,28 +476,16 @@ pub async fn admin_page(
             .fetch_all(pool)
             .await
             .map_err(|_| Status::InternalServerError)?;
-    let lib_by_user: HashMap<&str, &str> = libraries
-        .iter()
-        .map(|(l, u)| (u.as_str(), l.as_str()))
-        .collect();
-
     let users = User::list_all(pool)
         .await
         .map_err(|_| Status::InternalServerError)?;
     let mut rows = Vec::with_capacity(users.len());
     for u in &users {
-        let used = match lib_by_user.get(u.id.as_str()) {
-            Some(lib) => fs_service::calculate_usage(config, lib, "")
-                .await
-                .map(|r| r.disk_bytes)
-                .unwrap_or(0),
-            None => 0,
-        };
-        let pct = if u.quota_bytes > 0 {
-            ((used as f64 / u.quota_bytes as f64) * 100.0).min(100.0) as u64
-        } else {
-            0
-        };
+        let used = quota_service::usage_for_user(pool, config, &u.id, None)
+            .await
+            .map(|usage| usage.total())
+            .unwrap_or(0);
+        let pct = crate::routes::pages::usage_percent(used, u.quota_bytes);
         rows.push(json!({
             "id": u.id,
             "username": u.username,

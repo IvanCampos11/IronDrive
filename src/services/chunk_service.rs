@@ -12,9 +12,9 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::errors::AppError;
-use crate::services::crypto_service;
 use crate::services::fs_service::{self, TargetKind, UploadResult};
 use crate::services::unlock_state::UnlockState;
+use crate::services::{crypto_service, quota_service};
 use crate::utils::format_bytes;
 
 const DOWNLOAD_TOKEN_VERSION: &str = "v1";
@@ -338,6 +338,21 @@ pub async fn init_upload(
         )));
     }
 
+    // Reserve room up front: in-progress uploads count toward the quota, so
+    // several parallel uploads can't jointly overshoot it.
+    let kind = TargetKind::parse(&params.target_type)
+        .ok_or_else(|| AppError::Validation("Unknown upload target.".into()))?;
+    quota_service::ensure_room(
+        pool,
+        config,
+        kind,
+        &params.target_id,
+        quota_service::estimated_disk_size(params.total_bytes, config.chunk_size_bytes),
+        Some(&params.target_path),
+        None,
+    )
+    .await?;
+
     let upload_id = Uuid::new_v4().to_string();
     let expires_at = Utc::now() + Duration::hours(config.chunk_upload_expiry_hours as i64);
     let expires_at_str = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -501,6 +516,21 @@ pub async fn complete_upload(
             return Err(AppError::Validation(format!("Missing chunk {}.", idx)));
         }
     }
+
+    // Space was reserved at init; check again in case the quota was lowered
+    // or other writes landed since (this upload's own reservation excluded).
+    let kind = TargetKind::parse(target_type)
+        .ok_or_else(|| AppError::Validation("Unknown upload target.".into()))?;
+    quota_service::ensure_room(
+        pool,
+        config,
+        kind,
+        target_id,
+        quota_service::estimated_disk_size(total_bytes, config.chunk_size_bytes),
+        Some(&row.target_path),
+        Some(upload_id),
+    )
+    .await?;
 
     // Streaming encrypt: reads each chunk file, encrypts segment-by-segment,
     // and writes the STREAM format. RAM stays bounded to one chunk.

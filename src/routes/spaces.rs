@@ -15,7 +15,8 @@ use crate::errors::AppError;
 use crate::guards::setup_guard::SetupComplete;
 use crate::guards::space_guard::{SpaceAdmin, SpaceReader, SpaceWriter};
 use crate::services::crypto_service::MasterKey;
-use crate::services::fs_service::{self, FsEntry};
+use crate::services::fs_service::{self, FsEntry, TargetKind};
+use crate::services::quota_service;
 use crate::services::space_service;
 use crate::services::unlock_state::UnlockState;
 use crate::utils::format_bytes;
@@ -518,7 +519,9 @@ pub async fn mkdir(
 
 /// POST /api/v1/spaces/<_id>/files/upload?path=<path>&verify=<bool>
 #[post("/api/v1/spaces/<_id>/files/upload?<path>&<verify>", data = "<data>")]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     _id: &str,
@@ -529,9 +532,7 @@ pub async fn upload(
 ) -> Result<Json<UploadResponse>, AppError> {
     let write_verify = verify.unwrap_or(false);
 
-    let max_bytes = config.max_upload_bytes;
-    let hard_cap_bytes: u64 = 50 * 1024 * 1024;
-    let allowed_bytes = std::cmp::min(max_bytes.bytes(), hard_cap_bytes.bytes());
+    let allowed_bytes = config.direct_upload_limit().bytes();
     let stream = data
         .open(allowed_bytes)
         .into_bytes()
@@ -546,13 +547,25 @@ pub async fn upload(
     }
 
     let bytes = stream.into_inner();
+    let space_id = &writer.space.space.id;
 
-    let result = fs_service::upload_space_file(
+    quota_service::ensure_room(
+        pool.inner(),
+        config.inner(),
+        TargetKind::Space,
+        space_id,
+        quota_service::estimated_disk_size(bytes.len() as u64, config.chunk_size_bytes),
+        Some(&path),
+        None,
+    )
+    .await?;
+
+    let result = fs_service::upload_space_file_owned(
         config.inner(),
         unlock_state.inner(),
-        &writer.space.space.id,
+        space_id,
         &path,
-        &bytes,
+        bytes,
         write_verify,
     )
     .await?;

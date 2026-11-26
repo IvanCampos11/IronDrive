@@ -1,7 +1,7 @@
 <a href="/usage" class="block group" title="Storage details">
   <div class="flex items-center gap-2 mb-2 text-muted group-hover:text-fg">
     <span class="ms">cloud</span>
-    <span class="text-[13px]">Storage{% if usage_pct >= 90 %} · almost full{% endif %}</span>
+    <span class="text-[13px]">Storage{% if usage_pct >= 100 %} · full{% elif usage_pct >= 90 %} · almost full{% endif %}</span>
   </div>
   <div class="progress"><span class="{% if usage_pct >= 90 %}!bg-danger{% elif usage_pct >= 75 %}!bg-warning{% endif %}" style="width: {{ usage_pct }}%"></span></div>
   <p class="mt-2 text-xs text-muted">{{ disk_bytes_fmt }} of {{ quota_bytes_fmt }} used</p>

@@ -22,8 +22,9 @@ pub enum AppError {
     #[error("conflict: {0}")]
     Conflict(String),
 
-    #[error("quota exceeded")]
-    QuotaExceeded,
+    /// Not enough storage left for a write. Sizes are on-disk bytes.
+    #[error("quota exceeded: need {needed} bytes, {available} available")]
+    QuotaExceeded { needed: u64, available: u64 },
 
     #[error("registration closed")]
     RegistrationClosed,
@@ -72,7 +73,7 @@ impl AppError {
             AppError::Unauthorized => Status::Unauthorized,
             AppError::Forbidden => Status::Forbidden,
             AppError::Conflict(_) => Status::Conflict,
-            AppError::QuotaExceeded => Status::PayloadTooLarge,
+            AppError::QuotaExceeded { .. } => Status::InsufficientStorage,
             AppError::RegistrationClosed => Status::Forbidden,
             AppError::RateLimited => Status::TooManyRequests,
             AppError::Locked => Status::Locked,
@@ -93,7 +94,17 @@ impl AppError {
             AppError::Unauthorized => "Authentication required.".into(),
             AppError::Forbidden => "You do not have permission to perform this action.".into(),
             AppError::Conflict(msg) => msg.clone(),
-            AppError::QuotaExceeded => "Storage quota exceeded.".into(),
+            AppError::QuotaExceeded { needed, available } => {
+                if *available == 0 {
+                    "Your storage is full. Delete files or empty the trash to make room.".into()
+                } else {
+                    format!(
+                        "Not enough storage: this needs {} but only {} is left.",
+                        crate::routes::pages::format_bytes(*needed),
+                        crate::routes::pages::format_bytes(*available)
+                    )
+                }
+            }
             AppError::RegistrationClosed => "Registration is disabled on this server.".into(),
             AppError::RateLimited => "Too many attempts. Please wait and try again later.".into(),
             AppError::Locked => "Library or space is locked. Unlock it first.".into(),

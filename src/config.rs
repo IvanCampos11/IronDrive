@@ -97,6 +97,14 @@ impl AppConfig {
         format!("sqlite:{}/irondrive.db?mode=rwc", self.db_dir)
     }
 
+    /// Largest body accepted by the single-request upload endpoints. Those
+    /// buffer the file in memory, so they're capped well below
+    /// `max_upload_bytes`; anything bigger must use chunked upload.
+    pub fn direct_upload_limit(&self) -> u64 {
+        const DIRECT_UPLOAD_CAP: u64 = 50 * 1024 * 1024;
+        self.max_upload_bytes.min(DIRECT_UPLOAD_CAP)
+    }
+
     /// Derive a 32-byte subkey for one purpose from `IRONDRIVE_SECRET_KEY`
     /// (HKDF-SHA256). Each purpose gets an independent key, so e.g. a leaked
     /// cookie secret reveals nothing about the master-key wrapping key.
