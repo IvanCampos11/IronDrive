@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod download;
 pub mod groups;
 pub mod health;
 pub mod integrity;
@@ -22,6 +23,7 @@ pub fn all_routes() -> Vec<Route> {
     routes.extend(pages::routes());
     routes.extend(ui::routes());
     routes.extend(trash::routes());
+    routes.extend(download::routes());
     routes
 }
 

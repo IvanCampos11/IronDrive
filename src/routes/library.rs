@@ -12,6 +12,7 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::SetupComplete;
 use crate::models::library::PersonalLibrary;
+use crate::routes::download::{stream_file, RangeHeader, StreamedDownload};
 use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::unlock_state::UnlockState;
 use crate::services::{chunk_service, quota_service, trash_service};
@@ -180,33 +181,6 @@ impl<'r> Responder<'r, 'static> for FileChunkDownload {
 /// an opaque origin with no scripts, so it can't touch the app's cookies or DOM.
 pub const DOWNLOAD_CSP: &str = "sandbox; default-src 'none'";
 
-/// Custom responder for file downloads. Sends the decrypted body with
-/// `X-IronDrive-Integrity` (plaintext SHA-256, computed on the fly).
-pub struct FileDownload {
-    pub data: Vec<u8>,
-    pub filename: String,
-    pub content_type: ContentType,
-    /// Plaintext SHA-256 hex digest for the `X-IronDrive-Integrity` header.
-    pub checksum_sha256: String,
-}
-
-impl<'r> Responder<'r, 'static> for FileDownload {
-    fn respond_to(self, _request: &'r Request<'_>) -> response::Result<'static> {
-        let len = self.data.len();
-
-        Response::build()
-            .header(self.content_type)
-            .header(Header::new("X-IronDrive-Integrity", self.checksum_sha256))
-            .header(Header::new(
-                "Content-Disposition",
-                content_disposition_attachment(&self.filename),
-            ))
-            .header(Header::new("Content-Security-Policy", DOWNLOAD_CSP))
-            .sized_body(len, std::io::Cursor::new(self.data))
-            .ok()
-    }
-}
-
 /// Build an RFC 6266 `attachment` header value: a plain-ASCII `filename`
 /// fallback plus an RFC 5987 `filename*` with the exact UTF-8 name. Control
 /// characters, quotes and backslashes never reach the header verbatim.
@@ -241,20 +215,6 @@ async fn require_library(pool: &DbPool, user_id: &str) -> Result<PersonalLibrary
     PersonalLibrary::find_by_user(pool, user_id)
         .await?
         .ok_or(AppError::NotFound)
-}
-
-/// Parse a MIME string into a Rocket `ContentType`, falling back to
-/// `application/octet-stream`.
-fn parse_content_type(mime: Option<&str>) -> ContentType {
-    mime.and_then(|m| {
-        let parts: Vec<&str> = m.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            Some(ContentType::new(parts[0].to_string(), parts[1].to_string()))
-        } else {
-            None
-        }
-    })
-    .unwrap_or(ContentType::Binary)
 }
 
 // Routes.
@@ -380,30 +340,28 @@ pub async fn upload(
 
 /// GET /api/v1/library/download?path=<path>
 ///
-/// Download a file from the user's personal library. Returns the decrypted
-/// file content with an `X-IronDrive-Integrity` header containing the
-/// SHA-256 hex digest of the plaintext.
+/// Download a file from the user's personal library. The decrypted content
+/// is streamed; `Range` requests are supported for resuming and seeking.
 #[get("/api/v1/library/download?<path>")]
 pub async fn download(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     user: SetupComplete,
+    range: RangeHeader,
     path: String,
-) -> Result<FileDownload, AppError> {
+) -> Result<StreamedDownload, AppError> {
     let lib = require_library(pool.inner(), &user.0.id).await?;
-
-    let result =
-        fs_service::download_file(config.inner(), unlock_state.inner(), &lib.id, &path).await?;
-
-    let content_type = parse_content_type(result.mime_type.as_deref());
-
-    Ok(FileDownload {
-        data: result.data,
-        filename: result.filename,
-        content_type,
-        checksum_sha256: result.checksum_sha256,
-    })
+    stream_file(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &path,
+        &range,
+    )
+    .await
 }
 
 /// DELETE /api/v1/library/delete?path=<path>

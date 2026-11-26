@@ -67,6 +67,7 @@ pub struct UploadResult {
 
 /// Result of [`download_file`].
 #[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct DownloadResult {
     /// Decrypted plaintext bytes.
     pub data: Vec<u8>,
@@ -715,9 +716,10 @@ pub async fn upload_space_file_streaming(
     })
 }
 
-/// Download (read and decrypt) a file from a library.
-///
-/// Returns the decrypted plaintext along with integrity metadata.
+/// Download (read and decrypt) a whole file from a library into memory.
+/// Request handlers stream instead (see `routes::download`); this is kept
+/// for tests that check round trips.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn download_file(
     config: &AppConfig,
     unlock_state: &UnlockState,
@@ -1240,53 +1242,6 @@ pub async fn upload_space_file_owned(
         disk_size: disk_meta.len(),
         checksum_sha256: checksum_hex,
         mime_type: mime_from_filename(&filename),
-    })
-}
-
-/// Download (read and decrypt) a file from a space.
-pub async fn download_space_file(
-    config: &AppConfig,
-    unlock_state: &UnlockState,
-    space_id: &str,
-    user_path: &str,
-) -> Result<DownloadResult, AppError> {
-    if user_path.is_empty() {
-        return Err(AppError::Validation("File path must not be empty.".into()));
-    }
-
-    let data_key = require_space_key(unlock_state, space_id)?;
-    let root = space_root(config, space_id);
-    let target = safe_join_async(root, user_path.to_string()).await?;
-
-    let meta = fs::metadata(&target).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::NotFound
-        } else {
-            AppError::Internal(format!("Cannot read file metadata: {e}"))
-        }
-    })?;
-
-    if meta.is_dir() {
-        return Err(AppError::Validation(
-            "The specified path is a directory, not a file.".into(),
-        ));
-    }
-
-    let plaintext = read_and_decrypt_file(&data_key, &target).await?;
-
-    let checksum = crypto_service::sha256_bytes(&plaintext);
-    let checksum_hex = hex::encode(checksum);
-
-    let filename = target
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    Ok(DownloadResult {
-        data: plaintext,
-        checksum_sha256: checksum_hex,
-        mime_type: mime_from_filename(&filename),
-        filename,
     })
 }
 

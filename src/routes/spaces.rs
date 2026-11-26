@@ -1,10 +1,7 @@
 //! API routes for spaces, access control, and space file operations.
 
 use rocket::data::{Data, ToByteUnit};
-use rocket::http::{ContentType, Header};
-use rocket::response::{self, Responder, Response};
 use rocket::serde::json::Json;
-use rocket::Request;
 use rocket::Route;
 use rocket::State;
 use serde::{Deserialize, Serialize};
@@ -14,6 +11,7 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::guards::setup_guard::SetupComplete;
 use crate::guards::space_guard::{SpaceAdmin, SpaceReader, SpaceWriter};
+use crate::routes::download::{stream_file, RangeHeader, StreamedDownload};
 use crate::services::crypto_service::MasterKey;
 use crate::services::fs_service::{self, FsEntry, TargetKind};
 use crate::services::space_service;
@@ -171,46 +169,7 @@ pub struct UsageResponse {
     pub dir_count: u64,
 }
 
-/// Custom responder for file downloads from a space.
-pub struct FileDownload {
-    pub data: Vec<u8>,
-    pub filename: String,
-    pub content_type: ContentType,
-    pub checksum_sha256: String,
-}
-
-impl<'r> Responder<'r, 'static> for FileDownload {
-    fn respond_to(self, _request: &'r Request<'_>) -> response::Result<'static> {
-        let len = self.data.len();
-
-        Response::build()
-            .header(self.content_type)
-            .header(Header::new("X-IronDrive-Integrity", self.checksum_sha256))
-            .header(Header::new(
-                "Content-Disposition",
-                format!(
-                    "attachment; filename=\"{}\"",
-                    self.filename.replace('\"', "\\\"")
-                ),
-            ))
-            .sized_body(len, std::io::Cursor::new(self.data))
-            .ok()
-    }
-}
-
 // Helpers.
-
-fn parse_content_type(mime: Option<&str>) -> ContentType {
-    mime.and_then(|m| {
-        let parts: Vec<&str> = m.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            Some(ContentType::new(parts[0].to_string(), parts[1].to_string()))
-        } else {
-            None
-        }
-    })
-    .unwrap_or(ContentType::Binary)
-}
 
 fn space_response(s: &crate::models::space::SpaceWithMeta) -> SpaceResponse {
     SpaceResponse {
@@ -585,30 +544,28 @@ pub async fn upload(
 }
 
 /// GET /api/v1/spaces/<_id>/files/download?path=<path>
+///
+/// Streams the decrypted file. Supports `Range` requests.
 #[get("/api/v1/spaces/<_id>/files/download?<path>")]
 pub async fn download(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     _id: &str,
     reader: SpaceReader,
+    range: RangeHeader,
     path: String,
-) -> Result<FileDownload, AppError> {
-    let result = fs_service::download_space_file(
+) -> Result<StreamedDownload, AppError> {
+    stream_file(
+        pool.inner(),
         config.inner(),
         unlock_state.inner(),
+        TargetKind::Space,
         &reader.space.space.id,
         &path,
+        &range,
     )
-    .await?;
-
-    let content_type = parse_content_type(result.mime_type.as_deref());
-
-    Ok(FileDownload {
-        data: result.data,
-        filename: result.filename,
-        content_type,
-        checksum_sha256: result.checksum_sha256,
-    })
+    .await
 }
 
 /// DELETE /api/v1/spaces/<_id>/files/delete?path=<path>

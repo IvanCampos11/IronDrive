@@ -408,3 +408,161 @@ async fn api_delete_uses_trash_unless_permanent() {
     assert_eq!(r.status(), Status::Ok);
     assert_eq!(download(&client, "/files", "keep.txt").await.1, b"1");
 }
+
+// ---------------------------------------------------------------------------
+// Streaming downloads and zips
+// ---------------------------------------------------------------------------
+
+/// Read a zip into (name, contents) pairs, checking each entry's CRC.
+#[allow(deprecated)] // the simple in-memory reader is fine for tests
+async fn unzip(bytes: Vec<u8>) -> Vec<(String, Vec<u8>)> {
+    let reader = async_zip::base::read::mem::ZipFileReader::new(bytes)
+        .await
+        .expect("valid zip");
+    let mut out = Vec::new();
+    for i in 0..reader.file().entries().len() {
+        let name = reader.file().entries()[i]
+            .filename()
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut data = Vec::new();
+        reader
+            .reader_with_entry(i)
+            .await
+            .unwrap()
+            .read_to_end_checked(&mut data)
+            .await
+            .unwrap();
+        out.push((name, data));
+    }
+    out
+}
+
+#[tokio::test]
+async fn file_downloads_support_ranges() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let csrf = signed_in_with_library(&client).await;
+    upload_bytes(&client, &csrf, "/files", "abc.txt", b"0123456789").await;
+
+    let r = client.get("/files/download?path=abc.txt").dispatch().await;
+    assert_eq!(r.status(), Status::Ok);
+    assert_eq!(r.headers().get_one("Accept-Ranges"), Some("bytes"));
+    assert_eq!(r.headers().get_one("Content-Length"), Some("10"));
+    assert_eq!(r.into_bytes().await.unwrap(), b"0123456789");
+
+    let r = client
+        .get("/files/download?path=abc.txt")
+        .header(Header::new("Range", "bytes=3-5"))
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::PartialContent);
+    assert_eq!(r.headers().get_one("Content-Range"), Some("bytes 3-5/10"));
+    assert_eq!(r.into_bytes().await.unwrap(), b"345");
+
+    let r = client
+        .get("/files/download?path=abc.txt")
+        .header(Header::new("Range", "bytes=20-"))
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::RangeNotSatisfiable);
+    assert_eq!(r.headers().get_one("Content-Range"), Some("bytes */10"));
+}
+
+#[tokio::test]
+async fn folders_download_as_zip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let csrf = signed_in_with_library(&client).await;
+    for (parent, name) in [("", "Docs"), ("Docs", "sub"), ("Docs", "empty")] {
+        let (status, _) = xhr_json(
+            &client,
+            &csrf,
+            "/files/api/mkdir",
+            json!({ "path": parent, "name": name }),
+        )
+        .await;
+        assert_eq!(status, Status::Ok);
+    }
+    upload_bytes(&client, &csrf, "/files", "Docs/a.txt", b"alpha").await;
+    upload_bytes(&client, &csrf, "/files", "Docs/sub/b.txt", b"bravo").await;
+    upload_bytes(&client, &csrf, "/files", "c.txt", b"charlie").await;
+
+    let r = client.get("/files/zip?path=Docs").dispatch().await;
+    assert_eq!(r.status(), Status::Ok);
+    assert!(r
+        .headers()
+        .get_one("Content-Disposition")
+        .unwrap()
+        .contains("Docs.zip"));
+    let entries = unzip(r.into_bytes().await.unwrap()).await;
+    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Docs/",
+            "Docs/a.txt",
+            "Docs/empty/",
+            "Docs/sub/",
+            "Docs/sub/b.txt"
+        ]
+    );
+    assert_eq!(entries[1].1, b"alpha");
+    assert_eq!(entries[4].1, b"bravo");
+
+    // Several items at once, named after their folder.
+    let r = client
+        .get("/files/zip?path=Docs/a.txt&path=Docs/sub")
+        .dispatch()
+        .await;
+    assert!(r
+        .headers()
+        .get_one("Content-Disposition")
+        .unwrap()
+        .contains("Docs.zip"));
+    let names: Vec<String> = unzip(r.into_bytes().await.unwrap())
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(names, ["a.txt", "sub/", "sub/b.txt"]);
+
+    // Hidden paths (the trash) can't be zipped.
+    let r = client.get("/files/zip?path=.trash").dispatch().await;
+    assert_ne!(r.status(), Status::Ok);
+}
+
+#[tokio::test]
+async fn zip_notes_damaged_files_and_records_an_alert() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let csrf = signed_in_with_library(&client).await;
+    upload_bytes(&client, &csrf, "/files", "good.txt", b"fine").await;
+    upload_bytes(&client, &csrf, "/files", "bad.txt", &[7u8; 4096]).await;
+    super::page_routes::corrupt_library_file(&tmp, "bad.txt");
+
+    let r = client
+        .get("/files/zip?path=good.txt&path=bad.txt")
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::Ok);
+    let entries = unzip(r.into_bytes().await.unwrap()).await;
+    let good = entries.iter().find(|(n, _)| n == "good.txt").unwrap();
+    assert_eq!(good.1, b"fine");
+    let note = entries
+        .iter()
+        .find(|(n, _)| n == crate::routes::download::ZIP_ERRORS_NOTE)
+        .expect("archive explains what's missing");
+    assert!(String::from_utf8_lossy(&note.1).contains("bad.txt"));
+
+    // ...and the bell now shows the damaged file.
+    let bell = client
+        .get("/notifications")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
+    assert!(bell.contains("bad.txt"), "{bell}");
+}

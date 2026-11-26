@@ -1288,151 +1288,34 @@ pub async fn chunked_cancel_upload(
     })))
 }
 
-/// GET /files/chunked/download/init?<path> — initialize chunked browser download.
-#[get("/files/chunked/download/init?<path>")]
-pub async fn chunked_init_download(
-    pool: &State<DbPool>,
-    config: &State<AppConfig>,
-    unlock_state: &State<UnlockState>,
-    user: SessionSetupComplete,
-    path: String,
-) -> Result<
-    rocket::serde::json::Json<serde_json::Value>,
-    (Status, rocket::serde::json::Json<serde_json::Value>),
-> {
-    let lib = require_library(pool.inner(), &user.0.id)
-        .await
-        .map_err(|_| {
-            (
-                Status::NotFound,
-                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
-            )
-        })?;
-
-    let result = chunk_service::init_download(
-        config.inner(),
-        unlock_state.inner(),
-        &user.0.id,
-        &lib.id,
-        fs_service::TargetKind::Library,
-        &path,
-    )
-    .await
-    .map_err(|e| {
-        (
-            e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
-        )
-    })?;
-
-    Ok(rocket::serde::json::Json(serde_json::json!({
-        "token": result.token,
-        "filename": result.filename,
-        "mime_type": result.mime_type,
-        "chunk_size_bytes": result.chunk_size_bytes,
-        "total_chunks": result.total_chunks,
-        "total_bytes": result.total_bytes,
-        "expires_at": result.expires_at,
-    })))
-}
-
-/// GET /files/chunked/download/chunk?<token>&<index> — stream one chunk for browser download.
-#[get("/files/chunked/download/chunk?<token>&<index>")]
-pub async fn chunked_download_chunk(
-    pool: &State<DbPool>,
-    config: &State<AppConfig>,
-    unlock_state: &State<UnlockState>,
-    user: SessionSetupComplete,
-    token: String,
-    index: u32,
-) -> Result<
-    crate::routes::library::FileChunkDownload,
-    (Status, rocket::serde::json::Json<serde_json::Value>),
-> {
-    let lib = require_library(pool.inner(), &user.0.id)
-        .await
-        .map_err(|_| {
-            (
-                Status::NotFound,
-                rocket::serde::json::Json(serde_json::json!({"error": "Library not found."})),
-            )
-        })?;
-
-    let result = chunk_service::serve_chunk(
-        config.inner(),
-        unlock_state.inner(),
-        &user.0.id,
-        fs_service::TargetKind::Library,
-        &lib.id,
-        &token,
-        index,
-    )
-    .await
-    .map_err(|e| {
-        (
-            e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
-        )
-    })?;
-
-    Ok(crate::routes::library::FileChunkDownload {
-        data: result.data,
-        checksum_sha256: result.checksum_sha256,
-        chunk_index: result.chunk_index,
-        total_chunks: result.total_chunks,
-        total_bytes: result.total_bytes,
-    })
-}
-
 /// GET /files/download?<path> — browser download
+/// Errors are plain statuses rather than redirects: the browser fetches this
+/// with `<a download>`, which reports a non-2xx response as a failed download
+/// (a redirect to an HTML page would be saved as the "file").
 #[get("/files/download?<path>")]
 pub async fn download_file(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     user: SessionSetupComplete,
+    range: crate::routes::download::RangeHeader,
     path: String,
-) -> Result<crate::routes::library::FileDownload, Flash<Redirect>> {
+) -> Result<crate::routes::download::StreamedDownload, (Status, String)> {
+    let fail = |e: AppError| (e.status(), e.client_message());
     let lib = require_library(pool.inner(), &user.0.id)
         .await
-        .map_err(|_| {
-            Flash::error(
-                Redirect::to(uri!(files_page(path = Option::<String>::None))),
-                "Library not found.",
-            )
-        })?;
-
-    let result = fs_service::download_file(config.inner(), unlock_state.inner(), &lib.id, &path)
-        .await
-        .map_err(|_| {
-            Flash::error(
-                Redirect::to(uri!(files_page(path = Option::<String>::None))),
-                "Download failed.",
-            )
-        })?;
-
-    let content_type = result
-        .mime_type
-        .as_deref()
-        .and_then(|m| {
-            let parts: Vec<&str> = m.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                Some(rocket::http::ContentType::new(
-                    parts[0].to_string(),
-                    parts[1].to_string(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(rocket::http::ContentType::Binary);
-
-    Ok(crate::routes::library::FileDownload {
-        data: result.data,
-        filename: result.filename,
-        content_type,
-        checksum_sha256: result.checksum_sha256,
-    })
+        .map_err(fail)?;
+    crate::routes::download::stream_file(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Library,
+        &lib.id,
+        &path,
+        &range,
+    )
+    .await
+    .map_err(fail)
 }
 
 // ---------------------------------------------------------------------------
@@ -3043,44 +2926,25 @@ pub async fn space_upload_file(
 /// GET /spaces/<space_id>/download?<path> — browser download
 #[get("/spaces/<space_id>/download?<path>")]
 pub async fn space_download_file(
+    pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
     _reader: SessionSpaceReader,
+    range: crate::routes::download::RangeHeader,
     space_id: &str,
     path: String,
-) -> Result<crate::routes::library::FileDownload, Flash<Redirect>> {
-    let result =
-        fs_service::download_space_file(config.inner(), unlock_state.inner(), space_id, &path)
-            .await
-            .map_err(|_| {
-                Flash::error(
-                    Redirect::to(format!("/spaces/{}", space_id)),
-                    "Download failed.",
-                )
-            })?;
-
-    let content_type = result
-        .mime_type
-        .as_deref()
-        .and_then(|m| {
-            let parts: Vec<&str> = m.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                Some(rocket::http::ContentType::new(
-                    parts[0].to_string(),
-                    parts[1].to_string(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(rocket::http::ContentType::Binary);
-
-    Ok(crate::routes::library::FileDownload {
-        data: result.data,
-        filename: result.filename,
-        content_type,
-        checksum_sha256: result.checksum_sha256,
-    })
+) -> Result<crate::routes::download::StreamedDownload, (Status, String)> {
+    crate::routes::download::stream_file(
+        pool.inner(),
+        config.inner(),
+        unlock_state.inner(),
+        TargetKind::Space,
+        space_id,
+        &path,
+        &range,
+    )
+    .await
+    .map_err(|e| (e.status(), e.client_message()))
 }
 
 // ---------------------------------------------------------------------------
@@ -3273,86 +3137,6 @@ pub async fn space_chunked_cancel_upload(
     })))
 }
 
-/// GET /spaces/<space_id>/chunked/download/init?<path> — initialize chunked download from space.
-#[get("/spaces/<space_id>/chunked/download/init?<path>")]
-pub async fn space_chunked_init_download(
-    config: &State<AppConfig>,
-    unlock_state: &State<UnlockState>,
-    reader: SessionSpaceReader,
-    space_id: &str,
-    path: String,
-) -> Result<
-    rocket::serde::json::Json<serde_json::Value>,
-    (Status, rocket::serde::json::Json<serde_json::Value>),
-> {
-    let result = chunk_service::init_download(
-        config.inner(),
-        unlock_state.inner(),
-        &reader.user.id,
-        space_id,
-        fs_service::TargetKind::Space,
-        &path,
-    )
-    .await
-    .map_err(|e| {
-        (
-            e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
-        )
-    })?;
-
-    Ok(rocket::serde::json::Json(serde_json::json!({
-        "token": result.token,
-        "filename": result.filename,
-        "mime_type": result.mime_type,
-        "chunk_size_bytes": result.chunk_size_bytes,
-        "total_chunks": result.total_chunks,
-        "total_bytes": result.total_bytes,
-        "expires_at": result.expires_at,
-    })))
-}
-
-/// GET /spaces/<space_id>/chunked/download/chunk?<token>&<index> — stream one chunk from space.
-#[get("/spaces/<space_id>/chunked/download/chunk?<token>&<index>")]
-pub async fn space_chunked_download_chunk(
-    config: &State<AppConfig>,
-    unlock_state: &State<UnlockState>,
-    reader: SessionSpaceReader,
-    space_id: &str,
-    token: String,
-    index: u32,
-) -> Result<
-    crate::routes::library::FileChunkDownload,
-    (Status, rocket::serde::json::Json<serde_json::Value>),
-> {
-    // `reader` has just re-checked access to `space_id`; serve_chunk rejects
-    // tokens minted for any other target.
-    let result = chunk_service::serve_chunk(
-        config.inner(),
-        unlock_state.inner(),
-        &reader.user.id,
-        fs_service::TargetKind::Space,
-        space_id,
-        &token,
-        index,
-    )
-    .await
-    .map_err(|e| {
-        (
-            e.status(),
-            rocket::serde::json::Json(serde_json::json!({"error": e.client_message()})),
-        )
-    })?;
-
-    Ok(crate::routes::library::FileChunkDownload {
-        data: result.data,
-        checksum_sha256: result.checksum_sha256,
-        chunk_index: result.chunk_index,
-        total_chunks: result.total_chunks,
-        total_bytes: result.total_bytes,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Route collection
 // ---------------------------------------------------------------------------
@@ -3383,8 +3167,6 @@ pub fn routes() -> Vec<Route> {
         chunked_receive_chunk,
         chunked_complete_upload,
         chunked_cancel_upload,
-        chunked_init_download,
-        chunked_download_chunk,
         download_file,
         usage_sidebar,
         usage_page,
@@ -3423,7 +3205,5 @@ pub fn routes() -> Vec<Route> {
         space_chunked_receive_chunk,
         space_chunked_complete_upload,
         space_chunked_cancel_upload,
-        space_chunked_init_download,
-        space_chunked_download_chunk,
     ]
 }
