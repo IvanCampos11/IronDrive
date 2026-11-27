@@ -1,0 +1,28 @@
+{% extends "auth/shell" %}
+{% block title %}Unlock – IronDrive{% endblock %}
+{% block card %}
+<h1 class="text-[28px] leading-9 text-fg">Your files are locked</h1>
+<p class="mt-2 mb-8 text-muted">
+  {% if separate %}Enter your encryption password to open your library and the spaces shared with you.
+  {% else %}Your keys aren't in the server's memory right now, either because you locked them or because the server restarted. Enter your password to open your files.{% endif %}
+</p>
+{% include "partials/form_flash" %}
+<form id="unlock-form" method="post" action="/unlock" class="space-y-5">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="next" value="{{ next }}">
+  <input type="text" name="username" value="{{ username }}" autocomplete="username" class="sr-only" tabindex="-1" aria-hidden="true" readonly>
+  <div>
+    <label for="password" class="field-label">{% if separate %}Encryption password{% else %}Password{% endif %}</label>
+    <input type="password" id="password" name="password" class="field" required autofocus autocomplete="current-password">
+  </div>
+</form>
+{# Sign out is its own form. The Unlock button belongs to the unlock form via
+   form="unlock-form", so Enter in the password field always unlocks. #}
+<div class="flex items-center justify-between pt-9">
+  <form method="post" action="/logout">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn-text -ml-3">Sign out</button>
+  </form>
+  <button type="submit" form="unlock-form" class="btn-filled px-6"><span class="ms">lock_open</span>Unlock</button>
+</div>
+{% endblock %}

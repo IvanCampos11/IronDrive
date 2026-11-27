@@ -2,24 +2,81 @@
 {% block title %}Set up – IronDrive{% endblock %}
 {% block card %}
 <h1 class="text-[28px] leading-9 text-fg">Welcome, {{ user }}</h1>
-<p class="mt-2 mb-8 text-muted">One step left: create your personal library.</p>
+<p class="mt-2 mb-6 text-muted">Choose how your files are protected. You can change this later in Settings.</p>
 {% include "partials/form_flash" %}
-<ul class="space-y-4 mb-8">
-  <li class="flex gap-4">
-    <span class="ms ms-lg text-primary">lock</span>
-    <div><p class="font-medium">Encrypted at rest</p><p class="text-muted mt-0.5">Every file is encrypted with AES-256-GCM using a key unique to your library.</p></div>
-  </li>
-  <li class="flex gap-4">
-    <span class="ms ms-lg text-primary">shield</span>
-    <div><p class="font-medium">Checked for corruption</p><p class="text-muted mt-0.5">Each file carries a checksum, and background scans flag damaged data.</p></div>
-  </li>
-  <li class="flex gap-4">
-    <span class="ms ms-lg text-primary">key</span>
-    <div><p class="font-medium">No passphrase to remember</p><p class="text-muted mt-0.5">The server manages the keys, so your files are always available when you sign in.</p></div>
-  </li>
-</ul>
-<form method="post" action="/setup" class="flex justify-end">
+<form method="post" action="/setup" class="space-y-6" data-conditional>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <button type="submit" class="btn-filled px-6">Create my library</button>
+
+  <fieldset class="space-y-2.5">
+    <legend class="sr-only">Protection</legend>
+    <label class="choice">
+      <input type="radio" name="tier" value="server" checked>
+      <span>
+        <span class="choice-title">Standard</span>
+        <span class="choice-text block">The server manages your keys. Nothing extra to remember, and your files are always available. Someone with full access to the server could read them.</span>
+      </span>
+    </label>
+    <label class="choice">
+      <input type="radio" name="tier" value="failsafe_user">
+      <span>
+        <span class="choice-title">Protected</span>
+        <span class="choice-text block">Your password locks your keys while you're signed out. The server keeps a recovery copy, so an admin can help if you forget it, and you'll be told when they do.</span>
+      </span>
+    </label>
+    <label class="choice">
+      <input type="radio" name="tier" value="pure_user">
+      <span>
+        <span class="choice-title">Maximum</span>
+        <span class="choice-text block">Only your password unlocks your keys. Nobody can recover them, admins included: if you forget it, your files are gone for good.</span>
+      </span>
+    </label>
+  </fieldset>
+
+  <div class="space-y-4" data-show-if="tier=failsafe_user,pure_user" hidden>
+    <fieldset class="space-y-2.5">
+      <legend class="field-label">Passwords</legend>
+      <label class="choice">
+        <input type="radio" name="password_mode" value="single" checked>
+        <span>
+          <span class="choice-title">One password</span>
+          <span class="choice-text block">Signing in unlocks your files.</span>
+        </span>
+      </label>
+      <label class="choice">
+        <input type="radio" name="password_mode" value="separate">
+        <span>
+          <span class="choice-title">Two passwords</span>
+          <span class="choice-text block">Sign in as usual, then unlock your files with a separate encryption password. A stolen login alone can't open them.</span>
+        </span>
+      </label>
+    </fieldset>
+
+    <div>
+      <label for="password" class="field-label">Your login password</label>
+      <input type="password" id="password" name="password" class="field" required autocomplete="current-password">
+      <p class="field-hint">To confirm it's you.</p>
+    </div>
+
+    <div class="space-y-4" data-show-if="password_mode=separate" hidden>
+      <div>
+        <label for="encryption_password" class="field-label">Encryption password</label>
+        <input type="password" id="encryption_password" name="encryption_password" class="field" required minlength="8" autocomplete="new-password">
+        <p class="field-hint">At least 8 characters, and different from your login password.</p>
+      </div>
+      <div>
+        <label for="encryption_password_confirm" class="field-label">Repeat encryption password</label>
+        <input type="password" id="encryption_password_confirm" name="encryption_password_confirm" class="field" required minlength="8" data-match="encryption_password" autocomplete="new-password">
+      </div>
+    </div>
+  </div>
+
+  <p class="flex gap-2 text-xs text-subtle">
+    <span class="ms text-[16px]">info</span>
+    <span>Every file is encrypted with AES-256-GCM and checked for damage. Encryption happens on the server, so the protection applies to stored files: while you're signed out, a locked library can't be read.</span>
+  </p>
+
+  <div class="flex justify-end">
+    <button type="submit" class="btn-filled px-6">Create my library</button>
+  </div>
 </form>
 {% endblock %}

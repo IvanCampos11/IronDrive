@@ -6,6 +6,7 @@ pub mod health;
 pub mod integrity;
 pub mod library;
 pub mod pages;
+pub mod security_pages;
 pub mod spaces;
 pub mod trash;
 pub mod ui;
@@ -26,6 +27,7 @@ pub fn all_routes() -> Vec<Route> {
     routes.extend(trash::routes());
     routes.extend(download::routes());
     routes.extend(encryption::routes());
+    routes.extend(security_pages::routes());
     routes
 }
 

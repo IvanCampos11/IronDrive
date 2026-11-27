@@ -17,6 +17,13 @@ IronDrive is a Rust self-hosted file storage app with encrypted-at-rest file dat
   - One library per user.
   - Browse, upload, download, rename/move, mkdir, delete.
   - Chunked upload/download (API and page flows).
+- Encryption tiers
+  - Per-account key pairs; tiers `server`, `failsafe_user`, `pure_user`, with
+    one password (login unlocks) or two (separate encryption password).
+  - Space protection `server`, `members` (keys sealed to each member) or
+    `password` (every member types it).
+  - Admin-issued one-time reset codes; failsafe key recovery is logged and
+    shown to the account owner.
 - Spaces
   - Space CRUD.
   - User/group access grants with read/write/admin permissions.
@@ -46,9 +53,11 @@ IronDrive is a Rust self-hosted file storage app with encrypted-at-rest file dat
 
 ## 3) What Is Not Implemented Yet
 
-- User-managed encryption tiers are not active in runtime flows.
-  - `failsafe_user` and `pure_user` exist in schema/model shape but setup currently creates server mode only.
-  - No active lock/unlock passphrase flow in API or pages.
+- Encryption happens on the server; there is no browser-side (end-to-end)
+  encryption. Locked keys protect data at rest, not while it is being used.
+- Share links for people without an account.
+- Changing a tier or space protection re-wraps keys but does not re-encrypt
+  files with a new data key.
 - Group-owned spaces have no quota (they aren't charged to any user).
 
 ## 4) Architecture Principles
@@ -89,7 +98,9 @@ On startup, the server:
 - Space access grants.
 - Chunked upload sessions.
 - Integrity events.
-- Recovery audit schema (reserved for future tier/recovery flows).
+- Account key pairs (`user_keys`), space key envelopes
+  (`space_key_envelopes`), reset codes (`password_resets`).
+- Recovery audit log: every redeemed reset, append-only.
 - Server config key-value table (master key envelope).
 
 ### Filesystem (`data/`)
@@ -105,10 +116,42 @@ Disk files are encrypted blobs. Directory and file names are currently plaintext
 
 ## 7) Encryption and Integrity
 
-### Active mode
+### Keys and tiers
 
-- Server-managed encryption mode is the active mode.
-- Per-library/space data keys are wrapped by a server master key.
+Every library and space has its own AES-256 data key. How that key is
+protected decides who can open it:
+
+| Account tier    | Private key wrapped by             | Locked when             |
+|-----------------|------------------------------------|-------------------------|
+| `server`        | master key                         | never                   |
+| `failsafe_user` | password, plus a master-key copy used only by audited recovery | no live session |
+| `pure_user`     | password only                      | no live session         |
+
+- Each account has an X25519 key pair. A `pure_user`/`failsafe_user` library
+  key is sealed to the owner's public key; a `server` library key is wrapped
+  by the master key.
+- `password_mode = single`: signing in unlocks with the login password.
+  `separate`: a second encryption password unlocks on `/unlock`.
+- Keys leave memory when the account's last session ends (logout, expiry
+  sweep every 5 minutes, account disabled) or on "Lock now".
+- Password-derived keys use Argon2id (64 MiB, t=3); the salt's first byte
+  records the parameter version.
+
+Space protection (`spaces.encryption_mode`):
+
+- `server`: data key wrapped by the master key; always available.
+- `members`: data key sealed to each member's public key
+  (`space_key_envelopes`). Members on any tier open it with their own keys.
+  Access given while nobody holding the key is online stays *pending* and is
+  sealed the next time a member opens the space. Envelopes follow grants,
+  revocations and group membership. If any member is on the `server` tier,
+  the server can open the space through them.
+- `password`: data key wrapped by a space password. File routes need each
+  member to have typed it (`UnlockState.space_unlocks`); management routes
+  (members, settings, unlock) work while locked.
+
+`key_service` owns all of this; `key_crypto` holds the primitives (seal/open,
+password wrap). `recovery_service` handles reset codes and the audit log.
 
 ### File format and checks
 
@@ -136,8 +179,12 @@ Disk files are encrypted blobs. Directory and file names are currently plaintext
 
 ### Key cache
 
-- `UnlockState` stores currently available decrypted data keys.
-- Server-mode keys are loaded at boot.
+- `UnlockState` holds decrypted data keys, unlocked users' private keys, and
+  which members opened which password-protected spaces. Everything is
+  zeroized on removal.
+- At boot: server-mode library and space keys load, accounts set up before
+  key pairs existed get a `server` key pair, and `server` accounts unlock
+  (which also opens `members` spaces they belong to).
 
 ## 8) Layering
 
@@ -166,6 +213,9 @@ isn't a supported integration point.
 - Library files: `/api/v1/library/{list,mkdir,upload,download,delete,rename,info,usage,zip}`
 - Library chunked transfers: `/api/v1/library/chunked/*`
 - Library trash: `/api/v1/library/trash*`
+- Encryption: `/api/v1/auth/{encryption,unlock,lock,password,encryption-password,reset}`,
+  `/api/v1/spaces/<id>/{unlock,lock,lock-state,protection}`,
+  `/api/v1/admin/users/<id>/reset`, `/api/v1/users/me/security-notices`
 - Integrity + notifications: `/api/v1/library/integrity/*`, `/api/v1/users/me/notifications`, `/api/v1/admin/integrity/*`
 - Groups: `/api/v1/groups/*`
 - Spaces + access: `/api/v1/spaces/*`
@@ -181,7 +231,7 @@ Notes:
 
 ### Page modules
 
-- Auth/setup pages: `/`, `/login`, `/register`, `/setup`
+- Auth/setup pages: `/`, `/login`, `/register`, `/setup`, `/unlock`, `/reset`
 - Library pages: `/files*`, `/usage*`, `/settings`, `/trash*`
 - Group pages: `/groups*`
 - Space pages: `/spaces*`
@@ -190,7 +240,8 @@ Notes:
 ## 10) Background Jobs
 
 - Integrity scanner: periodic scan + event recording.
-- Session cleanup: removes expired sessions.
+- Session cleanup: removes expired sessions and locks accounts left without
+  one (every 5 minutes).
 - Chunk cleanup: removes expired chunk uploads and staging directories.
 - Trash cleanup: permanently deletes items older than the retention period.
 
@@ -215,5 +266,4 @@ Notes:
 
 ## 14) Immediate Cleanup Priorities
 
-- Implement user-tier encryption flows end-to-end, or remove dormant schema paths until ready.
 - Decide how group-owned spaces should be limited (group quotas, or charge the group's owner).

@@ -1,6 +1,6 @@
 {# Bell button + alerts menu. Loaded into #alerts by HTMX; refreshed on the "alerts-refresh" event. #}
 <button type="button" class="icon-btn relative" data-menu-trigger="alerts-menu" aria-haspopup="menu"
-        aria-label="{% if count > 0 %}{{ count }} file {% if count == 1 %}problem{% else %}problems{% endif %}{% else %}Alerts{% endif %}" title="Alerts">
+        aria-label="{% if count > 0 %}{{ count }} {% if count == 1 %}alert{% else %}alerts{% endif %}{% else %}Alerts{% endif %}" title="Alerts">
   <span class="ms {% if count > 0 %}ms-fill text-danger{% endif %}">notifications</span>
   {% if count > 0 %}
   <span class="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-danger text-surface text-[10px] font-medium leading-4 text-center">{% if count > 9 %}9+{% else %}{{ count }}{% endif %}</span>
@@ -11,13 +11,28 @@
     <h2 class="flex-1 font-medium">Alerts</h2>
     {% if count > 0 %}<span class="text-xs text-muted">{{ count }} open</span>{% endif %}
   </div>
-  {% if count == 0 %}
+  {% if security | length > 0 %}
+  <ul class="border-b border-outline">
+    {% for n in security %}
+    <li class="flex gap-3 pl-4 pr-2 py-3 border-b border-outline/70 last:border-b-0 bg-warning/[0.06]" data-alert="sec-{{ n.id }}">
+      <span class="ms text-warning mt-0.5">{% if n.target_type == 'keys' %}key{% else %}lock_reset{% endif %}</span>
+      <div class="flex-1 min-w-0">
+        <p class="text-[13px] font-medium">{% if n.target_type == 'keys' %}Your password was reset and your keys recovered{% else %}Your password was reset{% endif %}</p>
+        <p class="text-[13px] text-muted">With a code from {{ n.admin_username }}{% if n.reason %}: “{{ n.reason }}”{% endif %}</p>
+        <p class="text-xs text-muted"><time datetime="{{ n.created_at }}">{{ n.created_at }}</time> · <a href="/settings#security" class="text-primary hover:underline">Security settings</a></p>
+      </div>
+      <button type="button" class="icon-btn-sm shrink-0" data-dismiss-alert="sec-{{ n.id }}" data-dismiss-url="/notifications/security/{{ n.id }}/dismiss" title="Dismiss" aria-label="Dismiss"><span class="ms">close</span></button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if file_count == 0 and security | length == 0 %}
   <div class="flex flex-col items-center text-center px-6 py-8">
     <span class="ms ms-lg text-success">check_circle</span>
     <p class="mt-2 font-medium">No problems found</p>
     <p class="mt-1 text-[13px] text-muted">Damaged or unreadable files will show up here.</p>
   </div>
-  {% else %}
+  {% elif file_count > 0 %}
   <ul class="max-h-[60vh] overflow-y-auto">
     {% for a in alerts %}
     <li class="flex gap-3 pl-4 pr-2 py-3 border-b border-outline/70 last:border-b-0" data-alert="{{ a.id }}">

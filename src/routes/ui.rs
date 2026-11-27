@@ -127,9 +127,17 @@ pub async fn notifications(
     user: SessionSetupComplete,
 ) -> Template {
     let alerts = alerts_for(pool.inner(), config.inner(), &user.0).await;
+    let security = crate::services::recovery_service::notices_for(pool.inner(), &user.0.id, true)
+        .await
+        .unwrap_or_default();
     Template::render(
         "partials/notifications",
-        context! { count: alerts.len(), alerts: alerts },
+        context! {
+            count: alerts.len() + security.len(),
+            file_count: alerts.len(),
+            alerts: alerts,
+            security: security,
+        },
     )
 }
 
@@ -486,7 +494,17 @@ pub async fn admin_page(
             .map(|usage| usage.total())
             .unwrap_or(0);
         let pct = crate::routes::pages::usage_percent(used, u.quota_bytes);
+        let keys = crate::services::key_service::find_user_keys(pool, &u.id)
+            .await
+            .ok()
+            .flatten();
+        let tier = keys.as_ref().map(|k| k.tier.clone());
+        let resettable = !matches!(&keys, Some(k)
+            if k.tier == crate::services::key_service::TIER_PURE
+                && k.password_mode == crate::services::key_service::MODE_SINGLE);
         rows.push(json!({
+            "tier": tier,
+            "resettable": resettable,
             "id": u.id,
             "username": u.username,
             "email": u.email,
@@ -607,6 +625,7 @@ pub struct ActiveForm {
 #[post("/admin/users/<id>/active", data = "<form>")]
 pub async fn admin_set_active(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
     id: &str,
@@ -627,6 +646,12 @@ pub async fn admin_set_active(
         Ok(true) => {
             if !form.active {
                 let _ = Session::delete_all_for_user(pool.inner(), id).await;
+                if let Err(e) =
+                    crate::services::key_service::lock_user(pool.inner(), unlock_state.inner(), id)
+                        .await
+                {
+                    tracing::error!(error = %e, "Failed to lock keys of disabled account");
+                }
             }
             Ok(Flash::success(
                 back(),

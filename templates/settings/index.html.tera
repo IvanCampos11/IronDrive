@@ -32,7 +32,7 @@
     <dl class="divide-y divide-outline/70 border-t border-outline">
       <div class="flex items-center justify-between gap-4 h-14 px-5">
         <dt class="text-muted">Encryption</dt>
-        <dd class="flex items-center gap-1.5"><span class="ms text-success">lock</span>{% if encryption_mode == 'server' %}AES-256-GCM, server-managed keys{% else %}{{ encryption_mode }}{% endif %}</dd>
+        <dd class="flex items-center gap-1.5"><span class="ms text-success">lock</span>AES-256-GCM, {% if encryption_mode == 'server' %}server-managed keys{% else %}keys locked by your password{% endif %}</dd>
       </div>
       {% if library_created %}
       <div class="flex items-center justify-between gap-4 h-14 px-5">
@@ -45,6 +45,137 @@
         <dd><a href="/usage" class="btn-text btn-sm -mr-3">View usage<span class="ms -mr-1">chevron_right</span></a></dd>
       </div>
     </dl>
+  </section>
+  {% endif %}
+
+  {% if encryption %}
+  {% set tier = encryption.tier %}
+  <section class="section" id="security">
+    <div class="flex items-center gap-3 px-5 pt-5 pb-3">
+      <h2 class="section-title flex-1">Security</h2>
+      {% if tier != 'server' %}
+      <form method="post" action="/lock">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-outline btn-sm" title="Lock your files now; you stay signed in"><span class="ms">lock</span>Lock now</button>
+      </form>
+      {% endif %}
+    </div>
+    <dl class="divide-y divide-outline/70 border-t border-outline">
+      <div class="flex items-start justify-between gap-6 px-5 py-4">
+        <dt class="text-muted shrink-0">Protection</dt>
+        <dd class="text-right">
+          <p class="font-medium">{% if tier == 'server' %}Standard{% elif tier == 'failsafe_user' %}Protected{% else %}Maximum{% endif %}
+            {% if tier != 'server' %}<span class="text-muted font-normal">· {% if encryption.password_mode == 'separate' %}two passwords{% else %}one password{% endif %}</span>{% endif %}</p>
+          <p class="mt-0.5 text-[13px] text-muted max-w-md">
+            {% if tier == 'server' %}The server manages your keys.
+            {% elif tier == 'failsafe_user' %}Your password locks your keys while you're signed out. An admin can recover them if you forget it.
+            {% else %}Only your password unlocks your keys. They can't be recovered.{% endif %}
+          </p>
+        </dd>
+      </div>
+    </dl>
+
+    <details class="group border-t border-outline">
+      <summary class="flex items-center gap-3 h-14 px-5 cursor-pointer select-none list-none hover:bg-fg/[0.03]">
+        <span class="flex-1">Change protection</span><span class="ms text-muted group-open:rotate-180 transition-transform">expand_more</span>
+      </summary>
+      <form method="post" action="/settings/encryption" class="px-5 pb-5 space-y-4" data-conditional>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <fieldset class="space-y-2.5">
+          <legend class="sr-only">Protection</legend>
+          <label class="choice"><input type="radio" name="tier" value="server" {% if tier == 'server' %}checked{% endif %}>
+            <span><span class="choice-title">Standard</span><span class="choice-text block">The server manages your keys. Always available; someone with full access to the server could read your files.</span></span></label>
+          <label class="choice"><input type="radio" name="tier" value="failsafe_user" {% if tier == 'failsafe_user' %}checked{% endif %}>
+            <span><span class="choice-title">Protected</span><span class="choice-text block">Your password locks your keys while you're signed out. The server keeps a recovery copy an admin can use if you forget it, and you're told when they do.</span></span></label>
+          <label class="choice"><input type="radio" name="tier" value="pure_user" {% if tier == 'pure_user' %}checked{% endif %}>
+            <span><span class="choice-title">Maximum</span><span class="choice-text block">Only your password unlocks your keys. If you forget it, your files are gone for good.</span></span></label>
+        </fieldset>
+        <div class="space-y-4" data-show-if="tier=failsafe_user,pure_user" hidden>
+          <fieldset class="space-y-2.5">
+            <legend class="field-label">Passwords</legend>
+            <label class="choice"><input type="radio" name="password_mode" value="single" {% if encryption.password_mode != 'separate' %}checked{% endif %}>
+              <span><span class="choice-title">One password</span><span class="choice-text block">Signing in unlocks your files.</span></span></label>
+            <label class="choice"><input type="radio" name="password_mode" value="separate" {% if encryption.password_mode == 'separate' %}checked{% endif %}>
+              <span><span class="choice-title">Two passwords</span><span class="choice-text block">Unlock your files with a separate encryption password after signing in.</span></span></label>
+          </fieldset>
+          <div class="grid sm:grid-cols-2 gap-4" data-show-if="password_mode=separate" hidden>
+            <div>
+              <label for="enc-pw" class="field-label">New encryption password</label>
+              <input type="password" id="enc-pw" name="encryption_password" class="field" required minlength="8" autocomplete="new-password">
+            </div>
+            <div>
+              <label for="enc-pw2" class="field-label">Repeat it</label>
+              <input type="password" id="enc-pw2" name="encryption_password_confirm" class="field" required minlength="8" autocomplete="new-password" data-match="encryption_password">
+            </div>
+          </div>
+        </div>
+        <div class="sm:max-w-xs">
+          <label for="tier-current" class="field-label">Your login password</label>
+          <input type="password" id="tier-current" name="current_password" class="field" required autocomplete="current-password">
+        </div>
+        <p class="flex gap-2 text-xs text-subtle"><span class="ms text-[16px]">info</span><span>Switching re-locks your keys without re-encrypting files. Backups made before the switch can still be opened the old way.</span></p>
+        <button type="submit" class="btn-filled">Save protection</button>
+      </form>
+    </details>
+
+    <details class="group border-t border-outline">
+      <summary class="flex items-center gap-3 h-14 px-5 cursor-pointer select-none list-none hover:bg-fg/[0.03]">
+        <span class="flex-1">Change login password</span><span class="ms text-muted group-open:rotate-180 transition-transform">expand_more</span>
+      </summary>
+      <form method="post" action="/settings/password" class="px-5 pb-5 space-y-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="sm:max-w-xs"><label for="pw-cur" class="field-label">Current password</label>
+          <input type="password" id="pw-cur" name="current_password" class="field" required autocomplete="current-password"></div>
+        <div class="grid sm:grid-cols-2 gap-4">
+          <div><label for="pw-new" class="field-label">New password</label>
+            <input type="password" id="pw-new" name="new_password" class="field" required minlength="8" autocomplete="new-password"></div>
+          <div><label for="pw-new2" class="field-label">Repeat new password</label>
+            <input type="password" id="pw-new2" name="new_password_confirm" class="field" required minlength="8" autocomplete="new-password" data-match="new_password"></div>
+        </div>
+        {% if tier != 'server' and encryption.password_mode != 'separate' %}
+        <p class="flex gap-2 text-xs text-subtle"><span class="ms text-[16px]">info</span><span>Your keys are re-locked with the new password at the same time.</span></p>
+        {% endif %}
+        <button type="submit" class="btn-filled">Change password</button>
+      </form>
+    </details>
+
+    {% if tier != 'server' and encryption.password_mode == 'separate' %}
+    <details class="group border-t border-outline">
+      <summary class="flex items-center gap-3 h-14 px-5 cursor-pointer select-none list-none hover:bg-fg/[0.03]">
+        <span class="flex-1">Change encryption password</span><span class="ms text-muted group-open:rotate-180 transition-transform">expand_more</span>
+      </summary>
+      <form method="post" action="/settings/encryption-password" class="px-5 pb-5 space-y-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="sm:max-w-xs"><label for="epw-cur" class="field-label">Current encryption password</label>
+          <input type="password" id="epw-cur" name="current_password" class="field" required autocomplete="off"></div>
+        <div class="grid sm:grid-cols-2 gap-4">
+          <div><label for="epw-new" class="field-label">New encryption password</label>
+            <input type="password" id="epw-new" name="new_password" class="field" required minlength="8" autocomplete="new-password"></div>
+          <div><label for="epw-new2" class="field-label">Repeat it</label>
+            <input type="password" id="epw-new2" name="new_password_confirm" class="field" required minlength="8" autocomplete="new-password" data-match="new_password"></div>
+        </div>
+        <button type="submit" class="btn-filled">Change encryption password</button>
+      </form>
+    </details>
+    {% endif %}
+
+    {% if notices | length > 0 %}
+    <div class="border-t border-outline px-5 py-4">
+      <h3 class="text-[13px] font-medium text-muted mb-2">Password resets</h3>
+      <ul class="space-y-2">
+        {% for n in notices %}
+        <li class="flex gap-3 text-[13px]">
+          <span class="ms text-[18px] {% if n.target_type == 'keys' %}text-warning{% else %}text-muted{% endif %}">{% if n.target_type == 'keys' %}key{% else %}lock_reset{% endif %}</span>
+          <span class="flex-1">
+            {% if n.target_type == 'keys' %}Your password was reset and your encryption keys recovered{% else %}Your password was reset{% endif %}
+            with a code from <strong class="font-medium">{{ n.admin_username }}</strong>{% if n.reason %}: “{{ n.reason }}”{% endif %}
+            <span class="block text-xs text-subtle"><time datetime="{{ n.created_at }}" data-full>{{ n.created_at }}</time></span>
+          </span>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
   </section>
   {% endif %}
 

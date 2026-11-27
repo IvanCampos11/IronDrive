@@ -62,6 +62,7 @@
           <p class="flex items-center gap-2 font-medium {% if not u.is_active %}text-muted{% endif %}">
             <span class="truncate">{{ u.username }}</span>
             {% if u.role == 'admin' %}<span class="chip-primary">Admin</span>{% endif %}
+            {% if u.tier == 'failsafe_user' %}<span class="chip" title="Keys locked by their password; recoverable">Protected</span>{% elif u.tier == 'pure_user' %}<span class="chip" title="Keys locked by their password; not recoverable">Maximum</span>{% endif %}
             {% if not u.is_active %}<span class="chip">Disabled</span>{% endif %}
             {% if u.is_self %}<span class="text-xs text-muted font-normal">(you)</span>{% endif %}
           </p>
@@ -79,6 +80,11 @@
         <div id="user-menu-{{ loop.index }}" class="menu" role="menu" hidden>
           <button type="button" class="menu-item" role="menuitem" data-quota-user="{{ u.id }}" data-quota-name="{{ u.username }}" data-quota-value="{{ u.quota }}"><span class="ms">database</span>Change storage limit</button>
           {% if not u.is_self %}
+          {% if u.resettable %}
+          <button type="button" class="menu-item" role="menuitem" data-reset-user="{{ u.id }}" data-reset-name="{{ u.username }}" data-reset-tier="{{ u.tier | default(value='server') }}"><span class="ms">lock_reset</span>Reset password</button>
+          {% else %}
+          <p class="px-4 py-2 text-[13px] text-muted max-w-[260px]">Password can't be reset: Maximum protection with one password, so a reset would lock their files forever.</p>
+          {% endif %}
           <form method="post" action="/admin/users/{{ u.id }}/active"
                 {% if u.is_active %}data-confirm="{{ u.username }} will be signed out everywhere and won't be able to sign in. Their files are kept." data-confirm-title="Disable {{ u.username }}?" data-confirm-label="Disable" data-confirm-danger{% endif %}>
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -109,6 +115,30 @@
       <button type="submit" class="btn-text">Save</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="reset-dialog" class="dialog max-w-md" aria-labelledby="reset-title">
+  <form data-reset-form>
+    <h2 id="reset-title" class="dialog-title">Reset password for <span data-reset-for></span></h2>
+    <p class="text-muted" data-reset-explain></p>
+    <label for="reset-reason" class="field-label mt-4">Reason <span class="font-normal text-subtle">(optional, shown to them)</span></label>
+    <input type="text" id="reset-reason" name="reason" class="field" maxlength="500" autocomplete="off" placeholder="e.g. Forgot password, asked in person">
+    <p class="field-hint">They'll be told their password was reset, by whom, and why.</p>
+    <p class="mt-3 text-[13px] text-danger" data-error hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn-text" data-close>Cancel</button>
+      <button type="submit" class="btn-text">Create reset code</button>
+    </div>
+  </form>
+  <div data-reset-result hidden>
+    <h2 class="dialog-title">Reset code for <span data-reset-for></span></h2>
+    <p class="text-muted">Give them this code privately. It works once, within 24 hours, at <strong class="font-medium text-fg whitespace-nowrap" data-reset-url>/reset</strong>. It won't be shown again.</p>
+    <p class="mt-4 px-4 py-3 rounded-xl bg-surface-2 font-mono text-lg tracking-wider text-center select-all" data-reset-code></p>
+    <p class="mt-3 text-[13px] text-muted" data-reset-note></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn-text" data-close>Done</button>
+    </div>
+  </div>
 </dialog>
 {% endblock %}
 

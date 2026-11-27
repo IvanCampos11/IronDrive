@@ -37,6 +37,40 @@
   </section>
 
   {% if is_admin %}
+  {% set mode = space.encryption_mode %}
+  <section class="section p-5" id="protection">
+    <h2 class="section-title">Protection</h2>
+    <p class="mt-1 text-muted">
+      {% if mode == 'server' %}Server-managed: the server keeps the key, so the space is always available.
+      {% elif mode == 'members' %}Members only: the key is sealed to each person with access and opens with their own sign-in. While nobody with access is signed in, the server can't read it, unless one of them uses server-managed keys.
+      {% else %}Password-protected: everyone types the space's password to open it.{% endif %}
+    </p>
+    {% if key_open %}
+    <form method="post" action="/spaces/{{ space.id }}/settings/protection" class="mt-4 space-y-3" data-conditional>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <fieldset class="grid gap-2.5 md:grid-cols-3">
+        <legend class="sr-only">Protection</legend>
+        <label class="choice"><input type="radio" name="mode" value="server" {% if mode == 'server' %}checked{% endif %}>
+          <span><span class="choice-title">Server-managed</span><span class="choice-text block">Always available.</span></span></label>
+        <label class="choice"><input type="radio" name="mode" value="members" {% if mode == 'members' %}checked{% endif %}>
+          <span><span class="choice-title">Members only</span><span class="choice-text block">Opens with each member's own sign-in.</span></span></label>
+        <label class="choice"><input type="radio" name="mode" value="password" {% if mode == 'password' %}checked{% endif %}>
+          <span><span class="choice-title">Password</span><span class="choice-text block">Everyone types a shared password.</span></span></label>
+      </fieldset>
+      <div class="grid sm:grid-cols-2 gap-3 sm:max-w-lg" data-show-if="mode=password" hidden>
+        <div><label for="prot-pw" class="field-label">{% if mode == 'password' %}New space password{% else %}Space password{% endif %}</label>
+          <input type="password" id="prot-pw" name="password" class="field" required minlength="8" autocomplete="new-password"></div>
+        <div><label for="prot-pw2" class="field-label">Repeat it</label>
+          <input type="password" id="prot-pw2" name="password_confirm" class="field" required minlength="8" autocomplete="new-password" data-match="password"></div>
+      </div>
+      {% if mode == 'password' %}<p class="text-xs text-subtle" data-show-if="mode=password" hidden>Saving a new password signs everyone out of the space; they'll need the new one.</p>{% endif %}
+      <button type="submit" class="btn-tonal">Save protection</button>
+    </form>
+    {% else %}
+    <p class="mt-3 flex gap-2 text-[13px] text-muted"><span class="ms text-[18px]">lock</span><a href="/spaces/{{ space.id }}" class="text-primary hover:underline">Open the space</a> to change how it's protected.</p>
+    {% endif %}
+  </section>
+
   <section class="section p-5 border-danger/40">
     <h2 class="section-title text-danger">Delete this space</h2>
     <p class="mt-1 mb-4 text-muted">All files in the space are permanently deleted, and everyone loses access. This can't be undone.</p>

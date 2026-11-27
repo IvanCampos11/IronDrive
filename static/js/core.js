@@ -54,6 +54,12 @@
           window.location.href = '/login';
           throw new Error('Your session has expired.');
         }
+        // Locked (423): the keys went away (server restart, sign-out
+        // elsewhere, space locked). Reloading lands on the unlock prompt.
+        if (resp.status === 423) {
+          window.location.reload();
+          throw new Error('This is locked. Unlock it to continue.');
+        }
         return resp.text().then(function (txt) {
           var payload = null;
           try { payload = txt ? JSON.parse(txt) : null; } catch (_) { payload = null; }
@@ -351,7 +357,8 @@
     e.stopPropagation();
     var id = b.getAttribute('data-dismiss-alert');
     b.disabled = true;
-    request('/notifications/' + encodeURIComponent(id) + '/dismiss', { method: 'POST' }).then(function () {
+    var url = b.getAttribute('data-dismiss-url') || '/notifications/' + encodeURIComponent(id) + '/dismiss';
+    request(url, { method: 'POST' }).then(function () {
       var li = b.closest('[data-alert]');
       var list = li && li.parentNode;
       if (li) li.remove();
@@ -560,6 +567,7 @@
   document.addEventListener('htmx:responseError', function (e) {
     var status = e.detail.xhr && e.detail.xhr.status;
     if (status === 401) { window.location.href = '/login'; return; }
+    if (status === 423) { window.location.reload(); return; }
     toast(status === 404 ? 'That folder no longer exists.' : 'Couldn’t load that — please try again.', { error: true });
   });
   document.addEventListener('htmx:sendError', function () {
@@ -568,10 +576,53 @@
   document.addEventListener('htmx:afterSwap', function (e) { localizeTimes(e.detail.target); });
 
   // -------------------------------------------------------------------------
+  // Conditional form sections
+  // <form data-conditional> … <div data-show-if="tier=failsafe_user,pure_user">
+  // shows the block only while the named radio/select has one of the values.
+  // Hidden blocks' inputs are disabled so `required` doesn't block submit.
+  // -------------------------------------------------------------------------
+  function syncConditional(form) {
+    form.querySelectorAll('[data-show-if]').forEach(function (block) {
+      var rule = block.getAttribute('data-show-if').split('=');
+      var allowed = (rule[1] || '').split(',');
+      var field = form.querySelector('[name="' + rule[0] + '"]:checked') ||
+        form.querySelector('select[name="' + rule[0] + '"]');
+      var show = !!field && allowed.indexOf(field.value) >= 0;
+      // A block inside a hidden block stays hidden.
+      var parent = block.parentElement && block.parentElement.closest('[data-show-if]');
+      if (parent && parent.hidden) show = false;
+      block.hidden = !show;
+    });
+    form.querySelectorAll('[data-show-if] input, [data-show-if] select, [data-show-if] textarea').forEach(function (inp) {
+      inp.disabled = !!inp.closest('[data-show-if][hidden]');
+    });
+  }
+  document.addEventListener('change', function (e) {
+    var form = e.target.closest && e.target.closest('form[data-conditional]');
+    if (form) syncConditional(form);
+  });
+
+  // Matching "repeat password" fields: <input data-match="other_field_name">.
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    var bad = Array.prototype.find.call(form.querySelectorAll('input[data-match]:not(:disabled)'), function (inp) {
+      var other = form.querySelector('[name="' + inp.getAttribute('data-match') + '"]');
+      return other && other.value !== inp.value;
+    });
+    if (bad) {
+      e.preventDefault();
+      bad.setCustomValidity('The passwords don’t match.');
+      bad.reportValidity();
+      bad.addEventListener('input', function () { bad.setCustomValidity(''); }, { once: true });
+    }
+  }, true);
+
+  // -------------------------------------------------------------------------
   // Page start
   // -------------------------------------------------------------------------
   function start() {
     localizeTimes(document);
+    document.querySelectorAll('form[data-conditional]').forEach(syncConditional);
     document.querySelectorAll('.snackbar[data-auto-dismiss]').forEach(function (s) { armSnack(s, 5000); });
 
     // ?new=1 on index pages opens their "create" dialog (from the New menu).

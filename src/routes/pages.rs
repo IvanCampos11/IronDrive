@@ -133,6 +133,10 @@ pub struct ChunkedCompleteRequest {
 pub struct CreateSpaceForm {
     pub name: String,
     pub csrf_token: String,
+    /// `standard` (default) or `password`.
+    pub protection: Option<String>,
+    pub password: Option<String>,
+    pub password_confirm: Option<String>,
 }
 
 #[derive(FromForm)]
@@ -447,6 +451,17 @@ pub async fn setup_page(
     ))
 }
 
+/// Setup wizard form. Only `csrf_token` is required: no tier means server.
+#[derive(FromForm)]
+pub struct SetupForm {
+    pub csrf_token: String,
+    pub tier: Option<String>,
+    pub password_mode: Option<String>,
+    pub password: Option<String>,
+    pub encryption_password: Option<String>,
+    pub encryption_password_confirm: Option<String>,
+}
+
 /// POST /setup
 #[post("/setup", data = "<form>")]
 pub async fn setup_submit(
@@ -456,14 +471,11 @@ pub async fn setup_submit(
     unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     user: SessionUser,
-    form: Form<CsrfOnlyForm>,
+    form: Form<SetupForm>,
 ) -> Result<Redirect, Flash<Redirect>> {
-    validate_csrf(cookies, &form.csrf_token).map_err(|_| {
-        Flash::error(
-            Redirect::to(uri!(setup_page)),
-            "Invalid request. Please try again.",
-        )
-    })?;
+    let fail = |msg: String| Flash::error(Redirect::to(uri!(setup_page)), msg);
+    validate_csrf(cookies, &form.csrf_token)
+        .map_err(|_| fail("Invalid request. Please try again.".into()))?;
 
     if user.0.setup_complete {
         return Ok(Redirect::to(uri!(files_page(
@@ -471,23 +483,50 @@ pub async fn setup_submit(
         ))));
     }
 
-    match library_service::setup_library(
+    let tier = form.tier.as_deref().unwrap_or(key_service::TIER_SERVER);
+    let password_mode = form
+        .password_mode
+        .as_deref()
+        .unwrap_or(key_service::MODE_SINGLE);
+    if password_mode == key_service::MODE_SEPARATE
+        && form.encryption_password != form.encryption_password_confirm
+    {
+        return Err(fail("The encryption passwords don't match.".into()));
+    }
+    let wrap_password = key_service::key_password_for(
+        pool.inner(),
+        &user.0.id,
+        tier,
+        password_mode,
+        form.password.as_deref().unwrap_or(""),
+        form.encryption_password.as_deref(),
+    )
+    .await
+    .map_err(|e| match e {
+        AppError::BadPassphrase => fail("That isn't your login password.".into()),
+        e => fail(e.client_message()),
+    })?;
+
+    library_service::setup_library_with(
         pool.inner(),
         config.inner(),
         master_key.inner(),
         unlock_state.inner(),
         &user.0.id,
+        &library_service::EncryptionChoice {
+            tier,
+            password_mode,
+            password: wrap_password.as_deref(),
+        },
     )
     .await
-    {
-        Ok(_) => Ok(Redirect::to(uri!(files_page(
-            path = Option::<String>::None
-        )))),
-        Err(_) => Err(Flash::error(
-            Redirect::to(uri!(setup_page)),
-            "Library setup failed. Please try again.",
-        )),
-    }
+    .map_err(|e| match e {
+        AppError::Validation(m) | AppError::Conflict(m) => fail(m),
+        _ => fail("Library setup failed. Please try again.".into()),
+    })?;
+    Ok(Redirect::to(uri!(files_page(
+        path = Option::<String>::None
+    ))))
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +548,9 @@ pub async fn files_page(
         Ok(l) => l,
         Err(_) => return Err(Redirect::to(uri!(setup_page))),
     };
+    if !unlock_state.is_library_unlocked(&lib.id) {
+        return Err(Redirect::to("/unlock?next=/files"));
+    }
 
     let user_path = path.as_deref().unwrap_or("");
 
@@ -1455,13 +1497,25 @@ pub async fn usage_page(
 #[get("/settings")]
 pub async fn settings_page(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     user: SessionSetupComplete,
+    flash: Option<FlashMessage<'_>>,
 ) -> Result<Template, Redirect> {
     let lib = PersonalLibrary::find_by_user(pool.inner(), &user.0.id)
         .await
         .ok()
         .flatten();
+    let encryption = crate::routes::encryption::encryption_status(
+        pool.inner(),
+        unlock_state.inner(),
+        &user.0.id,
+    )
+    .await
+    .ok();
+    let notices = crate::services::recovery_service::notices_for(pool.inner(), &user.0.id, false)
+        .await
+        .unwrap_or_default();
 
     Ok(Template::render(
         "settings/index",
@@ -1478,6 +1532,10 @@ pub async fn settings_page(
             library_id: lib.as_ref().map(|l| l.id.as_str()),
             encryption_mode: lib.as_ref().map(|l| l.encryption_mode.as_str()),
             library_created: lib.as_ref().map(|l| l.created_at.as_str()),
+            encryption: encryption,
+            notices: notices,
+            flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+            flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
     ))
 }
@@ -2151,6 +2209,7 @@ pub async fn spaces_page(
             serde_json::json!({
                 "id": s.space.id,
                 "name": s.space.name,
+                "encryption_mode": s.space.encryption_mode,
                 "owner_type": s.space.owner_type,
                 "owner_id": s.space.owner_id,
                 "created_at": &s.space.created_at,
@@ -2191,13 +2250,27 @@ pub async fn spaces_create_submit(
         )
     })?;
 
-    match space_service::create_space(
+    let password = if form.protection.as_deref() == Some("password") {
+        if form.password != form.password_confirm {
+            return Err(Flash::error(
+                Redirect::to(uri!(spaces_page)),
+                "The space passwords don't match.",
+            ));
+        }
+        Some(form.password.as_deref().unwrap_or(""))
+    } else {
+        None
+    };
+    match space_service::create_space_with(
         pool.inner(),
         config.inner(),
         master_key.inner(),
         unlock_state.inner(),
+        "user",
+        &user.0.id,
         &user.0.id,
         &form.name,
+        password,
     )
     .await
     {
@@ -2226,6 +2299,35 @@ pub async fn space_browser_page(
     path: Option<String>,
     flash: Option<FlashMessage<'_>>,
 ) -> Template {
+    let csrf_token = ensure_csrf_token(cookies);
+    let lock_state = key_service::space_access_state(
+        pool.inner(),
+        unlock_state.inner(),
+        &reader.space.space,
+        &reader.user.id,
+    )
+    .await
+    .unwrap_or(key_service::SpaceLockState::Open);
+    if lock_state != key_service::SpaceLockState::Open {
+        return Template::render(
+            "spaces/locked",
+            context! {
+                user: &reader.user.username,
+                csrf_token: csrf_token,
+                current_path: "spaces",
+                space: &reader.space.space,
+                is_admin: reader.space.user_permission == "admin",
+                state: crate::routes::encryption::lock_state_name(lock_state),
+                flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
+                flash_msg: flash.as_ref().map(|f| f.message().to_string()),
+            },
+        );
+    }
+    if reader.space.space.encryption_mode == key_service::SPACE_MEMBERS {
+        // Safety net: seal access for anyone added while the key was away.
+        key_service::resync_space(pool.inner(), unlock_state.inner(), space_id).await;
+    }
+
     let user_path = path.as_deref().unwrap_or("");
 
     let entries: Vec<fs_service::FsEntry> = fs_service::list_space_directory(
@@ -2248,8 +2350,6 @@ pub async fn space_browser_page(
         reader.space.user_permission == "write" || reader.space.user_permission == "admin";
     let is_admin = reader.space.user_permission == "admin";
 
-    let csrf_token = ensure_csrf_token(cookies);
-
     Template::render(
         "browser/page",
         context! {
@@ -2266,6 +2366,7 @@ pub async fn space_browser_page(
             breadcrumbs: breadcrumbs,
             can_write: can_write,
             is_admin: is_admin,
+            space_mode: &reader.space.space.encryption_mode,
             flash_kind: flash.as_ref().map(|f| f.kind().to_string()),
             flash_msg: flash.as_ref().map(|f| f.message().to_string()),
         },
@@ -2278,6 +2379,7 @@ pub async fn space_browser_partial(
     pool: &State<DbPool>,
     config: &State<AppConfig>,
     unlock_state: &State<UnlockState>,
+    cookies: &CookieJar<'_>,
     reader: SessionSpaceReader,
     space_id: &str,
     path: Option<String>,
@@ -2315,6 +2417,8 @@ pub async fn space_browser_partial(
             breadcrumbs: breadcrumbs,
             can_write: can_write,
             is_admin: is_admin,
+            csrf_token: ensure_csrf_token(cookies),
+            space_mode: &reader.space.space.encryption_mode,
         },
     ))
 }
@@ -2411,11 +2515,20 @@ pub async fn search_grantees(
 #[get("/spaces/<space_id>/settings")]
 pub async fn space_settings_page(
     pool: &State<DbPool>,
+    unlock_state: &State<UnlockState>,
     cookies: &CookieJar<'_>,
     admin: SessionSpaceAdmin,
     space_id: &str,
     flash: Option<FlashMessage<'_>>,
 ) -> Template {
+    let key_open = key_service::space_access_state(
+        pool.inner(),
+        unlock_state.inner(),
+        &admin.space.space,
+        &admin.user.id,
+    )
+    .await
+    .is_ok_and(|s| s == key_service::SpaceLockState::Open);
     let access_entries = space_service::list_access(pool.inner(), &admin.user.id, space_id)
         .await
         .unwrap_or_default();
@@ -2446,7 +2559,9 @@ pub async fn space_settings_page(
                 "owner_id": admin.space.space.owner_id,
                 "created_at": &admin.space.space.created_at,
                 "grantee_count": admin.space.grantee_count,
+                "encryption_mode": &admin.space.space.encryption_mode,
             }),
+            key_open: key_open,
             space_id: space_id,
             user_permission: &admin.space.user_permission,
             is_admin: true,

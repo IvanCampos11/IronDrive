@@ -19,7 +19,7 @@
   font-weight: 400;
   /* block: never flash ligature names like "folder" as text */
   font-display: block;
-  src: url("/static/fonts/material-symbols-rounded.woff2?v=11a399e25e") format("woff2");
+  src: url("/static/fonts/material-symbols-rounded.woff2?v=2255747ade") format("woff2");
 }
 
 /* ---------------------------------------------------------------------------
@@ -190,6 +190,23 @@
   }
   .field-hint {
     @apply mt-1.5 text-xs text-subtle;
+  }
+
+  /* Radio cards: pick one of a few options with a sentence each. */
+  .choice {
+    @apply flex gap-3 p-4 rounded-xl border border-outline bg-surface cursor-pointer
+           transition-colors hover:border-muted
+           has-[:checked]:border-primary has-[:checked]:bg-primary/[0.06]
+           has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary;
+  }
+  .choice > input[type="radio"] {
+    @apply mt-0.5 w-4 h-4 flex-shrink-0 cursor-pointer accent-primary;
+  }
+  .choice-title {
+    @apply font-medium text-fg;
+  }
+  .choice-text {
+    @apply mt-0.5 text-[13px] text-muted;
   }
 
   .check {

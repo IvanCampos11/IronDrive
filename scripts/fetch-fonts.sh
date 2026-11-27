@@ -21,6 +21,7 @@ ICONS=(
   admin_panel_settings block info notifications refresh select_all verified_user
   warning
   delete_forever restore_from_trash
+  hourglass_top lock_open lock_reset password
 )
 NAMES=$(printf '%s\n' "${ICONS[@]}" | sort -u | paste -sd, -)
 

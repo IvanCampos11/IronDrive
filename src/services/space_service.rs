@@ -48,6 +48,7 @@ const PERM_ADMIN: &str = "admin";
 
 /// Create a new space owned by a user, with standard protection (follows the
 /// owner's account tier).
+#[cfg(test)]
 pub async fn create_space(
     pool: &DbPool,
     config: &AppConfig,

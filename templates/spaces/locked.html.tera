@@ -1,0 +1,42 @@
+{% extends "base" %}
+{# A space whose files this member can't open yet. state: needs_password | account_locked | waiting_for_key #}
+{% block title %}{{ space.name }} – IronDrive{% endblock %}
+{# Errors show inline under the password field instead of as a snackbar. #}
+{% block flash %}{% endblock %}
+
+{% block content %}
+<div class="flex items-center gap-2 h-16 pl-5 pr-3 sm:pr-4">
+  <h1 class="page-title flex-1 truncate">{{ space.name }}</h1>
+  {% if is_admin %}
+  <a href="/spaces/{{ space.id }}/settings" class="icon-btn" title="Space settings" aria-label="Space settings"><span class="ms">settings</span></a>
+  {% endif %}
+</div>
+
+<div class="flex justify-center px-4 py-10 sm:py-16">
+  <div class="w-full max-w-sm text-center">
+    {% if state == 'needs_password' %}
+    <span class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary-container text-on-primary-container"><span class="ms ms-lg">lock</span></span>
+    <h2 class="mt-4 text-lg font-medium">This space is password-protected</h2>
+    <p class="mt-1 text-muted">Everyone who opens it types the space's password. Ask the person who shared it if you don't have it.</p>
+    {% include "partials/form_flash" %}
+    <form method="post" action="/spaces/{{ space.id }}/unlock" class="mt-6 space-y-4 text-left">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="space-password" class="field-label">Space password</label>
+        <input type="password" id="space-password" name="password" class="field" required autofocus autocomplete="off">
+      </div>
+      <button type="submit" class="btn-filled w-full"><span class="ms">lock_open</span>Open space</button>
+    </form>
+    {% elif state == 'account_locked' %}
+    <span class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-surface-2 text-muted"><span class="ms ms-lg">key</span></span>
+    <h2 class="mt-4 text-lg font-medium">Unlock your account first</h2>
+    <p class="mt-1 text-muted">This space opens with your own keys, which are locked right now.</p>
+    <a href="/unlock?next=/spaces/{{ space.id }}" class="btn-filled mt-6"><span class="ms">lock_open</span>Unlock</a>
+    {% else %}
+    <span class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-surface-2 text-muted"><span class="ms ms-lg">hourglass_top</span></span>
+    <h2 class="mt-4 text-lg font-medium">Almost ready</h2>
+    <p class="mt-1 text-muted">You've been given access, but the space's key reaches you through someone who already has it. It arrives the next time any member opens the space; there's nothing you need to do.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

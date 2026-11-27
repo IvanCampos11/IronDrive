@@ -953,3 +953,225 @@ async fn reset_rules_follow_the_tier() {
     );
     assert_eq!(unlock(&client, &t, "sep new enc pw").await, Status::Ok);
 }
+
+// ---------------------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------------------
+
+/// Sign in through the login form; returns the CSRF token for later forms.
+async fn page_login(client: &Client, name: &str, password: &str) -> String {
+    let csrf = super::page_routes::get_csrf_token(client, "/login").await;
+    let r = client
+        .post("/login")
+        .header(ContentType::Form)
+        .body(format!(
+            "username={name}&password={password}&csrf_token={csrf}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::SeeOther);
+    csrf
+}
+
+async fn page(client: &Client, url: &str) -> (Status, String) {
+    let r = client.get(url.to_string()).dispatch().await;
+    let s = r.status();
+    (s, r.into_string().await.unwrap_or_default())
+}
+
+async fn form(client: &Client, url: &str, body: String) -> (Status, Option<String>) {
+    let r = client
+        .post(url.to_string())
+        .header(ContentType::Form)
+        .body(body)
+        .dispatch()
+        .await;
+    let loc = r.headers().get_one("Location").map(str::to_owned);
+    (r.status(), loc)
+}
+
+fn enc(s: &str) -> String {
+    s.replace(' ', "+")
+}
+
+#[tokio::test]
+async fn setup_page_offers_tiers_and_creates_a_pure_library() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    call(
+        &client,
+        "POST",
+        "/api/v1/auth/register",
+        None,
+        Some(json!({ "username": "alice", "email": "a@example.com", "password": pw("alice") })),
+    )
+    .await;
+    let csrf = page_login(&client, "alice", &pw("alice")).await;
+
+    let (s, html) = page(&client, "/setup").await;
+    assert_eq!(s, Status::Ok);
+    for needle in [
+        "value=\"failsafe_user\"",
+        "value=\"pure_user\"",
+        "value=\"separate\"",
+    ] {
+        assert!(html.contains(needle), "setup page lacks {needle}");
+    }
+
+    let (s, loc) = form(
+        &client,
+        "/setup",
+        format!(
+            "csrf_token={csrf}&tier=pure_user&password_mode=single&password={}",
+            enc(&pw("alice"))
+        ),
+    )
+    .await;
+    assert_eq!(s, Status::SeeOther);
+    assert_eq!(loc.as_deref(), Some("/files"));
+    let pool = client.rocket().state::<crate::db::DbPool>().unwrap();
+    let (tier,): (String,) = sqlx::query_as("SELECT tier FROM user_keys")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(tier, "pure_user");
+
+    // Settings shows the Security section; locking sends /files to /unlock.
+    let (s, html) = page(&client, "/settings").await;
+    assert_eq!(s, Status::Ok);
+    assert!(html.contains("id=\"security\"") && html.contains("Maximum"));
+    let (s, loc) = form(&client, "/lock", format!("csrf_token={csrf}")).await;
+    assert_eq!(s, Status::SeeOther);
+    assert_eq!(loc.as_deref(), Some("/unlock?next=/files"));
+    let r = client.get("/files").dispatch().await;
+    assert_eq!(r.headers().get_one("Location"), Some("/unlock?next=/files"));
+    let (s, html) = page(&client, "/unlock?next=/files").await;
+    assert_eq!(s, Status::Ok);
+    assert!(html.contains("Your files are locked"));
+
+    // Wrong password stays on the unlock page; the right one goes back.
+    let (_, loc) = form(
+        &client,
+        "/unlock",
+        format!("csrf_token={csrf}&password=nope&next=/files"),
+    )
+    .await;
+    assert!(loc.unwrap().starts_with("/unlock"));
+    let (_, loc) = form(
+        &client,
+        "/unlock",
+        format!(
+            "csrf_token={csrf}&password={}&next=/files",
+            enc(&pw("alice"))
+        ),
+    )
+    .await;
+    assert_eq!(loc.as_deref(), Some("/files"));
+    // Off-site "next" values are ignored.
+    form(&client, "/lock", format!("csrf_token={csrf}")).await;
+    let (_, loc) = form(
+        &client,
+        "/unlock",
+        format!(
+            "csrf_token={csrf}&password={}&next=//evil.example",
+            enc(&pw("alice"))
+        ),
+    )
+    .await;
+    assert_eq!(loc.as_deref(), Some("/files"));
+}
+
+#[tokio::test]
+async fn password_space_pages_prompt_then_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let _alice = user(&client, "alice", json!({})).await;
+    let csrf = page_login(&client, "alice", &pw("alice")).await;
+
+    let (s, html) = page(&client, "/spaces").await;
+    assert_eq!(s, Status::Ok);
+    assert!(
+        html.contains("value=\"password\""),
+        "create dialog offers a password"
+    );
+
+    let (s, loc) = form(
+        &client,
+        "/spaces/create",
+        format!("csrf_token={csrf}&name=Vault&protection=password&password=space+pw+123&password_confirm=space+pw+123"),
+    )
+    .await;
+    assert_eq!(s, Status::SeeOther);
+    let space_url = loc.unwrap();
+
+    // Creator has it open; the toolbar offers Lock.
+    let (_, html) = page(&client, &space_url).await;
+    assert!(html.contains(&format!("action=\"{space_url}/lock\"")));
+    let (s, _) = page(&client, &format!("{space_url}/settings")).await;
+    assert_eq!(s, Status::Ok);
+
+    form(
+        &client,
+        &format!("{space_url}/lock"),
+        format!("csrf_token={csrf}"),
+    )
+    .await;
+    let (s, html) = page(&client, &space_url).await;
+    assert_eq!(s, Status::Ok);
+    assert!(html.contains("This space is password-protected"));
+    let (s, html) = page(&client, &format!("{space_url}/settings")).await;
+    assert_eq!(s, Status::Ok);
+    assert!(html.contains("to change how it's protected"));
+
+    form(
+        &client,
+        &format!("{space_url}/unlock"),
+        format!("csrf_token={csrf}&password=space+pw+123"),
+    )
+    .await;
+    let (_, html) = page(&client, &space_url).await;
+    assert!(!html.contains("This space is password-protected"));
+}
+
+#[tokio::test]
+async fn reset_page_and_admin_reset_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = page_test_client(&tmp).await;
+    let _admin = user(&client, "admin", json!({})).await;
+    let _bob = user(&client, "bob", json!({})).await;
+    let csrf = page_login(&client, "admin", &pw("admin")).await;
+
+    let (s, html) = page(&client, "/admin").await;
+    assert_eq!(s, Status::Ok);
+    assert!(html.contains("data-reset-user"));
+
+    let bob_id = user_id(&client, "bob").await;
+    let r = client
+        .post(format!("/admin/users/{bob_id}/reset"))
+        .header(ContentType::JSON)
+        .header(Header::new("X-CSRF-Token", csrf.clone()))
+        .body(json!({ "reason": "asked" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(r.status(), Status::Ok);
+    let code: Value = serde_json::from_str(&r.into_string().await.unwrap()).unwrap();
+    let code = code["code"].as_str().unwrap().to_string();
+
+    let (s, html) = page(&client, "/reset").await;
+    assert_eq!(s, Status::Ok);
+    assert!(html.contains("Reset code"));
+    let (s, loc) = form(
+        &client,
+        "/reset",
+        format!("csrf_token={csrf}&username=bob&code={code}&new_password=bob+new+pw+1&new_password_confirm=bob+new+pw+1"),
+    )
+    .await;
+    assert_eq!(s, Status::SeeOther);
+    assert_eq!(loc.as_deref(), Some("/login"));
+
+    // Bob sees the notice in the bell.
+    page_login(&client, "bob", "bob new pw 1").await;
+    let (s, html) = page(&client, "/notifications").await;
+    assert_eq!(s, Status::Ok);
+    assert!(html.contains("Your password was reset"), "{html}");
+}

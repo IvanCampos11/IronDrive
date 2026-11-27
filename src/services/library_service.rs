@@ -27,6 +27,7 @@ pub struct SetupLibraryResult {
 ///
 /// If disk operations fail after the DB insert, the DB row is rolled back
 /// on a best-effort basis to avoid orphaned state.
+#[cfg(test)]
 pub async fn setup_library(
     pool: &DbPool,
     config: &AppConfig,
@@ -53,6 +54,7 @@ pub struct EncryptionChoice<'a> {
     pub password: Option<&'a str>,
 }
 
+#[cfg(test)]
 impl EncryptionChoice<'static> {
     pub fn server() -> Self {
         Self {

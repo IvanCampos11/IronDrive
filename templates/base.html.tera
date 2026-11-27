@@ -6,7 +6,7 @@
   <meta name="robots" content="noindex, nofollow">
   <title>{% block title %}IronDrive{% endblock %}</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="preload" href="/static/fonts/material-symbols-rounded.woff2?v=11a399e25e" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/material-symbols-rounded.woff2?v=2255747ade" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v() }}">
   <script src="/static/js/theme.js?v={{ asset_v() }}"></script>
   <script src="/static/vendor/htmx.min.js?v=2.0.4" defer></script>

@@ -25,6 +25,7 @@
       <a href="/spaces/{{ space.id }}" class="flex items-center gap-3 min-w-0 after:absolute after:inset-0">
         <span class="ms ms-fill text-primary">workspaces</span>
         <span class="truncate font-medium">{{ space.name }}</span>
+        {% if space.encryption_mode == 'password' %}<span class="ms text-[18px] text-muted" title="Password-protected">lock</span>{% endif %}
       </a>
       <span class="hidden md:block">
         <span class="{% if space.user_permission == 'admin' %}chip-primary{% elif space.user_permission == 'write' %}chip-warning{% else %}chip{% endif %}">
@@ -44,13 +45,26 @@
 </div>
 {% endif %}
 
-<dialog id="create-space-dialog" class="dialog max-w-sm" aria-labelledby="create-space-title" data-new-dialog>
-  <form method="post" action="/spaces/create">
+<dialog id="create-space-dialog" class="dialog max-w-md" aria-labelledby="create-space-title" data-new-dialog>
+  <form method="post" action="/spaces/create" data-conditional>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <h2 id="create-space-title" class="dialog-title">New space</h2>
     <label for="space-name" class="field-label">Name</label>
     <input type="text" id="space-name" name="name" class="field" required maxlength="100" placeholder="e.g. Family photos" autocomplete="off">
     <p class="field-hint">You can share it with people and groups after it's created.</p>
+    <fieldset class="mt-5 space-y-2.5">
+      <legend class="field-label">Protection</legend>
+      <label class="choice"><input type="radio" name="protection" value="standard" checked>
+        <span><span class="choice-title">Standard</span><span class="choice-text block">Protected like your account. Everyone you share it with opens it with their own sign-in.</span></span></label>
+      <label class="choice"><input type="radio" name="protection" value="password">
+        <span><span class="choice-title">Password-protected</span><span class="choice-text block">Everyone, you included, types the space's password to open it. A forgotten password can't be recovered.</span></span></label>
+    </fieldset>
+    <div class="mt-4 grid sm:grid-cols-2 gap-3" data-show-if="protection=password" hidden>
+      <div><label for="space-pw" class="field-label">Space password</label>
+        <input type="password" id="space-pw" name="password" class="field" required minlength="8" autocomplete="new-password"></div>
+      <div><label for="space-pw2" class="field-label">Repeat it</label>
+        <input type="password" id="space-pw2" name="password_confirm" class="field" required minlength="8" autocomplete="new-password" data-match="password"></div>
+    </div>
     <div class="dialog-actions">
       <button type="button" class="btn-text" data-close>Cancel</button>
       <button type="submit" class="btn-text">Create</button>

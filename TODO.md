@@ -3,8 +3,8 @@
 ## Status Snapshot
 
 - Current version: 0.7.0
-- Working areas: auth, personal libraries, groups, spaces, integrity, background jobs, server-rendered UI, quotas, trash, streaming downloads
-- Biggest gaps: user-managed encryption tiers, quotas for group-owned spaces
+- Working areas: auth, personal libraries, groups, spaces, integrity, background jobs, server-rendered UI, quotas, trash, streaming downloads, encryption tiers
+- Biggest gaps: quotas for group-owned spaces, structured request logging, share links
 
 ## Priority Rules
 
@@ -27,15 +27,19 @@
 
 ## (P2)
 
-- [ ] Implement real user-managed encryption tiers end-to-end.
-  - [ ] setup flow for `server` / `failsafe_user` / `pure_user`
-  - [ ] unlock/lock routes and page UX
-  - [ ] passphrase verification and key lifecycle
-- [ ] Implement recovery flow for failsafe mode.
-  - [ ] admin trigger
-  - [ ] audit log lifecycle
-  - [ ] user-visible notification handling
+- [x] Implement real user-managed encryption tiers end-to-end.
+  - [x] setup flow for `server` / `failsafe_user` / `pure_user`, one or two passwords
+  - [x] unlock/lock routes and page UX (locks when the last session ends)
+  - [x] passphrase verification and key lifecycle (password change re-wraps keys)
+  - [x] spaces: members-only (sealed to each member, any tier) and password-protected
+- [x] Implement recovery flow for failsafe mode.
+  - [x] admin trigger (one-time reset code)
+  - [x] audit log lifecycle
+  - [x] user-visible notification handling (bell + Settings)
 - [ ] Add structured request logging and stronger operational diagnostics.
+- [ ] Rotate data keys (re-encrypt files) when protection is raised, so old
+      backups of server-wrapped keys stop working.
+- [ ] Share links for people without an account (key in the URL fragment).
 
 ## (P3)
 
